@@ -6,8 +6,10 @@ Usage:
     python -m airlinesim.cli run <scenario>
     python -m airlinesim.cli demo [--days N]
     python -m airlinesim.cli gui [--port N] [--no-browser]
+    python -m airlinesim.cli probe [--offline] [--year Y --month M]
 
-Scenarios: competitive, integration, crew, deadhead, roster, route, finance
+Scenarios: competitive, integration, crew, deadhead, roster, route, finance,
+           btsdata
 """
 import argparse
 import importlib
@@ -21,6 +23,7 @@ SCENARIOS = {
     "roster":      "airlinesim.scenarios.scenario_roster",
     "route":       "airlinesim.scenarios.scenario_route",
     "finance":     "airlinesim.scenarios.scenario_finance_cabin",
+    "btsdata":     "airlinesim.scenarios.scenario_btsdata",
 }
 
 
@@ -69,6 +72,14 @@ def cmd_gui(args):
 
 
 def main(argv=None):
+    # `probe` forwards every remaining flag to the ingest probe's own parser.
+    # Intercepted before argparse because REMAINDER doesn't reliably keep
+    # option-like tokens away from the top-level parser.
+    args_in = sys.argv[1:] if argv is None else list(argv)
+    if args_in and args_in[0] == "probe":
+        from airlinesim.btsdata.probe import main as probe_main
+        sys.exit(probe_main(args_in[1:]))
+
     parser = argparse.ArgumentParser(prog="airlinesim",
         description="Airline asset & resource management simulator.")
     sub = parser.add_subparsers(dest="cmd")
@@ -82,6 +93,10 @@ def main(argv=None):
     pd = sub.add_parser("demo", help="run the built-in two-carrier demo")
     pd.add_argument("--days", type=int, default=60, help="days to simulate")
     pd.set_defaults(func=cmd_demo)
+
+    sub.add_parser("probe", add_help=False,
+                   help="verify BTS data sources; all flags pass through "
+                        "(try: probe --help)")
 
     pg = sub.add_parser("gui", help="launch the browser-based game GUI")
     pg.add_argument("--port", type=int, default=8765, help="port to serve on")

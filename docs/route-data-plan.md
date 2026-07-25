@@ -141,10 +141,18 @@ Two additive fields on `RouteSpec` carry provenance: `data_tier: str = ""` and
 
 ## Phases
 
-**Phase 0 — verify access (blocking, small).** Confirm the T-100, DB1B and
-OurAirports URLs actually resolve, from a networked machine or a throwaway GitHub
-Actions run. Everything downstream assumes these; none of them could be verified
-from this sandbox. Pin the working URLs into `download.py` with the date checked.
+**Phase 0 — verify access. BUILT (not yet run against live BTS).**
+`.github/workflows/bts-probe.yml` + `airlinesim/btsdata/probe.py`. Two jobs: an
+offline one that proves our own pipeline on fixtures, then a live one that walks
+access → headers → parse → warehouse load → plausibility → cross-source join
+against real BTS and writes an actionable report to the run summary.
+
+Run it with the **Actions → BTS data probe → Run workflow** button. Expect the
+first live run to fail on URL or header guesses — that is the job working, and
+the summary prints the actual headers plus the channel that answered, which is
+what gets pasted back into `schema.py` / `download.py`. Only `verified=True`
+candidates in `download.py` have been confirmed reachable (OurAirports only, so
+far).
 
 **Phase 1 — warehouse + readers (offline-testable).** `schema.py`, `t100.py`,
 `db1b.py`, `airports.py`, `warehouse.py`, plus committed fixtures. Parsing and

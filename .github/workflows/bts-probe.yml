@@ -1,0 +1,117 @@
+name: BTS data probe
+
+# Phase-0 verification for the historic-route-data work (docs/route-data-plan.md).
+#
+# WHY THIS RUNS HERE AND NOT LOCALLY: development sandboxes commonly block
+# bts.gov, so no BTS download URL in airlinesim/btsdata/download.py has ever
+# been confirmed live. Actions runners have open egress, so this job is where we
+# find out. It walks the whole chain — access, header resolution, parse,
+# warehouse load, plausibility, cross-source join — and writes an actionable
+# report to the run summary.
+#
+# Expect the first run to FAIL on header or URL guesses. That is the job doing
+# its work: the summary prints the actual headers and the channel that answered,
+# which is what you paste back into schema.py / download.py.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sources:
+        description: "Comma-separated: t100,db1b_market,db1b_coupon,airports,runways"
+        default: "t100,db1b_market,db1b_coupon,airports,runways"
+      year:
+        description: "Year to probe (T-100 month and DB1B quarter below)"
+        default: "2024"
+      month:
+        description: "T-100 month (1-12)"
+        default: "6"
+      quarter:
+        description: "DB1B quarter (1-4)"
+        default: "2"
+      limit:
+        description: "Max rows parsed per source (0 = no limit). DB1B quarters are huge."
+        default: "200000"
+      max_mb:
+        description: "Per-download size cap in MB"
+        default: "400"
+  # Monthly, so upstream breakage surfaces on its own rather than when someone
+  # next tries to refresh the corpus. T-100 publishes ~2 months in arrears.
+  schedule:
+    - cron: "0 6 5 * *"
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    # Runs first and independently: if the fixture-based pipeline is broken then
+    # a network failure downstream tells us nothing useful.
+    name: Offline pipeline (fixtures)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e .
+      - name: Run the ingest scenario against committed fixtures
+        run: |
+          set -o pipefail
+          python -m airlinesim.cli run btsdata | tee offline.log
+          grep -q "ALL CHECKS PASS" offline.log
+      - name: Confirm the simulation itself is unaffected
+        run: |
+          set -o pipefail
+          python -m airlinesim.cli run integration | tee integration.log
+          grep -q "ALL CHECKS PASS" integration.log
+
+  live:
+    name: Live BTS probe
+    runs-on: ubuntu-latest
+    # Don't bother hitting BTS if our own parsing is broken.
+    needs: offline
+    # A dead upstream must not read as a broken repo: the job reports, the
+    # summary carries the diagnosis, and the workflow stays green unless
+    # something actionable on our side is wrong. Read the summary, not the tick.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e .
+
+      - name: Probe live BTS sources
+        id: probe
+        run: |
+          python -m airlinesim.btsdata.probe \
+            --sources "${{ inputs.sources || 't100,db1b_market,db1b_coupon,airports,runways' }}" \
+            --year "${{ inputs.year || '2024' }}" \
+            --month "${{ inputs.month || '6' }}" \
+            --quarter "${{ inputs.quarter || '2' }}" \
+            --limit "${{ inputs.limit || '200000' }}" \
+            --max-mb "${{ inputs.max_mb || '400' }}" \
+            --db warehouse.sqlite \
+            --report probe-report.json \
+            --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload probe report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bts-probe-report
+          path: |
+            probe-report.json
+          if-no-files-found: warn
+
+      # The warehouse slice is kept so the numbers in the report can be checked
+      # by hand. It is NOT the corpus — distillation and the committed snapshot
+      # are Phase 2/4 (see the plan doc) and deliberately not done here.
+      - name: Upload warehouse sample
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bts-warehouse-sample
+          path: warehouse.sqlite
+          retention-days: 7
+          if-no-files-found: warn

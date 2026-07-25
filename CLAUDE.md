@@ -22,7 +22,9 @@ constraint enforcement — not partial stubs.
       route.py          # market segments, stage economics, equipment/crew suitability
       finance_cabin.py  # cabin classes + seat layout; financing/banking; depreciation
       builder.py        # build_demo_world() / run() convenience entry points
-      cli.py            # `airlinesim` command (list / run / demo)
+      cli.py            # `airlinesim` command (list / run / demo / probe)
+      btsdata/          # DEV-TIME BTS ingest (schema/download/readers/warehouse/
+                        #   probe + fixtures). Never imported at runtime.
       scenarios/        # runnable demos, each with a main()
     pyproject.toml      # pip-installable; console entry point `airlinesim`
 
@@ -58,9 +60,24 @@ constraint enforcement — not partial stubs.
     airlinesim demo --days 60        # built-in two-carrier sim
     airlinesim list                  # list scenarios
     airlinesim run integration       # full-stack pass/fail check
+    airlinesim run btsdata           # BTS ingest check (offline, fixtures)
+    airlinesim probe --offline       # the same ingest probe, raw report
 
 The `integration` scenario is the closest thing to a test suite — it wires every
 subsystem and asserts six invariants. Run it after any engine change.
+
+## Historic route data (in progress)
+
+Route modeling is being extended to use real BTS data with a comparable-route
+fallback. Design and phased plan: `docs/route-data-design.md` and
+`docs/route-data-plan.md`. Read those before touching `btsdata/` or `route.py`
+demand code.
+
+- `airlinesim/btsdata/` is the dev-time ingest and is **never** imported by
+  runtime code — the simulation will read distilled artifacts instead.
+- No BTS download URL has been confirmed live yet; `.github/workflows/bts-probe.yml`
+  is what verifies them, because sandboxes usually block bts.gov.
+- Nothing in the engine consumes this data yet.
 
 ## Known limitations (accurate — don't "fix" silently)
 
