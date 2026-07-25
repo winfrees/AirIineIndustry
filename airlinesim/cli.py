@@ -5,6 +5,7 @@ Usage:
     python -m airlinesim.cli list
     python -m airlinesim.cli run <scenario>
     python -m airlinesim.cli demo [--days N]
+    python -m airlinesim.cli gui [--port N] [--no-browser]
 
 Scenarios: competitive, integration, crew, deadhead, roster, route, finance
 """
@@ -48,6 +49,25 @@ def cmd_demo(args):
     run(engine, days=args.days)
 
 
+def cmd_gui(args):
+    import webbrowser
+    from airlinesim.server import run_server, lan_url
+
+    httpd, hub = run_server(host="0.0.0.0", port=args.port)
+    local = f"http://127.0.0.1:{args.port}"
+    print(f"AirlineSim GUI serving at:\n  {local}\n  {lan_url(args.port)}  (other devices on this network)")
+    print("Press Ctrl+C to stop.")
+    if not args.no_browser:
+        webbrowser.open(local)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        hub.session.stop()
+        httpd.shutdown()
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="airlinesim",
         description="Airline asset & resource management simulator.")
@@ -62,6 +82,11 @@ def main(argv=None):
     pd = sub.add_parser("demo", help="run the built-in two-carrier demo")
     pd.add_argument("--days", type=int, default=60, help="days to simulate")
     pd.set_defaults(func=cmd_demo)
+
+    pg = sub.add_parser("gui", help="launch the browser-based game GUI")
+    pg.add_argument("--port", type=int, default=8765, help="port to serve on")
+    pg.add_argument("--no-browser", action="store_true", help="don't auto-open a browser tab")
+    pg.set_defaults(func=cmd_gui)
 
     args = parser.parse_args(argv)
     if not getattr(args, "func", None):

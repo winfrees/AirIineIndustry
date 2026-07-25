@@ -30,3 +30,6 @@ Homepage = "https://example.invalid/airlinesim"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["airlinesim*"]
+
+[tool.setuptools.package-data]
+airlinesim = ["webui/**/*"]
