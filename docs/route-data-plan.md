@@ -147,12 +147,42 @@ offline one that proves our own pipeline on fixtures, then a live one that walks
 access → headers → parse → warehouse load → plausibility → cross-source join
 against real BTS and writes an actionable report to the run summary.
 
-Run it with the **Actions → BTS data probe → Run workflow** button. Expect the
-first live run to fail on URL or header guesses — that is the job working, and
-the summary prints the actual headers plus the channel that answered, which is
-what gets pasted back into `schema.py` / `download.py`. Only `verified=True`
-candidates in `download.py` have been confirmed reachable (OurAirports only, so
-far).
+Run it with the **Actions → BTS data probe → Run workflow** button.
+
+### First live run — 2026-07-25 ([run 30173843598](https://github.com/winfrees/AirIineIndustry/actions/runs/30173843598))
+
+| Source | Result |
+|---|---|
+| DB1B Market | ✅ 110 MB, headers matched, mean fare **$323.77**, 0.1% rejects |
+| DB1B Coupon | ✅ 258 MB, headers matched |
+| OurAirports airports / runways | ✅ 8,801 airports, 46,849 runways |
+| **T-100 Segment** | ❌ 404 on all three guessed `/PREZIP/` filenames |
+
+So the fare and reference channels are confirmed and pinned `verified=True`. The
+DB1B success is also the naming clue: the working URL is
+`Origin_and_Destination_Survey_DB1BMarket_2024_2.zip`, i.e. PREZIP uses the
+**download UI's** table name plus period, not the internal `RawDataTable` name
+that the T-100 guesses used.
+
+Two fixes came out of that run:
+
+- **`discover.py`** — rather than guess a fourth time, discovery HEAD-sweeps a
+  64-name matrix, scrapes the TranStats index/table/download pages for real
+  `.zip` hrefs, literal `PREZIP/...` strings and form field names, and resolves
+  the ArcGIS mirror through the public ArcGIS search API. `probe.py` runs it
+  automatically when T-100 access fails and, if the sweep finds a working URL,
+  **retries with it in the same run** — so one run can both discover and
+  validate. `--discover-only` (or the `discover_only` workflow input) does just
+  the hunt in ~1 minute instead of re-downloading 370 MB of DB1B.
+- **Per-table reject ceilings.** The run flagged `airport_ref` at 89.7% rejected,
+  which was a false alarm: 76,752 of 85,807 OurAirports rows have no IATA code
+  because the dataset covers every airfield on earth. Filtering them is the
+  point, so the ceiling is now a `SourceTable` field (95% for reference tables,
+  10% for traffic tables) instead of one global threshold that would have masked
+  real problems.
+
+The summary also truncated the T-100 error detail at 300 characters, cutting off
+the useful part; the cap is now 1,200.
 
 **Phase 1 — warehouse + readers (offline-testable).** `schema.py`, `t100.py`,
 `db1b.py`, `airports.py`, `warehouse.py`, plus committed fixtures. Parsing and

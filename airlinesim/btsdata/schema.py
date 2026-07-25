@@ -53,6 +53,14 @@ class SourceTable:
     # a plausibility band per numeric column, checked by the probe:
     #   name -> (low, high) for the column's MEAN over sampled rows
     sane_means: dict = field(default_factory=dict)
+    # Tolerated share of rows dropped by the validator. This is PER TABLE
+    # because a high reject rate means opposite things for different sources:
+    # on a BTS traffic table it signals a parse problem, but on a reference
+    # table like OurAirports — which covers every airfield on earth, including
+    # tens of thousands of IATA-less private strips — filtering most rows out is
+    # the entire point. A single global threshold flagged that as a failure and
+    # would have masked real problems.
+    max_reject_rate: float = 0.10
 
     @property
     def required_columns(self) -> tuple:
@@ -194,6 +202,11 @@ AIRPORT_REF = SourceTable(
             longest_runway_m REAL
         )""",
     sane_means={"lat": (-90.0, 90.0), "lon": (-180.0, 180.0)},
+    # Live run: 76,752 of 85,807 rows have no IATA code and a further ~250 are
+    # heliports/seaplane bases. Dropping ~90% is correct behavior, not a fault —
+    # what matters for this table is the runway coverage of the airports we
+    # actually author routes against, which the probe checks separately.
+    max_reject_rate=0.95,
 )
 
 RUNWAY_REF = SourceTable(

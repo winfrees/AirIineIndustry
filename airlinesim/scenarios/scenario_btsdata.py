@@ -25,15 +25,17 @@ import argparse
 import io
 import os
 import tempfile
+from dataclasses import asdict
 
-from airlinesim.btsdata import probe, readers, schema, warehouse
+from airlinesim.btsdata import discover, probe, readers, schema, warehouse
 
 
 def _args(db, **over):
     ns = argparse.Namespace(
         sources=["t100", "db1b_market", "db1b_coupon", "airports", "runways"],
         year=2024, month=6, quarter=2, limit=None, max_mb=400,
-        db=db, offline=True, fixture_dir=probe.FIXTURE_DIR)
+        db=db, offline=True, discover=False, discover_only=False,
+        fixture_dir=probe.FIXTURE_DIR)
     for k, v in over.items():
         setattr(ns, k, v)
     return ns
@@ -79,6 +81,49 @@ def main():
                        "WHERE iata='ATL'").fetchone()[0]
     conn.close()
 
+    # --- T-100 channel discovery ---------------------------------------
+    # Discovery only executes against the live network, so its parsing and
+    # report rendering are exercised here against synthetic input. A crash in
+    # this path would waste a whole Actions run and lose the diagnosis, which is
+    # the one thing the live job exists to produce.
+    print("\n=== DISCOVERY (parsing + rendering, synthetic input) ===")
+    names = discover.candidate_names(2024, 6)
+    print(f"  PREZIP name sweep would try {len(names)} distinct URLs")
+
+    page = ('<html><title>Transtats</title><body>'
+            '<a href="/PREZIP/T_100_Domestic_Segment_All_Carriers_2024_6.zip">dl</a>'
+            '<form><input name="UserTableName" value="T_100_Domestic_Segment"/></form>'
+            '<select name="t"><option value="T-100 Domestic Segment (All Carriers)">x'
+            '</option></select></body></html>')
+    ex = discover._Extractor()
+    ex.feed(page)
+    mentions = discover._PREZIP_RE.findall(page)
+    print(f"  zip hrefs: {ex.zip_links}")
+    print(f"  PREZIP mentions: {sorted(set(mentions))}")
+    print(f"  form fields: {ex.form_fields}")
+
+    rendered = []
+    for hits in ([discover.UrlResult("https://x/found.zip", 200, 1234, "application/zip")],
+                 []):
+        drep = discover.DiscoveryReport(
+            swept=[discover.UrlResult("https://x/miss.zip", 404, 0, "", "HTTP 404")] + hits,
+            hits=list(hits),
+            pages=[discover.PageResult("https://www.transtats.bts.gov/DL_SelectFields.aspx",
+                                       200, "", "Download", ["/PREZIP/x.zip"],
+                                       ["PREZIP/x.zip"],
+                                       ["input:UserTableName=T_100_Domestic_Segment"],
+                                       ["T-100 Domestic Segment"])],
+            arcgis={"items": [], "fields": [], "query_url": "", "error": "unavailable"},
+            notes=[f"swept {len(names)} PREZIP names, {len(hits)} answered 200"])
+        rendered.append(probe.to_markdown({
+            "generated_at": "t", "mode": "network",
+            "period": {"year": 2024, "month": 6, "quarter": 2},
+            "row_limit": None, "database": "", "table_counts": {},
+            "sources": {}, "checks": [], "discovery": asdict(drep),
+            "ok": bool(hits)}))
+    print(f"  rendered hit/no-hit summaries: "
+          f"{[len(r) for r in rendered]} chars")
+
     print("\n=== CHECKS ===")
     checks = [
         ("offline probe passes every check", first["ok"]),
@@ -91,6 +136,13 @@ def main():
         ("renamed required column is diagnosed, not crashed",
          rows == [] and "passengers" in rep.header.unmatched_required),
         ("header spelling variants still resolve", vrep.header.ok and len(vrows) == 1),
+        ("discovery sweeps a non-trivial name matrix", len(names) >= 40),
+        ("discovery extracts zip hrefs, PREZIP names and form fields",
+         ex.zip_links and mentions and any("UserTableName" in f for f in ex.form_fields)),
+        ("discovery report renders for both hit and no-hit outcomes",
+         all("T-100 channel discovery" in r for r in rendered)),
+        ("per-table reject ceilings differ (reference vs traffic tables)",
+         schema.AIRPORT_REF.max_reject_rate > schema.T100_SEGMENT.max_reject_rate),
     ]
     for label, ok in checks:
         print(f"  [{'PASS' if ok else 'FAIL'}] {label}")

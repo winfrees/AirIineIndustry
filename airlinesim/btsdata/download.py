@@ -54,18 +54,25 @@ class Candidate:
 # ------------------------------------------------------------
 
 def t100_candidates(year: int, month: int) -> list:
-    """T-100 Domestic Segment for one (year, month)."""
+    """
+    T-100 Domestic Segment for one (year, month).
+
+    ALL THREE PREZIP GUESSES BELOW RETURNED 404 on 2026-07-25. They are kept so
+    the sweep doesn't re-report them as unknowns, but the real channel is found
+    by discover.py, which probe.py invokes automatically on failure and then
+    retries with — see docs/route-data-plan.md. T-100 is not droppable: it is
+    the only source of SEATS and departures, hence of load factor, de-censored
+    demand, the economic seat window, and monthly seasonality.
+    """
     return [
-        # The PREZIP naming for T-100 is the least certain thing in this file:
-        # published examples show per-year On-Time files, but T-100 has appeared
-        # as both an all-years and a per-year file under several table names.
-        # We try the plausible spellings and let the probe report which exists.
+        # Confirmed 404 (2026-07-25). PREZIP evidently doesn't use the internal
+        # RawDataTable name for this table, if it carries it at all.
         Candidate("prezip", f"https://transtats.bts.gov/PREZIP/T_T100D_SEGMENT_ALL_CARRIER_{year}.zip",
-                  note="per-year, all carriers"),
+                  note="404 on 2026-07-25 — per-year, all carriers"),
         Candidate("prezip", "https://transtats.bts.gov/PREZIP/T_T100D_SEGMENT_ALL_CARRIER.zip",
-                  note="all years, all carriers — large"),
+                  note="404 on 2026-07-25 — all years, all carriers"),
         Candidate("prezip", f"https://transtats.bts.gov/PREZIP/T_T100D_SEGMENT_US_CARRIER_ONLY_{year}.zip",
-                  note="per-year, US carriers only"),
+                  note="404 on 2026-07-25 — per-year, US carriers only"),
         # The field-picker form. Table_ID 311 is T-100 Segment (All Carriers) in
         # published references; the body below is a best-effort reconstruction.
         Candidate("form", "https://www.transtats.bts.gov/DownLoad_Table.asp?Table_ID=311",
@@ -87,7 +94,12 @@ def db1b_candidates(table: str, year: int, quarter: int) -> list:
     return [
         Candidate("prezip",
                   f"https://transtats.bts.gov/PREZIP/Origin_and_Destination_Survey_DB1B{table}_{year}_{quarter}.zip",
-                  note="documented by multiple public scrapers"),
+                  verified=True,
+                  note="CONFIRMED LIVE 2026-07-25 for 2024 Q2: Market 110 MB, "
+                       "Coupon 258 MB, all required headers matched, mean market "
+                       "fare $323.77. This is also the naming clue for T-100 — "
+                       "PREZIP uses the DOWNLOAD UI's table name plus period, "
+                       "not the internal RawDataTable name."),
     ]
 
 

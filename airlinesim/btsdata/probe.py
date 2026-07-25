@@ -49,7 +49,7 @@ FIXTURE_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 # these to informational rather than failing the job.
 MIN_AIRPORT_COVERAGE = 0.95
 MIN_FARE_COVERAGE = 0.80
-MAX_REJECT_RATE = 0.10
+# Reject-rate ceilings are per table — see SourceTable.max_reject_rate.
 
 # De-censoring assumption, restated here so the probe checks the same rule the
 # ingest will use. T-100 passengers are FLOWN, not demanded; see the plan doc.
@@ -223,8 +223,10 @@ def probe_source(plan: SourcePlan, fetcher, conn, limit) -> tuple:
 
     if res.rows_read:
         rate = 1.0 - (res.rows_kept / res.rows_read)
-        checks.append(Check(f"{res.key}: reject rate", rate <= MAX_REJECT_RATE,
-                            f"{rate:.1%} rejected {res.rejects or ''}"))
+        ceiling = plan.table.max_reject_rate
+        checks.append(Check(f"{res.key}: reject rate", rate <= ceiling,
+                            f"{rate:.1%} rejected (ceiling {ceiling:.0%}) "
+                            f"{res.rejects or ''}"))
 
     # --- stage 5: plausibility of the numbers we parsed ---
     for col, (low, high) in plan.table.sane_means.items():
@@ -340,8 +342,32 @@ def run(args) -> dict:
     warehouse.create_all(conn)
 
     results, checks = {}, []
+    discovery = None
     for name, plan in plans:
         res, ck = probe_source(plan, fetcher, conn, args.limit)
+
+        # T-100 is not optional: it is the only source of SEATS and departures,
+        # so without it there is no load factor, no de-censoring, no seat window
+        # and no monthly seasonality. If its URL guesses failed, go and FIND the
+        # real one rather than reporting a dead end — and if the sweep turns up a
+        # working URL, use it immediately so one run both discovers and validates.
+        if name == "t100" and res.error and not args.offline and args.discover:
+            from airlinesim.btsdata import discover
+            discovery = discover.discover_t100(args.year, args.month)
+            checks.append(Check("t100_segment: channel discovery",
+                                bool(discovery.hits),
+                                "; ".join(discovery.notes) or "no candidates answered",
+                                informational=not discovery.hits))
+            if discovery.hits:
+                found = discovery.hits[0]
+                plan = SourcePlan(plan.table, plan.year, plan.period,
+                                  [download.Candidate("prezip-discovered", found.url,
+                                                      note="found by name sweep")],
+                                  plan.fixture)
+                res, ck = probe_source(plan, fetcher, conn, args.limit)
+                checks.append(Check("t100_segment: retry with discovered URL",
+                                    not res.error, found.url))
+
         results[plan.table.key] = res
         checks.extend(ck)
 
@@ -357,6 +383,7 @@ def run(args) -> dict:
         "table_counts": warehouse.table_counts(conn),
         "sources": {k: asdict(v) for k, v in results.items()},
         "checks": [asdict(c) | {"mark": c.mark} for c in checks],
+        "discovery": asdict(discovery) if discovery else None,
         "ok": not failures,
     }
     conn.close()
@@ -376,7 +403,9 @@ def to_markdown(report: dict) -> str:
            "### Checks", "", "| | Check | Detail |", "|---|---|---|"]
     icon = {"PASS": "✅", "WARN": "⚠️", "FAIL": "❌"}
     for c in report["checks"]:
-        detail = str(c["detail"]).replace("|", "\\|")[:300]
+        # Generous cap: the first live run truncated the T-100 candidate errors
+        # at 300 chars and cut off exactly the part worth reading.
+        detail = str(c["detail"]).replace("|", "\\|")[:1200]
         out.append(f"| {icon[c['mark']]} | {c['name']} | {detail} |")
 
     out += ["", "### Sources", "",
@@ -394,6 +423,57 @@ def to_markdown(report: dict) -> str:
             out += [f"**{k}** missing `{s['unmatched_required']}`", "",
                     "Actual headers:", "", "```",
                     ", ".join(s["headers"][:60]) or "(none)", "```", ""]
+
+    d = report.get("discovery")
+    if d:
+        out += ["", "### T-100 channel discovery", ""]
+        for note in d["notes"]:
+            out.append(f"- {note}")
+        hits = d["hits"]
+        out += ["", f"**PREZIP name sweep — {len(hits)} hit(s):**", ""]
+        if hits:
+            out += ["```"] + [f"{h['url']}  ({h['length']:,} bytes, "
+                              f"{h['content_type']})" for h in hits] + ["```"]
+        else:
+            out += ["_No generated name answered 200._ Statuses returned:", ""]
+            tally = {}
+            for r in d["swept"]:
+                key = r["status"] or r["error"][:40]
+                tally[key] = tally.get(key, 0) + 1
+            out.append(", ".join(f"`{k}` ×{v}" for k, v in sorted(
+                tally.items(), key=lambda kv: str(kv[0]))))
+
+        # Page scrape: real filenames and form fields beat any guess of mine.
+        pages = [p for p in d["pages"] if p["prezip_mentions"] or p["t100_options"]
+                 or p["zip_links"]]
+        if pages:
+            out += ["", "**Referenced on TranStats pages:**", ""]
+            for p in pages:
+                out.append(f"- `{p['url']}` (HTTP {p['status']}) — "
+                           f"{p['title'] or 'untitled'}")
+                for m in p["prezip_mentions"][:12]:
+                    out.append(f"    - PREZIP: `{m}`")
+                for o in p["t100_options"][:12]:
+                    out.append(f"    - option: `{o}`")
+                for z in p["zip_links"][:8]:
+                    out.append(f"    - zip href: `{z}`")
+
+        fields = [f for p in d["pages"] for f in p["form_fields"]
+                  if "DL_SelectFields" in p["url"]]
+        if fields:
+            out += ["", "**Download-form fields (for a correct DownLoad_Table POST):**",
+                    "", "```", ", ".join(fields[:60]), "```"]
+
+        arc = d["arcgis"]
+        if arc:
+            out += ["", "**ArcGIS mirror** (documented REST API; curated subset):", ""]
+            if arc.get("error"):
+                out.append(f"- error: {arc['error']}")
+            for it in arc.get("items", [])[:6]:
+                out.append(f"- {it['title']} ({it['type']}) `{it['url'] or '—'}`")
+            if arc.get("query_url"):
+                out += ["", f"query endpoint: `{arc['query_url']}`", "",
+                        "fields: " + ", ".join(f"`{f}`" for f in arc.get("fields", [])[:40])]
 
     working = {k: (s["channel"], s["url"]) for k, s in report["sources"].items()
                if s["channel"] and s["channel"] != "fixture"}
@@ -420,6 +500,10 @@ def main(argv=None) -> int:
     p.add_argument("--db", default="", help="sqlite path (default: temp dir)")
     p.add_argument("--offline", action="store_true",
                    help="use committed fixtures instead of the network")
+    p.add_argument("--no-discover", dest="discover", action="store_false",
+                   help="don't sweep/scrape for a working T-100 channel on failure")
+    p.add_argument("--discover-only", action="store_true",
+                   help="run T-100 channel discovery and report, nothing else")
     p.add_argument("--fixture-dir", default=FIXTURE_DIR)
     p.add_argument("--report", default="", help="write JSON report here")
     p.add_argument("--summary", default="", help="append markdown here "
@@ -428,7 +512,18 @@ def main(argv=None) -> int:
     args.sources = [s.strip() for s in args.sources.split(",") if s.strip()]
     args.limit = args.limit or None
 
-    report = run(args)
+    if args.discover_only:
+        from airlinesim.btsdata import discover
+        d = discover.discover_t100(args.year, args.month)
+        report = {"generated_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+                  "mode": "discover-only",
+                  "period": {"year": args.year, "month": args.month,
+                             "quarter": args.quarter},
+                  "row_limit": args.limit, "database": "", "table_counts": {},
+                  "sources": {}, "checks": [], "discovery": asdict(d),
+                  "ok": bool(d.hits)}
+    else:
+        report = run(args)
     md = to_markdown(report)
     print(md)
 
