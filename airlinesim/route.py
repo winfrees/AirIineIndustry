@@ -86,26 +86,30 @@ def default_segments(total_per_day: float, business_frac: float = 0.25,
     )
 
 
-# Which cabin each traveler segment's demand converts into. Cabin names as
-# strings (not CabinClass members) so this module doesn't need a hard import
-# of finance_cabin — matches the inline-import convention already used
-# between these modules to avoid cycles.
+# Which cabin(s) each traveler segment's demand converts into. Cabin names
+# as strings (not CabinClass members) so this module doesn't need a hard
+# import of finance_cabin — matches the inline-import convention already
+# used between these modules to avoid cycles.
 #
-# Multiple segments may target the SAME cabin (leisure + connecting both fill
-# economy) — their demand pools simply sum there, the same way segment pools
-# always summed at the whole-route level. A segment maps to exactly ONE
-# cabin: fanning one segment out to several cabins would have each op
-# double-claim the same physical seats in more than one demand pool.
+# A segment's demand is PARTITIONED across its cabins by a fixed fraction
+# (fractions per segment sum to 1.0) rather than fanned out at full size to
+# each — a first-class buyer and a business-class buyer are disjoint slices
+# of the same business-segment pool, not the same traveler double-counted
+# in two pools. Multiple segments may still feed the SAME cabin (leisure +
+# connecting both mostly fill economy); their (fractional) pools simply sum
+# there, the same way segment pools always summed at the whole-route level.
 #
-# Known gap, accepted for now: only 3 segments exist, so FIRST and PREMIUM
-# have no segment source. A carrier configuring those cabins on a segmented
-# route will see legitimate zero demand for them — not silently dropped
-# revenue, just not modeled yet. A 4th segment or a documented split rule
-# is a reasonable follow-up.
-SEGMENT_CABIN = {
-    TravelerSegment.BUSINESS: "BUSINESS",
-    TravelerSegment.LEISURE: "ECONOMY",
-    TravelerSegment.CONNECTING: "ECONOMY",
+# The FIRST:BUSINESS and PREMIUM:ECONOMY splits are chosen to match the
+# existing FIRST/BUSINESS/PREMIUM/ECONOMY demand_share ratios already used
+# as the legacy (non-segmented) fallback in finance_cabin.DEFAULT_SEAT_CLASSES
+# (0.01:0.07 and 0.14:0.78) — reusing the one cabin-mix judgment call this
+# codebase already made, instead of inventing a second, unrelated one.
+# Connecting traffic stays pure economy per its own docstring ("fills
+# remaining economy") — it's feed traffic, not a premium-cabin market.
+SEGMENT_CABIN_SPLIT = {
+    TravelerSegment.BUSINESS: (("FIRST", 0.125), ("BUSINESS", 0.875)),
+    TravelerSegment.LEISURE: (("PREMIUM", 0.1522), ("ECONOMY", 0.8478)),
+    TravelerSegment.CONNECTING: (("ECONOMY", 1.0),),
 }
 
 
@@ -113,11 +117,15 @@ def cabin_demand_on(segments: tuple, cabin_name: str, sim_time_hours: float,
                     price_ratio: float) -> float:
     """
     Pool size for ONE cabin within a route's segment tuple: sums every
-    segment whose demand converts into that cabin, each already scaled by
-    its own seasonality/day-of-week/price response (see SegmentDemand.demand_on).
+    segment's contribution to that cabin (its demand_on(), scaled by that
+    cabin's split fraction for the segment — see SEGMENT_CABIN_SPLIT).
     """
-    return sum(seg.demand_on(sim_time_hours, price_ratio) for seg in segments
-              if SEGMENT_CABIN.get(seg.segment) == cabin_name)
+    total = 0.0
+    for seg in segments:
+        for name, frac in SEGMENT_CABIN_SPLIT.get(seg.segment, ()):
+            if name == cabin_name:
+                total += seg.demand_on(sim_time_hours, price_ratio) * frac
+    return total
 
 
 # ============================================================

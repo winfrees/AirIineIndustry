@@ -807,7 +807,7 @@ class OperationsSubsystem(Subsystem):
 
     def tick(self, world: World, players: list, dt: float, ctx: dict):
         from airlinesim.finance_cabin import CabinClass, DEFAULT_SEAT_CLASSES, SeatLayout
-        from airlinesim.route import SEGMENT_CABIN
+        from airlinesim.route import SEGMENT_CABIN_SPLIT
         day_frac = dt / 24.0
         claims: list[Claim] = []
         ops_with_claims: set = set()
@@ -831,8 +831,8 @@ class OperationsSubsystem(Subsystem):
                     # economy) their demand sums into ONE pool for it instead
                     # of each claiming the same physical seats twice.
                     layout = op.layout or SeatLayout.all_economy(op.plane.spec.max_seats)
-                    fed_cabins = {SEGMENT_CABIN[seg.segment] for seg in dm.segments
-                                 if seg.segment in SEGMENT_CABIN}
+                    fed_cabins = {name for seg in dm.segments
+                                 for name, _ in SEGMENT_CABIN_SPLIT.get(seg.segment, ())}
                     for cabin_name in fed_cabins:
                         cabin = CabinClass[cabin_name]
                         seats_cfg = layout.seats_of(cabin)

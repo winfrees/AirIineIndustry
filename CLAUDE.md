@@ -68,12 +68,15 @@ subsystem and asserts six invariants. Run it after any engine change.
   defaults for game balance, NOT certified figures.
 - Route demand splits into business/leisure/connecting segments, each segment
   is now its own priced, capacity-bound demand pool resolved independently
-  by the arbiter (business segment -> BUSINESS cabin; leisure + connecting
-  -> ECONOMY, summed into one pool). Pool size responds to a
-  capacity-weighted average price signal, so segment elasticity actually
-  bites. FIRST and PREMIUM cabins still have no dedicated segment source
-  (only 3 segments exist) — carriers configuring those cabins on a segmented
-  route see legitimate zero demand for them, not silently dropped revenue.
+  by the arbiter. Each segment's demand is partitioned across its cabin(s) by
+  a fixed fraction (business -> 12.5% FIRST / 87.5% BUSINESS; leisure ->
+  15.2% PREMIUM / 84.8% ECONOMY; connecting -> 100% ECONOMY), so every cabin
+  now has a real segment source with no double-counting. Pool size responds
+  to a capacity-weighted average price signal, so segment elasticity
+  actually bites. The FIRST/BUSINESS and PREMIUM/ECONOMY split fractions are
+  fixed game-balance defaults (matched to the existing
+  `DEFAULT_SEAT_CLASSES` demand_share ratios), not derived per-route or
+  certified figures — see `route.py`'s `SEGMENT_CABIN_SPLIT`.
 - Crew deadheading is direct-to-base only; no multi-hop routing or ferry flights.
 - The bundled AI adjusts price/frequency but doesn't use route suitability to
   right-size equipment.
@@ -81,9 +84,9 @@ subsystem and asserts six invariants. Run it after any engine change.
 
 ## Good next steps (from prior design discussion)
 
-- Give FIRST and PREMIUM cabins a dedicated demand source (a 4th segment, or
-  a documented split rule off an existing one) — see the segment/cabin gap
-  noted above.
+- Make the segment/cabin split fractions (`SEGMENT_CABIN_SPLIT`) tunable per
+  route instead of a single global default, if different markets should have
+  different premium-cabin propensities.
 - Multi-hop / ferry crew positioning.
 - Make the AI read suitability + per-route P&L to choose aircraft and cabins.
 - Resale / used-aircraft market feeding the existing depreciation + retirement.
