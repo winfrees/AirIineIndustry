@@ -34,6 +34,10 @@ on:
       max_mb:
         description: "Per-download size cap in MB"
         default: "400"
+      discover_only:
+        description: "Only hunt for a working T-100 channel and report (fast, ~1 min)"
+        type: boolean
+        default: false
   # Monthly, so upstream breakage surfaces on its own rather than when someone
   # next tries to refresh the corpus. T-100 publishes ~2 months in arrears.
   schedule:
@@ -81,8 +85,22 @@ jobs:
           python-version: "3.11"
       - run: pip install -e .
 
+      # Iterating on the T-100 channel shouldn't re-download ~370 MB of DB1B
+      # every time. This path sweeps PREZIP names, scrapes the TranStats pages
+      # for real filenames and form fields, and resolves the ArcGIS mirror.
+      - name: Hunt for a working T-100 channel (discovery only)
+        if: inputs.discover_only == true
+        run: |
+          python -m airlinesim.btsdata.probe \
+            --discover-only \
+            --year "${{ inputs.year || '2024' }}" \
+            --month "${{ inputs.month || '6' }}" \
+            --report probe-report.json \
+            --summary "$GITHUB_STEP_SUMMARY"
+
       - name: Probe live BTS sources
         id: probe
+        if: inputs.discover_only != true
         run: |
           python -m airlinesim.btsdata.probe \
             --sources "${{ inputs.sources || 't100,db1b_market,db1b_coupon,airports,runways' }}" \
