@@ -1,0 +1,116 @@
+# airlinesim
+
+An airline asset & resource management simulation engine — continuous-time,
+multi-player, and built to be extended. It models the operational and financial
+loop of running competing airlines: acquiring aircraft, configuring cabins,
+staffing crews under duty limits, scheduling maintenance, pricing into a
+structured market, and competing over scarce gates, fuel, and passengers.
+
+Pure standard library — no third-party runtime dependencies.
+
+## Install
+
+From the package directory:
+
+```bash
+pip install .
+```
+
+This installs the `airlinesim` package and an `airlinesim` command.
+
+## Quick start
+
+```python
+from airlinesim import build_demo_world, run
+
+world, engine = build_demo_world()   # two carriers, full subsystem pipeline
+run(engine, days=60)                  # advance and print a summary
+```
+
+Or from the command line:
+
+```bash
+airlinesim demo --days 60        # run the built-in two-carrier demo
+airlinesim list                  # list bundled scenarios
+airlinesim run integration       # run a named scenario
+```
+
+(If you haven't installed, the same works via `python -m airlinesim.cli ...`.)
+
+## What it models
+
+- **Spec-driven entities.** Aircraft, airports, crews, and routes are built from
+  data specs through a `SpecRepository`, so hand-authored data today can be
+  swapped for imported real-world data with no engine changes.
+- **Tiered maintenance.** A/B/C/D checks driven by per-aircraft programs, with
+  the modern A+B fold, the 3C/IL structural escalation, and value-aware
+  retirement (scrap when an overhaul costs more than the depreciated airframe).
+- **Structured route demand.** Business / leisure / connecting traveler segments,
+  each with its own elasticity, seasonality, and day-of-week profile.
+- **Cabin-class revenue.** Seat layouts trade total seats against revenue per
+  seat; each class fills from its own demand pool at its own price elasticity.
+- **Crew as a real constraint.** Duty/rest limits (FAR Part 117-shaped),
+  type-ratings, a pool-based roster, out-of-base positioning, and deadheading
+  on revenue seats.
+- **Financing & banking.** Buy / finance / operating-lease acquisition, amortizing
+  loans, lease rent and expiry, creditworthiness gating, and declining-balance
+  depreciation feeding the balance sheet.
+- **Competition.** A `ResourceArbiter` resolves contention over finite gates,
+  fuel, and passenger demand between carriers each tick.
+
+## Architecture
+
+The simulation advances in ticks. Each tick runs an ordered pipeline of
+subsystems over a shared `World` (contested resources) and many `Player`s
+(owned assets):
+
+```
+RouteSuitability -> Deadhead -> Roster -> Banking -> Finance
+   -> Operations -> CrewPositioning -> Maintenance -> CrewLegality
+```
+
+`World` holds the contested commons (gates, fuel, passenger markets, the clock).
+Each `Player` holds owned assets (fleet, crews, routes, ledger). Competition is
+modeled as contention over world resources resolved by the arbiter — so adding a
+competitor is adding a `Player`, not rewriting allocation logic.
+
+## Bundled scenarios
+
+| name          | shows                                                        |
+|---------------|-------------------------------------------------------------|
+| `competitive` | two carriers competing over a contested hub                 |
+| `integration` | every subsystem in one pipeline, with pass/fail checks      |
+| `crew`        | duty/rest limits capping how much a crew can fly            |
+| `roster`      | pool-based rostering and out-of-base positioning            |
+| `deadhead`    | crews repositioning home on revenue seats                   |
+| `route`       | market structure + equipment/crew suitability validation   |
+| `finance`     | buy vs finance vs lease, with depreciation                  |
+
+## Extending
+
+The intended extension points:
+
+- **New entity data** — add specs and load them through `SpecRepository`.
+- **New constraints** — equipment/crew rules live in `route.py` as data-driven
+  checks; add a rule without touching the engine.
+- **New behavior** — implement a `Subsystem` and insert it into the pipeline.
+
+## Honest limitations
+
+This is a prototype engine, not a production airline model. Notable
+simplifications:
+
+- Maintenance intervals, depreciation rates, and duty limits are
+  industry-*shaped* defaults for game balance, not certified figures. They are
+  data and trivially swappable.
+- Route demand maps conceptually onto cabin classes but the segment-to-cabin
+  revenue link is not yet wired (segments drive total demand; cabin split is
+  separate).
+- Crew positioning deadheads direct-to-base only; multi-hop routing and ferry
+  (positioning) flights are not yet implemented.
+- The bundled AI adjusts price/frequency but does not yet use route suitability
+  to right-size equipment.
+
+## License
+
+MIT.
