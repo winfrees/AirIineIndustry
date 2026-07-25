@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "airlinesim"
+version = "0.1.0"
+description = "An airline asset & resource management simulation engine (continuous-time, multi-player)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [{name = "airlinesim"}]
+keywords = ["simulation", "airline", "game-engine", "economics", "management-sim"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Games/Entertainment :: Simulation",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = []   # pure standard library — no third-party runtime deps
+
+[project.scripts]
+airlinesim = "airlinesim.cli:main"
+
+[project.urls]
+Homepage = "https://example.invalid/airlinesim"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["airlinesim*"]
+
+[tool.setuptools.package-data]
+airlinesim = ["webui/**/*"]

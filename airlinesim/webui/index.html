@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>AirlineSim</title>
+<meta name="theme-color" content="#0b2a42">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="AirlineSim">
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/icons/icon-192.png">
+<link rel="icon" href="/icons/icon-192.png">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<header id="topbar">
+  <div class="brand">AirlineSim</div>
+  <div id="clock">Day <span id="day">0</span></div>
+  <div id="conn" class="pill offline">connecting…</div>
+  <div class="spacer"></div>
+  <div id="controls">
+    <button id="btnPause" class="btn">Pause</button>
+    <label class="speed">
+      speed
+      <input id="speedRange" type="range" min="0.1" max="5" step="0.1" value="0.5">
+      <span id="speedVal">0.5</span>d/s
+    </label>
+    <button id="btnAdvance" class="btn">+1 day</button>
+    <button id="btnSave" class="btn">Save</button>
+    <button id="btnLoad" class="btn">Load</button>
+    <button id="btnNew" class="btn warn">New Game</button>
+  </div>
+</header>
+
+<div id="gameOver" class="banner hidden"></div>
+<div id="toast" class="toast hidden"></div>
+
+<main>
+  <section class="card" id="playersCard">
+    <h2>Carriers</h2>
+    <div id="players"></div>
+  </section>
+
+  <section class="card" id="routesCard">
+    <h2>Routes &amp; Pricing</h2>
+    <div id="routes"></div>
+    <details>
+      <summary>Open a new route</summary>
+      <form id="formOpenRoute" class="form">
+        <select name="route_spec_id" id="routeSelect"></select>
+        <select name="tail_number" id="tailSelect"></select>
+        <input name="price" type="number" min="1" step="1" placeholder="price $" required>
+        <input name="freq" type="number" min="0" step="1" value="1" placeholder="freq/day">
+        <button class="btn" type="submit">Open route</button>
+      </form>
+    </details>
+  </section>
+
+  <section class="card" id="fleetCard">
+    <h2>Fleet</h2>
+    <div id="fleet"></div>
+    <details>
+      <summary>Buy / finance / lease an aircraft</summary>
+      <form id="formAcquire" class="form">
+        <select name="spec_id" id="specSelect"></select>
+        <input name="tail_number" placeholder="tail number" required>
+        <select name="method">
+          <option value="CASH">Cash</option>
+          <option value="FINANCE">Finance</option>
+          <option value="LEASE" selected>Lease</option>
+        </select>
+        <select name="base_iata" id="baseSelect"></select>
+        <button class="btn" type="submit">Acquire</button>
+      </form>
+    </details>
+  </section>
+
+  <section class="card" id="crewCard">
+    <h2>Crew</h2>
+    <div id="crew"></div>
+    <details>
+      <summary>Hire crew</summary>
+      <form id="formHire" class="form">
+        <select name="crew_type">
+          <option value="COCKPIT">Cockpit</option>
+          <option value="CABIN">Cabin</option>
+          <option value="MAINTENANCE">Maintenance</option>
+          <option value="GROUND">Ground</option>
+        </select>
+        <select name="base_iata" id="hireBaseSelect"></select>
+        <input name="headcount" type="number" min="1" step="1" value="2">
+        <input name="cost_per_hour" type="number" min="1" step="1" value="150" placeholder="$/hr">
+        <button class="btn" type="submit">Hire</button>
+      </form>
+    </details>
+  </section>
+
+  <section class="card" id="marketCard">
+    <h2>Airports</h2>
+    <div id="airports"></div>
+  </section>
+
+  <section class="card" id="logCard">
+    <h2>Log</h2>
+    <div id="log"></div>
+  </section>
+</main>
+
+<script src="/app.js"></script>
+</body>
+</html>
