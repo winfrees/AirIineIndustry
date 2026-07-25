@@ -66,8 +66,14 @@ subsystem and asserts six invariants. Run it after any engine change.
 
 - Maintenance intervals, depreciation rates, duty limits are industry-*shaped*
   defaults for game balance, NOT certified figures.
-- Route demand splits into business/leisure/connecting segments, but the
-  segment-to-cabin-class revenue link is not yet wired.
+- Route demand splits into business/leisure/connecting segments, each segment
+  is now its own priced, capacity-bound demand pool resolved independently
+  by the arbiter (business segment -> BUSINESS cabin; leisure + connecting
+  -> ECONOMY, summed into one pool). Pool size responds to a
+  capacity-weighted average price signal, so segment elasticity actually
+  bites. FIRST and PREMIUM cabins still have no dedicated segment source
+  (only 3 segments exist) — carriers configuring those cabins on a segmented
+  route see legitimate zero demand for them, not silently dropped revenue.
 - Crew deadheading is direct-to-base only; no multi-hop routing or ferry flights.
 - The bundled AI adjusts price/frequency but doesn't use route suitability to
   right-size equipment.
@@ -75,7 +81,9 @@ subsystem and asserts six invariants. Run it after any engine change.
 
 ## Good next steps (from prior design discussion)
 
-- Wire segment demand to cabin classes (business segment -> business cabin).
+- Give FIRST and PREMIUM cabins a dedicated demand source (a 4th segment, or
+  a documented split rule off an existing one) — see the segment/cabin gap
+  noted above.
 - Multi-hop / ferry crew positioning.
 - Make the AI read suitability + per-route P&L to choose aircraft and cabins.
 - Resale / used-aircraft market feeding the existing depreciation + retirement.

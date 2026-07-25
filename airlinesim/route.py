@@ -86,6 +86,40 @@ def default_segments(total_per_day: float, business_frac: float = 0.25,
     )
 
 
+# Which cabin each traveler segment's demand converts into. Cabin names as
+# strings (not CabinClass members) so this module doesn't need a hard import
+# of finance_cabin — matches the inline-import convention already used
+# between these modules to avoid cycles.
+#
+# Multiple segments may target the SAME cabin (leisure + connecting both fill
+# economy) — their demand pools simply sum there, the same way segment pools
+# always summed at the whole-route level. A segment maps to exactly ONE
+# cabin: fanning one segment out to several cabins would have each op
+# double-claim the same physical seats in more than one demand pool.
+#
+# Known gap, accepted for now: only 3 segments exist, so FIRST and PREMIUM
+# have no segment source. A carrier configuring those cabins on a segmented
+# route will see legitimate zero demand for them — not silently dropped
+# revenue, just not modeled yet. A 4th segment or a documented split rule
+# is a reasonable follow-up.
+SEGMENT_CABIN = {
+    TravelerSegment.BUSINESS: "BUSINESS",
+    TravelerSegment.LEISURE: "ECONOMY",
+    TravelerSegment.CONNECTING: "ECONOMY",
+}
+
+
+def cabin_demand_on(segments: tuple, cabin_name: str, sim_time_hours: float,
+                    price_ratio: float) -> float:
+    """
+    Pool size for ONE cabin within a route's segment tuple: sums every
+    segment whose demand converts into that cabin, each already scaled by
+    its own seasonality/day-of-week/price response (see SegmentDemand.demand_on).
+    """
+    return sum(seg.demand_on(sim_time_hours, price_ratio) for seg in segments
+              if SEGMENT_CABIN.get(seg.segment) == cabin_name)
+
+
 # ============================================================
 # 2. STAGE-LENGTH ECONOMICS
 # ============================================================

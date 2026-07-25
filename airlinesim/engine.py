@@ -380,6 +380,9 @@ class Claim:
     amount: float            # gates, litres, headcount, or seats requested
     priority: float = 0.0    # higher wins under contention (e.g. willingness to pay)
     payload: object = None   # optional ref (the RouteOp, the plane, etc.)
+    # DEMAND only: the cabin name when the route is segmented (each cabin is
+    # its own priced pool), None for the legacy flat whole-route pool.
+    sub_key: Optional[str] = None
 
 
 @dataclass
@@ -462,56 +465,88 @@ class ResourceArbiter:
 
     # demand: logit market-share split by price attractiveness, with spill
     # reallocation so demand a capped carrier can't seat flows to rivals.
+    # Claims are grouped by (route, sub_key): sub_key is None for the legacy
+    # flat whole-route pool, or a cabin name for a segmented route — each
+    # cabin is then its own priced, capacity-bound market, so cross-carrier
+    # AND cross-cabin (e.g. rival economy fares vs this op's business fare)
+    # competition resolve through the exact same mechanism.
     def _resolve_demand(self, claims: list[Claim],
                         market: "MarketConditions") -> list[Allocation]:
         out = []
-        by_route: dict[str, list[Claim]] = defaultdict(list)
+        groups: dict[tuple, list[Claim]] = defaultdict(list)
         for c in claims:
-            by_route[c.key].append(c)
+            groups[(c.key, c.sub_key)].append(c)
 
-        for route_id, group in by_route.items():
+        for (route_id, sub_key), group in groups.items():
             dm = self.world.demand.get(route_id)
             if not dm:
                 out += [Allocation(c, 0) for c in group]
                 continue
 
-            total_demand = self.pricing.route_demand(dm, self.world.sim_time)
+            # market price signal for THIS pool: capacity-weighted average of
+            # what's on offer (Σ price·seats / Σ seats), vs the route
+            # reference price. A pricier market this tick sizes a smaller
+            # total demand pool — this is what makes segment elasticity (and,
+            # for the flat fallback, nothing — it doesn't use price_ratio)
+            # actually bite, instead of always sizing the pool at price_ratio=1.
+            total_amt = sum(c.amount for c in group)
+            if total_amt > 1e-9:
+                avg_price = sum(c.priority * c.amount for c in group) / total_amt
+            else:
+                avg_price = self.pricing.reference_price
+            price_ratio = (avg_price / self.pricing.reference_price
+                          if self.pricing.reference_price > 0 else 1.0)
 
-            # attractiveness via logit: weight = price^elasticity (elasticity<0,
-            # so a LOWER price yields a HIGHER weight). This is the share kernel.
-            remaining = {id(c): c.amount for c in group}   # seat capacity left
-            weights = {id(c): max(1e-9, c.priority ** self.pricing.elasticity)
-                       for c in group}
-            granted = {id(c): 0.0 for c in group}
+            if sub_key is None:
+                total_demand = self.pricing.route_demand(dm, self.world.sim_time, price_ratio)
+            else:
+                from airlinesim.route import cabin_demand_on
+                total_demand = cabin_demand_on(dm.segments, sub_key,
+                                               self.world.sim_time, price_ratio)
 
-            pool = total_demand
-            # iterate: assign by share, spill the overflow from capped carriers,
-            # re-split the spill among those who still have seats. Converges fast.
-            active = list(group)
-            for _ in range(len(group) + 2):
-                if pool <= 1e-6 or not active:
-                    break
-                tw = sum(weights[id(c)] for c in active)
-                if tw <= 0:
-                    break
-                spill = 0.0
-                still_active = []
-                for c in active:
-                    want = pool * (weights[id(c)] / tw)
-                    can = remaining[id(c)]
-                    take = min(want, can)
-                    granted[id(c)] += take
-                    remaining[id(c)] -= take
-                    if want > can:                 # carrier filled up; rest spills
-                        spill += (want - can)
-                    elif remaining[id(c)] > 1e-6:   # still has seats for spill rounds
-                        still_active.append(c)
-                pool = spill
-                active = still_active
-
-            for c in group:
-                out.append(Allocation(c, granted[id(c)]))
+            out += self._split_pool(group, total_demand)
         return out
+
+    def _split_pool(self, group: list[Claim], total_demand: float) -> list[Allocation]:
+        """
+        Logit market-share split with spill: claims sharing a demand pool
+        (rival carriers on a route, or rival cabins/carriers within one
+        cabin's segment-fed pool) compete by price attractiveness; a claim
+        that fills up spills its remainder to whoever still has room.
+        """
+        # attractiveness via logit: weight = price^elasticity (elasticity<0,
+        # so a LOWER price yields a HIGHER weight). This is the share kernel.
+        remaining = {id(c): c.amount for c in group}   # seat capacity left
+        weights = {id(c): max(1e-9, c.priority ** self.pricing.elasticity)
+                   for c in group}
+        granted = {id(c): 0.0 for c in group}
+
+        pool = total_demand
+        # iterate: assign by share, spill the overflow from capped carriers,
+        # re-split the spill among those who still have seats. Converges fast.
+        active = list(group)
+        for _ in range(len(group) + 2):
+            if pool <= 1e-6 or not active:
+                break
+            tw = sum(weights[id(c)] for c in active)
+            if tw <= 0:
+                break
+            spill = 0.0
+            still_active = []
+            for c in active:
+                want = pool * (weights[id(c)] / tw)
+                can = remaining[id(c)]
+                take = min(want, can)
+                granted[id(c)] += take
+                remaining[id(c)] -= take
+                if want > can:                 # carrier filled up; rest spills
+                    spill += (want - can)
+                elif remaining[id(c)] > 1e-6:   # still has seats for spill rounds
+                    still_active.append(c)
+            pool = spill
+            active = still_active
+
+        return [Allocation(c, granted[id(c)]) for c in group]
 
 
 # ============================================================
@@ -771,11 +806,13 @@ class OperationsSubsystem(Subsystem):
         self.maint = maint
 
     def tick(self, world: World, players: list, dt: float, ctx: dict):
+        from airlinesim.finance_cabin import CabinClass, DEFAULT_SEAT_CLASSES, SeatLayout
+        from airlinesim.route import SEGMENT_CABIN
         day_frac = dt / 24.0
         claims: list[Claim] = []
+        ops_with_claims: set = set()
 
         # 1) COLLECT claims from every active route op across all players
-        op_index: dict[int, RouteOp] = {}
         for p in players:
             for op in p.route_ops:
                 if op.plane.retired or not op.plane.in_service:
@@ -785,12 +822,35 @@ class OperationsSubsystem(Subsystem):
                     op.last_eff_freq = 0.0
                     op.last_pax = 0.0
                     continue
-                seats = op.plane.spec.max_seats * op.daily_frequency * day_frac
-                # demand claim: priority carries the price (arbiter reads it)
-                dc = Claim(p.player_id, ResourceKind.DEMAND, op.spec.spec_id,
-                           amount=seats, priority=op.ticket_price, payload=op)
-                op_index[id(dc)] = op
-                claims.append(dc)
+
+                dm = world.demand.get(op.spec.spec_id)
+                if dm and dm.segments:
+                    # one priced claim per (op, cabin fed by a segment) — NOT
+                    # per segment. Capacity belongs to a cabin; if two
+                    # segments target the same cabin (leisure + connecting ->
+                    # economy) their demand sums into ONE pool for it instead
+                    # of each claiming the same physical seats twice.
+                    layout = op.layout or SeatLayout.all_economy(op.plane.spec.max_seats)
+                    fed_cabins = {SEGMENT_CABIN[seg.segment] for seg in dm.segments
+                                 if seg.segment in SEGMENT_CABIN}
+                    for cabin_name in fed_cabins:
+                        cabin = CabinClass[cabin_name]
+                        seats_cfg = layout.seats_of(cabin)
+                        if seats_cfg <= 0:
+                            continue
+                        seat_capacity = seats_cfg * op.daily_frequency * day_frac
+                        fare = op.ticket_price * DEFAULT_SEAT_CLASSES[cabin].price_multiplier
+                        claims.append(Claim(p.player_id, ResourceKind.DEMAND, op.spec.spec_id,
+                                            amount=seat_capacity, priority=fare,
+                                            payload=(op, cabin), sub_key=cabin_name))
+                        ops_with_claims.add(id(op))
+                else:
+                    # legacy flat pool (route has no segments configured)
+                    seats = op.plane.spec.max_seats * op.daily_frequency * day_frac
+                    claims.append(Claim(p.player_id, ResourceKind.DEMAND, op.spec.spec_id,
+                                        amount=seats, priority=op.ticket_price, payload=op))
+                    ops_with_claims.add(id(op))
+
                 # gate claim: one gate per frequency, priority = willingness to pay (price)
                 claims.append(Claim(p.player_id, ResourceKind.GATE, op.spec.dest_iata,
                                     amount=op.daily_frequency, priority=op.ticket_price, payload=op))
@@ -805,22 +865,29 @@ class OperationsSubsystem(Subsystem):
 
         # 3) APPLY outcomes
         alloc_by_op_demand: dict[int, float] = {}
+        alloc_by_op_class: dict[tuple, float] = defaultdict(float)
         alloc_by_op_fuel: dict[int, float] = defaultdict(float)
         gates_granted: dict[int, float] = {}
         for a in allocations:
+            if a.claim.kind == ResourceKind.DEMAND:
+                payload = a.claim.payload
+                if isinstance(payload, tuple):
+                    op, cabin = payload
+                    alloc_by_op_class[(id(op), cabin.name)] += a.granted
+                elif isinstance(payload, RouteOp):
+                    alloc_by_op_demand[id(payload)] = a.granted
+                continue
             op = a.claim.payload
             if not isinstance(op, RouteOp):
                 continue
-            if a.claim.kind == ResourceKind.DEMAND:
-                alloc_by_op_demand[id(op)] = a.granted
-            elif a.claim.kind == ResourceKind.FUEL:
+            if a.claim.kind == ResourceKind.FUEL:
                 alloc_by_op_fuel[id(op)] += a.granted
             elif a.claim.kind == ResourceKind.GATE:
                 gates_granted[id(op)] = a.granted
 
         for p in players:
             for op in p.route_ops:
-                if id(op) not in alloc_by_op_demand:
+                if id(op) not in ops_with_claims:
                     continue
                 # effective frequency = min(desired, gates actually granted).
                 # A denied gate means that flight physically can't operate.
@@ -877,48 +944,69 @@ class OperationsSubsystem(Subsystem):
                             crew.duty.log_flight(world.sim_time, flown_fh)
                             crew_flew.add(id(crew))
 
-                pax = alloc_by_op_demand[id(op)]
-                # carriage is bounded by the seats the OPERABLE flights provide
-                pax *= freq_ratio
-                op.last_pax = pax
-
-                # --- CLASS-AWARE REVENUE with per-class price elasticity ---
-                # Each class draws from its demand_share of the carrier's won
-                # demand, THEN scales that by its own price response. Business is
-                # inelastic (raising fares barely dents demand); economy is elastic
-                # (the same % hike sheds far more). Class fare = base_fare * mult,
-                # measured against a class reference (route reference * mult).
-                from airlinesim.finance_cabin import (CabinClass, DEFAULT_SEAT_CLASSES,
-                                           SeatLayout)
                 layout = op.layout or SeatLayout.all_economy(op.plane.spec.max_seats)
-                classes = DEFAULT_SEAT_CLASSES
                 base_fare = op.ticket_price
-                route_ref = self.pricing.reference_price
                 revenue = 0.0
                 class_pax = {}
                 total_seats_offered = 0.0
                 # deadheading crew occupy economy seats, removing them from sale
                 dh_seats = getattr(op, "deadhead_seats", 0)
-                for cc, cspec in classes.items():
-                    seats_cfg = layout.seats_of(cc)
-                    if seats_cfg <= 0:
-                        continue
-                    seat_capacity = seats_cfg * eff_freq * day_frac
-                    # crew deadhead in economy: those seats can't be sold
-                    if cc == CabinClass.ECONOMY and dh_seats > 0:
-                        seat_capacity = max(0.0, seat_capacity - dh_seats)
-                    total_seats_offered += seat_capacity
-                    fare = base_fare * cspec.price_multiplier
-                    class_ref = route_ref * cspec.price_multiplier
-                    # per-class price response: (fare/ref)^elasticity. elasticity<0,
-                    # so fare above ref -> factor<1 (demand falls). Inelastic classes
-                    # (business/first) barely move; economy swings a lot.
-                    price_factor = (fare / class_ref) ** cspec.elasticity \
-                        if class_ref > 0 else 1.0
-                    class_demand = pax * cspec.demand_share * price_factor
-                    seated = min(seat_capacity, class_demand)
-                    revenue += seated * fare
-                    class_pax[cc.name] = seated
+                dm = world.demand.get(op.spec.spec_id)
+
+                if dm and dm.segments:
+                    # --- SEGMENT-DRIVEN REVENUE ---
+                    # The arbiter already resolved each cabin's allocation
+                    # against a segment-sized, price-elastic pool, in
+                    # competition with rival carriers (and rival cabins on
+                    # this same op, for a cabin fed by multiple segments) —
+                    # no local re-splitting needed, just apply freq_ratio for
+                    # flights that ended up gate/crew-limited.
+                    for cc, cspec in DEFAULT_SEAT_CLASSES.items():
+                        seats_cfg = layout.seats_of(cc)
+                        if seats_cfg <= 0:
+                            continue
+                        seat_capacity = seats_cfg * eff_freq * day_frac
+                        if cc == CabinClass.ECONOMY and dh_seats > 0:
+                            seat_capacity = max(0.0, seat_capacity - dh_seats)
+                        total_seats_offered += seat_capacity
+                        granted = alloc_by_op_class.get((id(op), cc.name), 0.0)
+                        seated = min(seat_capacity, granted * freq_ratio)
+                        fare = base_fare * cspec.price_multiplier
+                        revenue += seated * fare
+                        class_pax[cc.name] = seated
+                else:
+                    # --- LEGACY FLAT-POOL REVENUE (no segments configured) ---
+                    # Each class draws from its demand_share of the carrier's
+                    # won demand, THEN scales that by its own price response.
+                    # Business is inelastic (raising fares barely dents
+                    # demand); economy is elastic (the same % hike sheds far
+                    # more). Class fare = base_fare * mult, measured against a
+                    # class reference (route reference * mult).
+                    pax = alloc_by_op_demand.get(id(op), 0.0)
+                    # carriage is bounded by the seats the OPERABLE flights provide
+                    pax *= freq_ratio
+                    route_ref = self.pricing.reference_price
+                    for cc, cspec in DEFAULT_SEAT_CLASSES.items():
+                        seats_cfg = layout.seats_of(cc)
+                        if seats_cfg <= 0:
+                            continue
+                        seat_capacity = seats_cfg * eff_freq * day_frac
+                        # crew deadhead in economy: those seats can't be sold
+                        if cc == CabinClass.ECONOMY and dh_seats > 0:
+                            seat_capacity = max(0.0, seat_capacity - dh_seats)
+                        total_seats_offered += seat_capacity
+                        fare = base_fare * cspec.price_multiplier
+                        class_ref = route_ref * cspec.price_multiplier
+                        # per-class price response: (fare/ref)^elasticity. elasticity<0,
+                        # so fare above ref -> factor<1 (demand falls). Inelastic classes
+                        # (business/first) barely move; economy swings a lot.
+                        price_factor = (fare / class_ref) ** cspec.elasticity \
+                            if class_ref > 0 else 1.0
+                        class_demand = pax * cspec.demand_share * price_factor
+                        seated = min(seat_capacity, class_demand)
+                        revenue += seated * fare
+                        class_pax[cc.name] = seated
+
                 op.last_class_pax = class_pax
                 actual_pax = sum(class_pax.values())
                 op.last_pax = actual_pax
