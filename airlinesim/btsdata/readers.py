@@ -78,38 +78,47 @@ def resolve_headers(table, headers) -> HeaderReport:
     return rep
 
 
-def read_rows(table, stream, limit: int | None = None, validator=None):
+def iter_rows(table, stream, limit: int | None = None, validator=None):
     """
-    Parse `stream` as CSV into normalized dicts keyed by warehouse column name.
+    Stream `stream` as CSV, yielding normalized dicts keyed by warehouse column
+    name. Yields (report, row) pairs is avoided deliberately: instead the caller
+    passes in a ParseReport-carrying generator protocol — see read_rows for the
+    buffered variant and ingest.py for the streaming one.
 
-    Returns (rows, ParseReport). `limit` caps rows for probe/smoke runs — a DB1B
-    coupon quarter is tens of millions of rows and the probe only needs enough to
-    prove the shape. Truncation is recorded, never silent.
+    Generator form exists because a full-year T-100 export is ~250k rows and a
+    DB1B coupon quarter is tens of millions; materializing those as a list of
+    dicts is gratuitous memory pressure.
+
+    Usage:
+        gen = iter_rows(table, stream, validator=v)
+        prep = next(gen)          # the ParseReport, yielded FIRST
+        for row in gen: ...       # rows; prep updates as you consume
     """
     reader = csv.reader(stream)
     try:
         headers = next(reader)
     except StopIteration:
-        return [], ParseReport(header=HeaderReport(table=table.key))
+        yield ParseReport(header=HeaderReport(table=table.key))
+        return
 
     hrep = resolve_headers(table, headers)
     prep = ParseReport(header=hrep)
+    yield prep
     if not hrep.ok:
-        # Without the required columns there is nothing meaningful to parse;
-        # return the header diagnosis so the caller can report it.
-        return [], prep
+        # Without the required columns there is nothing meaningful to parse; the
+        # caller has the header diagnosis from the report already yielded.
+        return
 
     index = {col.name: headers.index(hrep.mapped[col.name])
              for col in table.columns if col.name in hrep.mapped}
     kinds = {col.name: col.kind for col in table.columns}
     required = [c.name for c in table.required_columns]
 
-    rows = []
     for raw in reader:
         prep.rows_read += 1
-        if limit is not None and len(rows) >= limit:
+        if limit is not None and prep.rows_kept >= limit:
             prep.truncated = True
-            break
+            return
         if len(raw) < len(headers):
             prep.reject("short row")
             continue
@@ -123,9 +132,18 @@ def read_rows(table, stream, limit: int | None = None, validator=None):
             if why:
                 prep.reject(why)
                 continue
-        rows.append(row)
         prep.rows_kept += 1
-    return rows, prep
+        yield row
+
+
+def read_rows(table, stream, limit: int | None = None, validator=None):
+    """
+    Buffered form of iter_rows: returns (rows, ParseReport). Convenient for the
+    probe, which samples a bounded slice; use iter_rows for a full ingest.
+    """
+    gen = iter_rows(table, stream, limit=limit, validator=validator)
+    prep = next(gen)
+    return list(gen), prep
 
 
 # ------------------------------------------------------------

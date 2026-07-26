@@ -24,7 +24,8 @@ constraint enforcement — not partial stubs.
       builder.py        # build_demo_world() / run() convenience entry points
       cli.py            # `airlinesim` command (list / run / demo / probe)
       btsdata/          # DEV-TIME BTS ingest (schema/download/readers/warehouse/
-                        #   probe + fixtures). Never imported at runtime.
+                        #   ingest/discover/probe + fixtures). Never imported at
+                        #   runtime.
       scenarios/        # runnable demos, each with a main()
     pyproject.toml      # pip-installable; console entry point `airlinesim`
 
@@ -62,6 +63,8 @@ constraint enforcement — not partial stubs.
     airlinesim run integration       # full-stack pass/fail check
     airlinesim run btsdata           # BTS ingest check (offline, fixtures)
     airlinesim probe --offline       # the same ingest probe, raw report
+    airlinesim ingest --t100-market T_T100D_MARKET_ALL_CARRIER.zip \
+        --fetch-airport-ref          # load a real export into the warehouse
 
 The `integration` scenario is the closest thing to a test suite — it wires every
 subsystem and asserts six invariants. Run it after any engine change.
@@ -75,8 +78,16 @@ demand code.
 
 - `airlinesim/btsdata/` is the dev-time ingest and is **never** imported by
   runtime code — the simulation will read distilled artifacts instead.
-- No BTS download URL has been confirmed live yet; `.github/workflows/bts-probe.yml`
-  is what verifies them, because sandboxes usually block bts.gov.
+- **T-100 has no stable URL.** It is not in `/PREZIP/` at all; it comes out of the
+  TranStats field-picker as a per-request session export. So the working pattern
+  is export by hand, then `airlinesim ingest --t100-market <zip>`. DB1B and
+  OurAirports URLs *are* confirmed live and pinned in `download.py`.
+- **T-100 Market ≠ Segment.** Market (what's loaded today) has passengers but no
+  SEATS/departures/aircraft type, so load factor, de-censored demand and the
+  seat window are unavailable until a Segment export lands.
+- Warehouse state: T-100 Market 2023–2025 (749,662 rows, 36 monthly partitions,
+  43,170 directional pairs) + OurAirports. Fares (DB1B) not yet loaded.
+- The warehouse is derived and gitignored — rebuild with `airlinesim ingest`.
 - Nothing in the engine consumes this data yet.
 
 ## Known limitations (accurate — don't "fix" silently)

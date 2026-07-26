@@ -79,6 +79,9 @@ def main(argv=None):
     if args_in and args_in[0] == "probe":
         from airlinesim.btsdata.probe import main as probe_main
         sys.exit(probe_main(args_in[1:]))
+    if args_in and args_in[0] == "ingest":
+        from airlinesim.btsdata.ingest import main as ingest_main
+        sys.exit(ingest_main(args_in[1:]))
 
     parser = argparse.ArgumentParser(prog="airlinesim",
         description="Airline asset & resource management simulator.")
@@ -97,6 +100,9 @@ def main(argv=None):
     sub.add_parser("probe", add_help=False,
                    help="verify BTS data sources; all flags pass through "
                         "(try: probe --help)")
+    sub.add_parser("ingest", add_help=False,
+                   help="load BTS exports into the SQLite warehouse "
+                        "(try: ingest --help)")
 
     pg = sub.add_parser("gui", help="launch the browser-based game GUI")
     pg.add_argument("--port", type=int, default=8765, help="port to serve on")

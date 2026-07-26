@@ -7,3 +7,8 @@ dist/
 venv/
 .pytest_cache/
 .DS_Store
+
+# BTS warehouse (derived, rebuildable from exports — never commit)
+*.sqlite
+*.sqlite-journal
+warehouse.sqlite
