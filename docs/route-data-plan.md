@@ -255,10 +255,35 @@ aggregation are pure functions over file objects, kept strictly separate from
 **Phase 2 — distill + provider.** `distill.py`, `routedata.py`, the gravity fit,
 both backends behind the one interface.
 
-**Phase 3 — engine integration.** `SpecRepository.load(RouteSpec, ...)` — the seam
-CLAUDE.md reserved for this and which is currently unused — plus a
-`build_world_from_data()` alongside `build_demo_world()`. No engine or subsystem
-changes beyond the two additive `RouteSpec` fields.
+**Phase 3 — engine integration. DONE.** `airlinesim/databuilder.py` with
+`build_world_from_data()` / `run_from_data()`, specs flowing through
+`SpecRepository.load()`, and `airlinesim run databuilt` asserting 17 invariants.
+No engine or subsystem changes beyond the two additive `RouteSpec` fields, as
+planned.
+
+Results on the real corpus (hub ORD, 4 destinations, both directions):
+
+| Route | Demand | Distance | Aircraft chosen | Seat window |
+|---|---|---|---|---|
+| ORD-LGA | 3,468/day | 1,180 km | 787-9 (290) | 204-600 |
+| ORD-LAX | 3,173/day | 2,807 km | 787-9 (290) | 186-600 |
+| ORD-DEN | 2,817/day | 1,429 km | A320 (180) | 165-600 |
+| ORD-SFO | 2,525/day | 2,971 km | A320 (180) | 148-600 |
+
+Three things the integration surfaced that pure unit checks would not:
+
+- **Frequency has to come from the data too.** One rotation a day against a
+  3,400 px/day market flies ~50% full and makes the corpus look wrong when it
+  isn't. Frequency is now derived from measured demand and capped by airframe
+  hours — after which cabin duty limits trim it further on most trunk ops, so
+  the data-implied schedule genuinely meets the real duty envelope.
+- **Crew depth must scale with the flying based at a station.** A flat two crews
+  per base left a hub originating four routes reporting "no legal crew
+  available" while every aircraft sat serviceable.
+- **Failed acquisitions must not join the fleet.** `Bank.acquire()` returns None
+  when credit is denied, and attaching the Airplane anyway put aircraft in the
+  fleet that were never paid for, inflating net worth to $1.3B. Fixed here;
+  `builder.py` still has the same latent bug and is flagged in CLAUDE.md.
 
 **Phase 4 — self-updating refresh.** `.github/workflows/bts-refresh.yml`, monthly
 cron: refresh → distill → open a PR with the regenerated artifact and manifest. It

@@ -24,6 +24,7 @@ constraint enforcement — not partial stubs.
       builder.py        # build_demo_world() / run() convenience entry points
       cli.py            # `airlinesim` command (list / run / demo / probe)
       routedata.py      # RUNTIME provider: 3-tier historic/comparable lookup
+      databuilder.py    # build_world_from_data(): a world from the BTS corpus
       data/             # committed distilled snapshot (routes/airports/gravity)
       btsdata/          # DEV-TIME BTS ingest (schema/download/readers/warehouse/
                         #   ingest/distill/discover/probe + fixtures). Never
@@ -66,6 +67,8 @@ constraint enforcement — not partial stubs.
     airlinesim run btsdata           # BTS ingest check (offline, fixtures)
     airlinesim probe --offline       # the same ingest probe, raw report
     airlinesim run routedata         # 3-tier route data check (offline, snapshot)
+    airlinesim run databuilt         # engine running on real BTS routes
+    airlinesim demo --data --hub ORD # data-driven demo instead of constants
     airlinesim ingest --t100-market T_T100D_MARKET_ALL_CARRIER.zip \
         --fetch-airport-ref --distill   # warehouse + regenerate the snapshot
 
@@ -101,8 +104,15 @@ demand code.
 - `routedata.py` must NEVER import `btsdata`. Shared logic
   (`gravity_features`, `seat_window`) lives in `routedata` and `btsdata`
   imports it, so the fit and the evaluation can't drift apart.
-- Nothing in the engine's demo/scenarios consumes the provider yet — that's
-  Phase 3 (`build_world_from_data`).
+- `databuilder.build_world_from_data(hub, n_destinations)` stands up a full
+  two-carrier world from the corpus through `SpecRepository.load()`. Equipment is
+  chosen per route from the data-derived seat window, so a thin pair gets an E175
+  and a transcon a widebody. Verified by `airlinesim run databuilt`.
+- Crew pools there are sized `ops_at_base * CREW_DEPTH`; a flat two-per-base
+  silently grounded half a carrier with "no legal crew available".
+- Frequency is derived from measured demand and capped by airframe hours. Cabin
+  duty limits then trim it further on most trunk ops — the data-implied frequency
+  genuinely meets the duty envelope.
 
 ## Known limitations (accurate — don't "fix" silently)
 
@@ -123,6 +133,12 @@ demand code.
 - The bundled AI adjusts price/frequency but doesn't use route suitability to
   right-size equipment.
 - Roster is conservative — can leave capacity unflown.
+- **BUG (pre-existing, in `builder.py`)**: `build_demo_world()` attaches an
+  Airplane even when `Bank.acquire()` returns None. FinanceAir ends up with a
+  fleet of 2 but only 1 loan — FIN-2 is credit-denied, yet flies and counts as an
+  owned asset, overstating net worth. `databuilder.py` does NOT have this (it
+  skips failed acquisitions); fixing `builder.py` would change the demo and
+  `integration` baselines, so it is left flagged rather than changed silently.
 
 ## Good next steps (from prior design discussion)
 

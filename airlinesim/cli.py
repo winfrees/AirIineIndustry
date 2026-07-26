@@ -9,7 +9,7 @@ Usage:
     python -m airlinesim.cli probe [--offline] [--year Y --month M]
 
 Scenarios: competitive, integration, crew, deadhead, roster, route, finance,
-           btsdata, routedata
+           btsdata, routedata, databuilt
 """
 import argparse
 import importlib
@@ -25,6 +25,7 @@ SCENARIOS = {
     "finance":     "airlinesim.scenarios.scenario_finance_cabin",
     "btsdata":     "airlinesim.scenarios.scenario_btsdata",
     "routedata":   "airlinesim.scenarios.scenario_routedata",
+    "databuilt":   "airlinesim.scenarios.scenario_databuilt",
 }
 
 
@@ -48,6 +49,10 @@ def cmd_run(args):
 
 
 def cmd_demo(args):
+    if getattr(args, "data", False):
+        from airlinesim.databuilder import run_from_data
+        run_from_data(days=args.days, hub=args.hub)
+        return
     from airlinesim import build_demo_world, run
     _, engine = build_demo_world()
     run(engine, days=args.days)
@@ -96,6 +101,10 @@ def main(argv=None):
 
     pd = sub.add_parser("demo", help="run the built-in two-carrier demo")
     pd.add_argument("--days", type=int, default=60, help="days to simulate")
+    pd.add_argument("--data", action="store_true",
+                    help="build the world from the BTS corpus instead of "
+                         "hand-authored constants")
+    pd.add_argument("--hub", default="ORD", help="hub airport for --data")
     pd.set_defaults(func=cmd_demo)
 
     sub.add_parser("probe", add_help=False,
