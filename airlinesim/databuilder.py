@@ -248,7 +248,8 @@ def build_world_from_data(hub: str = "ORD", n_destinations: int = 4,
             ("FIN", "FinanceAir", AcquisitionMethod.FINANCE, loan, True),
             ("LSE", "LeaseLine", AcquisitionMethod.OPERATING_LEASE, lease, False)):
         engine.add_player(_carrier(world, bank, pid, name, method, terms,
-                                   ops_plan, codes, premium, cash))
+                                   ops_plan, codes, premium, cash, provider,
+                                   pricing.reference_price))
 
     report = {
         "hub": hub,
@@ -271,10 +272,26 @@ def build_world_from_data(hub: str = "ORD", n_destinations: int = 4,
                    for rs, ac in ops_plan],
         "skipped": skipped,
         "corpus_gaps": provider.manifest.get("known_gaps", []),
+        "pricing": {f"{rs.origin_iata}-{rs.dest_iata}":
+                    provider.suggested_price(rs.origin_iata, rs.dest_iata,
+                                             default=pricing.reference_price)
+                    for rs, _ac in ops_plan},
         "not_from_data": [
-            "ticket price and elasticity (no DB1B fares loaded — engine defaults)",
-            "traveler-segment mix (route.py global default, not per-route)",
-            "day-of-week profile (T-100 is monthly; no trip-purpose data)",
+            n for n in (
+                ("ticket price (no DB1B fare for these pairs — engine default)"
+                 if not any(provider.observation(rs.origin_iata,
+                                                 rs.dest_iata).has_fare
+                            for rs, _ in ops_plan) else ""),
+                ("traveler-segment mix (route.py global default — no DB1B "
+                 "coupons loaded)"
+                 if not any(provider.observation(rs.origin_iata,
+                                                 rs.dest_iata).has_connecting
+                            for rs, _ in ops_plan) else ""),
+                "business-vs-leisure split (a split of non-connecting demand, "
+                "not a measurement — no source carries trip purpose)",
+                "day-of-week profile (T-100 is monthly)",
+                "price elasticity (engine default)",
+            ) if n
         ],
     }
 
@@ -292,7 +309,7 @@ def build_world_from_data(hub: str = "ORD", n_destinations: int = 4,
 
 
 def _carrier(world, bank, pid, name, method, terms, ops_plan, bases,
-             premium, cash):
+             premium, cash, provider, default_price):
     p = Player(pid, name)
     p.ledger = Ledger(cash=cash)
     owned = method != AcquisitionMethod.OPERATING_LEASE
@@ -346,9 +363,14 @@ def _carrier(world, bank, pid, name, method, terms, ops_plan, bases,
                 headcount=4, owner_id=pid, home_iata=base))
 
     for rs, ac, plane in acquired:
+        # Price from measured DB1B fares when the corpus has them, otherwise the
+        # engine's reference price — never a hardcoded guess that silently
+        # contradicts the data.
+        price, _src = provider.suggested_price(
+            rs.origin_iata, rs.dest_iata, default=default_price, premium=premium)
         p.route_ops.append(RouteOp(
             spec=rs, plane=plane, cockpit=None, cabin=None,
-            ticket_price=220.0 if premium else 195.0,
+            ticket_price=price,
             daily_frequency=daily_frequency(rs, ac), owner_id=pid,
             layout=_layout(ac, premium)))
     return p

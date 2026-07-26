@@ -130,10 +130,26 @@ class RouteObservation:
     min_viable_seats: int = 0
     max_viable_seats: int = 0
     min_runway_m: float = 0.0
+    # Fares from DB1B nonstop markets; 0.0 means no fare data for this pair.
+    mean_fare: float = 0.0
+    fare_p25: float = 0.0
+    fare_median: float = 0.0
+    fare_p75: float = 0.0
+    # Measured share of this SEGMENT's passengers connecting onward.
+    # -1.0 means unknown, which is NOT the same as zero connecting traffic.
+    connecting_share: float = -1.0
 
     @property
     def has_capacity(self) -> bool:
         return self.seats_per_day > 0
+
+    @property
+    def has_fare(self) -> bool:
+        return self.mean_fare > 0
+
+    @property
+    def has_connecting(self) -> bool:
+        return self.connecting_share >= 0.0
 
 
 @dataclass(frozen=True)
@@ -259,7 +275,12 @@ class RouteDataProvider:
             monthly=monthly,
             min_viable_seats=int(_num(row.get("min_viable_seats"))),
             max_viable_seats=int(_num(row.get("max_viable_seats"))),
-            min_runway_m=_num(row.get("min_runway_m")))
+            min_runway_m=_num(row.get("min_runway_m")),
+            mean_fare=_num(row.get("mean_fare")),
+            fare_p25=_num(row.get("fare_p25")),
+            fare_median=_num(row.get("fare_median")),
+            fare_p75=_num(row.get("fare_p75")),
+            connecting_share=_num(row.get("connecting_share"), -1.0))
 
     def great_circle_km(self, a: AirportRecord, b: AirportRecord) -> float:
         la1, lo1, la2, lo2 = map(math.radians, (a.lat, a.lon, b.lat, b.lon))
@@ -362,10 +383,15 @@ class RouteDataProvider:
         Build a RouteSpec for the engine. Tier 1/2 use measured or estimated
         demand and the fitted seasonal shape; Tier 3 reproduces today's defaults.
 
-        Note what is NOT set from data: dow_profile and segment elasticities stay
-        route.py's constants, because T-100 is monthly and carries no trip
-        purpose. With no DB1B loaded the business/leisure/connecting split is
-        also the caller's default, not a per-route measurement.
+        The traveler-segment mix uses the MEASURED connecting share when DB1B
+        coupons are loaded, splitting the remaining non-connecting demand between
+        business and leisure in the caller's ratio. Without it, the caller's
+        defaults stand.
+
+        Note what is NOT set from data even then: dow_profile and the segment
+        elasticities stay route.py's constants, because T-100 is monthly and
+        neither source carries trip purpose. Business-vs-leisure remains a
+        split of what's left over, not a measurement.
         """
         from airlinesim.engine import RouteSpec, PlaneClass
         from airlinesim.route import (default_segments, EquipmentRequirements,
@@ -385,7 +411,17 @@ class RouteDataProvider:
                 data_tier=obs.tier.value, data_vintage=obs.vintage)
 
         demand = obs.demand_per_day
-        segs = default_segments(demand, business_frac, leisure_frac)
+        b_frac, l_frac = business_frac, leisure_frac
+        if obs.has_connecting:
+            # Measured connecting share replaces the global default; the rest is
+            # split between business and leisure in the caller's requested ratio.
+            conn = min(0.9, obs.connecting_share)
+            rest = 1.0 - conn
+            denom = business_frac + leisure_frac
+            if denom > 0:
+                b_frac = rest * business_frac / denom
+                l_frac = rest * leisure_frac / denom
+        segs = default_segments(demand, b_frac, l_frac)
         # Replace the default seasonal shape with the fitted one, per segment.
         segs = tuple(
             type(s)(s.segment, s.base_per_day, s.elasticity,
@@ -411,6 +447,25 @@ class RouteDataProvider:
             data_tier=obs.tier.value, data_vintage=obs.vintage)
 
     # ---- reporting ---------------------------------------------------
+
+    def suggested_price(self, origin: str, dest: str, default: float = 200.0,
+                        premium: bool = False) -> tuple:
+        """
+        Starting ECONOMY fare for a route op, and where it came from.
+
+        Returns (price, source). The measured nonstop-market median is used when
+        available — the median rather than the mean because DB1B's fare
+        distribution has a long premium tail that drags the mean above what a
+        typical economy passenger paid. A premium carrier is nudged toward p75.
+
+        Falls back to `default` (the engine's reference price) so a corpus with
+        no fares behaves exactly as before rather than silently pricing at zero.
+        """
+        obs = self.observation(origin, dest)
+        if not obs.has_fare:
+            return default, "engine default (no DB1B fare for this pair)"
+        price = obs.fare_p75 if premium and obs.fare_p75 > 0 else obs.fare_median
+        return round(price, 2), f"db1b nonstop {'p75' if premium else 'median'}"
 
     def tier_of(self, origin: str, dest: str) -> DataTier:
         return self.observation(origin, dest).tier

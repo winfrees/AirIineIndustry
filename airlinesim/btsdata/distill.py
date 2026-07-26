@@ -347,6 +347,97 @@ def cross_validate(routes: list, airports: list, folds: int = 7) -> dict:
             "within_3x": round(sum(w3) / len(w3), 4)}
 
 
+def _weighted_quantiles(pairs: list, qs=(0.25, 0.5, 0.75)) -> list:
+    """
+    Passenger-weighted quantiles over [(value, weight), ...]. Weighting matters:
+    an unweighted mean over DB1B rows treats a 1-passenger itinerary the same as
+    a 9-passenger one.
+    """
+    if not pairs:
+        return [0.0] * len(qs)
+    pairs = sorted(pairs)
+    total = sum(w for _, w in pairs) or 1.0
+    out, acc, i = [], 0.0, 0
+    for q in qs:
+        target = q * total
+        while i < len(pairs) - 1 and acc + pairs[i][1] < target:
+            acc += pairs[i][1]
+            i += 1
+        out.append(pairs[i][0])
+    return out
+
+
+def fare_rows(conn) -> tuple:
+    """
+    Per-directional-pair fares from DB1B Market, and the vintage they came from.
+
+    NONSTOP MARKETS ONLY (`market_coupons = 1`). A DB1B market fare is the whole
+    journey's mile-prorated fare, so a one-stop itinerary's fare belongs to a
+    two-leg journey and attributing it to a single leg would overstate that leg.
+    Restricting to single-coupon markets gives a fare for a passenger who flew
+    exactly this pair nonstop — which is what a route's ticket price means here.
+
+    Still an approximation: DB1B is a 10% sample, so thin pairs are noisy, and
+    fares are in the sample's own year's dollars with no deflator applied.
+    """
+    if not _has(conn, "db1b_market"):
+        return {}, None
+    rows = conn.execute("""
+        SELECT origin, dest, market_fare, passengers
+          FROM db1b_market
+         WHERE market_coupons = 1 AND market_fare > 0 AND passengers > 0
+        """).fetchall()
+    by_pair = {}
+    for r in rows:
+        by_pair.setdefault((r["origin"], r["dest"]), []).append(
+            (r["market_fare"], r["passengers"]))
+
+    out = {}
+    for key, vals in by_pair.items():
+        pax = sum(w for _, w in vals)
+        p25, p50, p75 = _weighted_quantiles(vals)
+        out[key] = {"mean_fare": round(sum(v * w for v, w in vals) / pax, 2),
+                    "fare_p25": round(p25, 2), "fare_median": round(p50, 2),
+                    "fare_p75": round(p75, 2), "fare_sample_pax": round(pax, 1)}
+    v = conn.execute("SELECT MIN(year) lo, MAX(year) hi, MIN(quarter) q1, "
+                     "MAX(quarter) q2 FROM db1b_market").fetchone()
+    vintage = {"years": [v["lo"], v["hi"]], "quarters": [v["q1"], v["q2"]]}
+    return out, vintage
+
+
+def connecting_rows(conn) -> dict:
+    """
+    Per-SEGMENT connecting share from DB1B Coupon.
+
+    A coupon IS a segment, which is why this cannot come from the Market table:
+    Market knows only the whole journey and cannot attribute a connection to a
+    specific leg. Share = passengers on this segment whose itinerary has more
+    than one coupon, over all passengers on the segment.
+    """
+    if not _has(conn, "db1b_coupon"):
+        return {}
+    rows = conn.execute("""
+        SELECT c.origin AS o, c.dest AS d,
+               SUM(CASE WHEN n.cnt > 1 THEN c.passengers ELSE 0 END) AS conn_pax,
+               SUM(c.passengers) AS all_pax
+          FROM db1b_coupon c
+          JOIN (SELECT itin_id, COUNT(*) AS cnt FROM db1b_coupon
+                 GROUP BY itin_id) n ON n.itin_id = c.itin_id
+      GROUP BY c.origin, c.dest""").fetchall()
+    out = {}
+    for r in rows:
+        if (r["all_pax"] or 0) > 0:
+            out[(r["o"], r["d"])] = round((r["conn_pax"] or 0) / r["all_pax"], 4)
+    return out
+
+
+# A 7-parameter fit on a handful of routes interpolates noise: the fixture corpus
+# (20 routes) produces R² = -3044. Below this many rows, or with a fit that is
+# worse than predicting the mean, the coefficients are WITHHELD so the provider
+# falls through to SYNTHETIC rather than serving nonsense as a "comparable route".
+MIN_GRAVITY_ROWS = 200
+
+
 def fit_gravity(routes: list, airports: list) -> dict:
     """
     Tier-2 fallback, fitted on the Tier-1 pairs:
@@ -367,9 +458,18 @@ def fit_gravity(routes: list, airports: list) -> dict:
     """
     coef, r2, n, calib = _fit(routes, airports)
     from airlinesim.routedata import GRAVITY_TERMS
-    return {"terms": list(GRAVITY_TERMS), "coefficients": coef,
-            "calibration": calib, "r_squared": r2, "n": n,
-            "cross_validation": cross_validate(routes, airports)}
+    out = {"terms": list(GRAVITY_TERMS), "coefficients": coef,
+           "calibration": calib, "r_squared": r2, "n": n,
+           "cross_validation": cross_validate(routes, airports)}
+    if n < MIN_GRAVITY_ROWS or r2 <= 0.0:
+        out["withheld"] = (
+            f"coefficients withheld: n={n} (need >= {MIN_GRAVITY_ROWS}) "
+            f"and R²={r2} (need > 0). Tier-2 COMPARABLE estimates are disabled; "
+            f"unknown pairs resolve SYNTHETIC instead of being served a fit that "
+            f"interpolates noise.")
+        out["coefficients_rejected"] = coef
+        out["coefficients"] = []
+    return out
 
 
 # ============================================================
@@ -420,6 +520,29 @@ def distill(conn, out_dir: str, corpus_airports: int = CORPUS_AIRPORTS,
     airports = airport_rows(conn, table, corpus_airports)
     keep = {a["iata"] for a in airports}
     routes = route_rows(conn, table, keep, min_pax_per_day)
+
+    # Fares and connecting share, when DB1B is loaded. Merged after the volume
+    # aggregation so route_rows() stays purely about volumes, and zero-filled
+    # otherwise so the snapshot's columns don't depend on which sources happened
+    # to be present.
+    fares, fare_vintage = fare_rows(conn)
+    connecting = connecting_rows(conn)
+    fare_hits = conn_hits = 0
+    for r in routes:
+        key = (r["origin"], r["dest"])
+        f = fares.get(key)
+        if f:
+            r.update(f)
+            fare_hits += 1
+        else:
+            r.update({"mean_fare": 0.0, "fare_p25": 0.0, "fare_median": 0.0,
+                      "fare_p75": 0.0, "fare_sample_pax": 0.0})
+        if key in connecting:
+            r["connecting_share"] = connecting[key]
+            conn_hits += 1
+        else:
+            r["connecting_share"] = -1.0     # -1 = unknown, not "zero connecting"
+
     gravity = fit_gravity(routes, airports)
 
     n_r = _write_csv_gz(os.path.join(out_dir, "routes.csv.gz"), routes)
@@ -440,6 +563,17 @@ def distill(conn, out_dir: str, corpus_airports: int = CORPUS_AIRPORTS,
         "demand_basis": sorted(basis),
         "target_load_factor": TARGET_LOAD_FACTOR,
         "min_pax_per_day": min_pax_per_day,
+        # Fares carry their OWN vintage: DB1B collection ended Q2 2025, so the
+        # fare window generally lags the volume window and implying one number
+        # for both would be wrong.
+        "fares": {"source": "db1b_market nonstop markets (market_coupons=1)",
+                  "vintage": fare_vintage,
+                  "routes_with_fare": fare_hits,
+                  "coverage": round(fare_hits / len(routes), 4) if routes else 0.0},
+        "connecting": {"source": "db1b_coupon (segment-level)",
+                       "routes_with_share": conn_hits,
+                       "coverage": round(conn_hits / len(routes), 4) if routes else 0.0,
+                       "unknown_sentinel": -1.0},
         "gravity": gravity,
         # Per-field footing, so nothing downstream mistakes a guess for a fact.
         "provenance": {
@@ -459,10 +593,12 @@ def distill(conn, out_dir: str, corpus_airports: int = CORPUS_AIRPORTS,
         "known_gaps": ([] if table == "t100_segment" else [
             "T-100 Market carries no SEATS/departures/aircraft type: no load "
             "factor, no de-censoring, no measured seat window, nothing for "
-            "equipment right-sizing."]) + ([] if _has(conn, "db1b_market") else [
-            "No DB1B fares loaded: ticket prices and elasticity remain engine "
-            "defaults, and traveler-segment mix uses route.py's global default "
-            "rather than a per-route fare/connecting split."]),
+            "equipment right-sizing."]) + ([] if fare_hits else [
+            "No DB1B fares loaded: ticket prices remain engine defaults, and "
+            "the traveler-segment mix uses route.py's global default rather "
+            "than a per-route connecting split."]) + ([] if not fare_hits else [
+            "Fares are nonstop-market DB1B in their own year's dollars with no "
+            "deflator; the 10% sample makes thin pairs noisy."]),
     }
     with open(os.path.join(out_dir, "MANIFEST.json"), "w") as fh:
         json.dump(manifest, fh, indent=2)

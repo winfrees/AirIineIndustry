@@ -285,11 +285,51 @@ Three things the integration surfaced that pure unit checks would not:
   fleet that were never paid for, inflating net worth to $1.3B. Fixed here;
   `builder.py` still has the same latent bug and is flagged in CLAUDE.md.
 
-**Phase 4 — self-updating refresh.** `.github/workflows/bts-refresh.yml`, monthly
-cron: refresh → distill → open a PR with the regenerated artifact and manifest. It
-must fail loudly rather than commit a partial corpus when BTS is unavailable. The
-"database that updates itself" is therefore a reviewed data commit, which keeps
-every sim reproducible from a git SHA.
+**Phase 4 — self-updating refresh. DONE, with one amendment the data forced.**
+
+The plan assumed a cron could fetch everything. It can't, and the probe runs
+established exactly where the line falls:
+
+| Source | Refresh |
+|---|---|
+| DB1B Market / Coupon | **automatic** — stable per-quarter `/PREZIP/` URLs |
+| OurAirports | **automatic** — GitHub-hosted |
+| T-100 | **manual export only** — no stable URL exists |
+
+So `.github/workflows/bts-refresh.yml` (monthly) automates what is automatable
+and, for T-100, reports staleness with the exact re-export instruction. A cron
+that quietly ships a year-old corpus would be worse than one that asks.
+
+`airlinesim refresh` reports staleness per source, fetches what it can, skips
+partitions already loaded (a DB1B quarter is ~370 MB), re-distills, and diffs
+against the committed snapshot so a reviewer sees which routes moved rather than
+an opaque binary change. The workflow then re-runs `routedata`, `databuilt` and
+`integration` against the regenerated snapshot before opening a PR.
+
+**It refuses to write a snapshot that loses data** — Segment→Market, >10% of
+routes, or a drop in fare/connecting coverage. This matters because a partial
+ingest still distills *successfully*, so a blind cron would cheerfully replace a
+corpus that has capacity and fares with one that has neither.
+
+Fares landed here too, since DB1B is reachable from a runner even though it isn't
+from a dev sandbox:
+
+- **Fares** from DB1B **nonstop markets only** (`market_coupons = 1`). A market
+  fare is the whole journey's mile-prorated fare, so attributing a one-stop fare
+  to a single leg would overstate that leg. Passenger-weighted p25/median/p75.
+- **Connecting share** from DB1B **Coupon**, per segment — Market can't do it, as
+  it only knows the whole journey. `-1.0` means *unknown*, not zero.
+- The provider exposes `suggested_price()` (median, or p75 for a premium
+  carrier), and `route_spec()` now uses the **measured** connecting share to set
+  the segment mix. Business-vs-leisure remains a split of what's left over: no
+  source carries trip purpose.
+- Fares carry their **own vintage** in the manifest, because DB1B collection
+  ended Q2 2025 and generally lags the volume window.
+
+Also hardened: gravity coefficients are **withheld** below 200 routes or with
+non-positive R². The fixture corpus (20 routes) fits at R² = −3044, and serving
+that as a "comparable route" would be fabrication — unknown pairs now resolve
+SYNTHETIC instead.
 
 **Phase 5 — docs.** Update CLAUDE.md's known-limitations with the caveats below.
 

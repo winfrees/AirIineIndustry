@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-07-26T07:29:12.229984+00:00",
+  "generated_at": "2026-07-26T08:01:50.847858+00:00",
   "volume_table": "t100_market",
   "years": [
     2023,
@@ -15,6 +15,18 @@
   ],
   "target_load_factor": 0.85,
   "min_pax_per_day": 10.0,
+  "fares": {
+    "source": "db1b_market nonstop markets (market_coupons=1)",
+    "vintage": null,
+    "routes_with_fare": 0,
+    "coverage": 0.0
+  },
+  "connecting": {
+    "source": "db1b_coupon (segment-level)",
+    "routes_with_share": 0,
+    "coverage": 0.0,
+    "unknown_sentinel": -1.0
+  },
   "gravity": {
     "terms": [
       "intercept",
@@ -70,6 +82,6 @@
   },
   "known_gaps": [
     "T-100 Market carries no SEATS/departures/aircraft type: no load factor, no de-censoring, no measured seat window, nothing for equipment right-sizing.",
-    "No DB1B fares loaded: ticket prices and elasticity remain engine defaults, and traveler-segment mix uses route.py's global default rather than a per-route fare/connecting split."
+    "No DB1B fares loaded: ticket prices remain engine defaults, and the traveler-segment mix uses route.py's global default rather than a per-route connecting split."
   ]
 }

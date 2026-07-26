@@ -68,6 +68,8 @@ constraint enforcement — not partial stubs.
     airlinesim probe --offline       # the same ingest probe, raw report
     airlinesim run routedata         # 3-tier route data check (offline, snapshot)
     airlinesim run databuilt         # engine running on real BTS routes
+    airlinesim run refresh_cx        # corpus-refresh logic (offline)
+    airlinesim refresh --check-only  # is the corpus stale? what needs re-export?
     airlinesim demo --data --hub ORD # data-driven demo instead of constants
     airlinesim ingest --t100-market T_T100D_MARKET_ALL_CARRIER.zip \
         --fetch-airport-ref --distill   # warehouse + regenerate the snapshot
@@ -104,6 +106,20 @@ demand code.
 - `routedata.py` must NEVER import `btsdata`. Shared logic
   (`gravity_features`, `seat_window`) lives in `routedata` and `btsdata`
   imports it, so the fit and the evaluation can't drift apart.
+- **Refresh is split by what can actually be automated.** DB1B and OurAirports
+  have stable URLs and refresh unattended via
+  `.github/workflows/bts-refresh.yml` (monthly). T-100 cannot — so the workflow
+  reports staleness and says what to re-export instead of shipping a stale
+  corpus. `airlinesim refresh` diffs the new snapshot against the committed one
+  and **refuses to write** one that loses data (Segment→Market, >10% of routes,
+  or a drop in fare/connecting coverage); pass `--allow-regression` to override.
+- Gravity coefficients are **withheld** below 200 routes or non-positive R², so
+  a corpus too small to fit resolves unknown pairs SYNTHETIC rather than serving
+  a fabricated comparable.
+- Fares come from DB1B **nonstop markets only** (`market_coupons = 1`): a market
+  fare covers a whole journey, so attributing a one-stop fare to one leg would
+  overstate it. Connecting share comes from **coupons** (a coupon is a segment).
+  `-1.0` in `connecting_share` means *unknown*, not zero.
 - `databuilder.build_world_from_data(hub, n_destinations)` stands up a full
   two-carrier world from the corpus through `SpecRepository.load()`. Equipment is
   chosen per route from the data-derived seat window, so a thin pair gets an E175
