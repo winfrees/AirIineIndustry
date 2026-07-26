@@ -83,7 +83,12 @@ subsystem and asserts six invariants. Run it after any engine change.
 `python tools/smoke_windows_bundle.py` is the wider net: every self-checking
 scenario (grepping for `ALL CHECKS PASS`, since scenarios signal failure in
 their *output*, not their exit code), the report-only scenarios, the CLI, and a
-live GUI server fetch. Runs on any OS despite the name.
+live GUI server fetch. Runs on any OS despite the name. It requires the package
+to be **installed** and runs every subprocess in a temp directory, deliberately:
+`python -m airlinesim.cli` puts the working directory on `sys.path`, so a run
+from the repo root imports the checkout and the install is never tested — which
+is how `btsdata/fixtures/*.csv` shipped missing from the wheel. Any new non-`.py`
+file under `airlinesim/` needs a matching `[tool.setuptools.package-data]` entry.
 
 ## Windows releases
 

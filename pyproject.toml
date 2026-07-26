@@ -33,3 +33,8 @@ include = ["airlinesim*"]
 
 [tool.setuptools.package-data]
 airlinesim = ["webui/**/*", "data/*.csv.gz", "data/*.json"]
+# btsdata is dev-time and never imported by runtime code, but `airlinesim run
+# btsdata` and `run refresh_cx` are shipped, listed by `airlinesim list`, and
+# read these fixtures. Without them an installed package crashes on both the
+# moment the working directory isn't the source tree. 36 KB.
+"airlinesim.btsdata" = ["fixtures/*.csv"]

@@ -146,7 +146,8 @@ def install_package(site_packages: Path, wheel: Path | None) -> None:
         raise SystemExit(f"install did not produce {pkg}/cli.py")
     # The data corpus and the web UI are package data; if they are missing the
     # bundle looks fine and then fails on the tester's machine.
-    for required in (pkg / "data", pkg / "webui" / "index.html"):
+    for required in (pkg / "data", pkg / "webui" / "index.html",
+                     pkg / "btsdata" / "fixtures"):
         if not required.exists():
             raise SystemExit(f"package data missing from bundle: {required}")
 

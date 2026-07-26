@@ -20,10 +20,17 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+# Every subprocess runs here, never in the source tree. `python -m airlinesim.cli`
+# puts the working directory on sys.path, so running from the repo root imports
+# the *checkout* and the installed package is never exercised — which is exactly
+# how a missing package-data entry ships undetected.
+SCRATCH = Path(tempfile.mkdtemp(prefix="airlinesim-smoke-"))
 
 # Every scenario that self-checks and is safe offline.
 CHECKED_SCENARIOS = ["integration", "routedata", "btsdata", "databuilt", "refresh_cx"]
@@ -60,7 +67,8 @@ def child_env() -> dict:
 def run(cmd: list[str], timeout: int = 900) -> subprocess.CompletedProcess:
     print(f"  $ {' '.join(cmd)}")
     return subprocess.run(cmd, capture_output=True, text=True, env=child_env(),
-                          timeout=timeout, encoding="utf-8", errors="replace")
+                          cwd=SCRATCH, timeout=timeout,
+                          encoding="utf-8", errors="replace")
 
 
 def free_port() -> int:
@@ -99,7 +107,7 @@ def check_gui(base_cmd: list[str], fails: Failures) -> None:
     proc = subprocess.Popen(base_cmd + ["gui", "--port", str(port), "--no-browser"],
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, encoding="utf-8", errors="replace",
-                            env=child_env())
+                            env=child_env(), cwd=SCRATCH)
     try:
         state = None
         deadline = time.time() + 90
@@ -136,35 +144,58 @@ def check_gui(base_cmd: list[str], fails: Failures) -> None:
         kill_tree(proc)
 
 
+PROBE = (
+    "import sys, airlinesim, airlinesim.routedata as rd, airlinesim.server as sv;"
+    "import airlinesim.btsdata as bd, pathlib;"
+    "print(sys.executable);print(airlinesim.__version__);"
+    "print(rd.DATA_DIR);print(sv.WEBUI_DIR);"
+    "print(pathlib.Path(bd.__file__).parent / 'fixtures')"
+)
+
+
+def check_package_data(python_exe: str, fails: Failures, must_be_under: Path | None
+                       ) -> None:
+    """Resolve the package's data directories through the interpreter under test.
+
+    Every one of these is package data declared in pyproject; a missing
+    declaration shows up here as a named check instead of as a scenario
+    crashing three steps later.
+    """
+    res = run([python_exe, "-c", PROBE])
+    lines = res.stdout.strip().splitlines()
+    if not fails.check(res.returncode == 0 and len(lines) >= 5,
+                       "airlinesim imports outside the source tree",
+                       res.stdout + res.stderr):
+        return
+    exe, version, data_dir, webui_dir, fixtures = lines[:5]
+    print(f"  [info] airlinesim {version} at {Path(data_dir).parent}")
+
+    if must_be_under is not None:
+        root = str(must_be_under.resolve()).lower()
+        fails.check(exe.lower().startswith(root), f"runs its own interpreter ({exe})")
+        fails.check(str(Path(data_dir).resolve()).lower().startswith(root),
+                    f"route corpus resolves inside the bundle ({data_dir})")
+
+    fails.check(Path(data_dir).is_dir() and any(Path(data_dir).iterdir()),
+                "route corpus present (airlinesim/data)")
+    fails.check((Path(webui_dir) / "index.html").is_file(),
+                "web UI present (airlinesim/webui)")
+    # `airlinesim run btsdata` and `run refresh_cx` read these.
+    fails.check(len(list(Path(fixtures).glob("*.csv"))) >= 6,
+                "BTS fixtures present (airlinesim/btsdata/fixtures)")
+
+
 def check_bundle_is_self_contained(bundle: Path, fails: Failures) -> None:
     """The whole point of the bundle is that it does not use the machine's
     Python. Prove it rather than assume it."""
     python_exe = bundle / "python" / "python.exe"
-    fails.check(python_exe.is_file(), f"bundled interpreter present ({python_exe})")
-    if not python_exe.is_file():
+    if not fails.check(python_exe.is_file(),
+                       f"bundled interpreter present ({python_exe})"):
         return
     if os.name != "nt":
         print("  [SKIP] not on Windows — cannot execute the bundled interpreter")
         return
-    res = run([str(python_exe), "-c",
-               "import sys, airlinesim, airlinesim.routedata as rd, airlinesim.server as sv;"
-               "print(sys.executable);print(airlinesim.__version__);"
-               "print(rd.DATA_DIR);print(sv.WEBUI_DIR)"])
-    lines = res.stdout.strip().splitlines()
-    fails.check(res.returncode == 0 and len(lines) >= 4,
-                "bundled interpreter imports airlinesim", res.stdout + res.stderr)
-    if res.returncode != 0 or len(lines) < 4:
-        return
-    exe, version, data_dir, webui_dir = lines[:4]
-    root = str(bundle.resolve()).lower()
-    fails.check(exe.lower().startswith(root), f"runs its own interpreter ({exe})")
-    fails.check(str(Path(data_dir).resolve()).lower().startswith(root),
-                f"route corpus resolves inside the bundle ({data_dir})")
-    fails.check(Path(data_dir).is_dir() and any(Path(data_dir).iterdir()),
-                "route corpus is populated")
-    fails.check((Path(webui_dir) / "index.html").is_file(),
-                "web UI files present")
-    print(f"  [info] bundled airlinesim version: {version}")
+    check_package_data(str(python_exe), fails, must_be_under=bundle)
 
 
 def main(argv=None) -> int:
@@ -198,6 +229,13 @@ def main(argv=None) -> int:
         base_cmd = [str(launcher)]
     else:
         print(f"[smoke] testing installed package with {sys.executable}")
+        print(f"[smoke] working directory: {SCRATCH} (not the source tree)")
+        check_package_data(sys.executable, fails, must_be_under=None)
+        if fails:
+            print("\nThe package must be installed (`pip install .`) — this test "
+                  "runs outside the source tree on purpose, so a checkout on "
+                  "sys.path cannot stand in for the installed package.")
+            return report(fails)
         base_cmd = [sys.executable, "-m", "airlinesim.cli"]
 
     print("\n[smoke] self-checking scenarios")
