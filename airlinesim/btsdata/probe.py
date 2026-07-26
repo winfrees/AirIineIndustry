@@ -43,6 +43,13 @@ from airlinesim.btsdata import download, readers, warehouse, schema
 
 FIXTURE_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
+# Bumped whenever the report's shape or the checks change. Stamped into every
+# report and printed in the summary header, because a re-run of an old Actions
+# run replays its ORIGINAL commit — twice now, an unchanged summary was read as
+# "the fix didn't work" when the fix simply wasn't in the code being run. If the
+# version in a summary isn't what you expect, you're looking at stale code.
+PROBE_FORMAT_VERSION = 2
+
 # Coverage floors for the integration stage. These are targets for the corpus
 # we intend to build (top ~300 airports), not laws of nature — a probe run with
 # --limit truncation will legitimately fall short, so truncation downgrades
@@ -54,6 +61,27 @@ MIN_FARE_COVERAGE = 0.80
 # De-censoring assumption, restated here so the probe checks the same rule the
 # ingest will use. T-100 passengers are FLOWN, not demanded; see the plan doc.
 TARGET_LOAD_FACTOR = 0.85
+
+
+def code_version() -> dict:
+    """
+    Identify the code that produced a report: probe format version plus the
+    commit, from the Actions environment when present and git otherwise.
+    """
+    info = {"probe_format": PROBE_FORMAT_VERSION,
+            "sha": (os.environ.get("GITHUB_SHA") or "")[:12],
+            "ref": os.environ.get("GITHUB_REF_NAME") or "",
+            "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT") or ""}
+    if not info["sha"]:
+        try:
+            import subprocess
+            info["sha"] = subprocess.run(
+                ["git", "rev-parse", "--short=12", "HEAD"],
+                capture_output=True, text=True, timeout=10,
+                cwd=os.path.dirname(__file__)).stdout.strip()
+        except Exception:  # noqa: BLE001 — identification is best-effort
+            pass
+    return info
 
 
 @dataclass
@@ -250,7 +278,7 @@ def probe_source(plan: SourcePlan, fetcher, conn, limit) -> tuple:
     return res, checks
 
 
-def integration_checks(conn, loaded: dict) -> list:
+def integration_checks(conn, loaded: dict, requested=None) -> list:
     """
     Stage 6 — do the sources JOIN? This is the question the whole job exists to
     answer, and the one a reachability check can't.
@@ -260,7 +288,14 @@ def integration_checks(conn, loaded: dict) -> list:
     truncated = any(v.truncated for v in loaded.values())
 
     if "t100_segment" not in have:
-        return [Check("integration", False, "no T-100 rows loaded; nothing to join")]
+        # Distinguish "T-100 was asked for and failed" (a real failure — nothing
+        # joins without it) from "this run deliberately probed a subset", which
+        # must not be reported as a broken join.
+        asked = requested is None or "t100" in requested
+        return [Check("integration", not asked,
+                      "no T-100 rows loaded; nothing to join" if asked else
+                      "skipped — T-100 not among the requested sources",
+                      informational=not asked)]
 
     # Busiest airports and pairs, as the distiller will compute them.
     top_airports = [r["iata"] for r in conn.execute("""
@@ -351,6 +386,15 @@ def run(args) -> dict:
         # and no monthly seasonality. If its URL guesses failed, go and FIND the
         # real one rather than reporting a dead end — and if the sweep turns up a
         # working URL, use it immediately so one run both discovers and validates.
+        if name == "t100" and res.error and not (args.offline or args.discover):
+            # Never let a T-100 failure pass without saying whether the hunt for
+            # a working channel was even attempted.
+            checks.append(Check("t100_segment: channel discovery", False,
+                                "SKIPPED — re-run without --no-discover to sweep "
+                                "PREZIP names, scrape TranStats for real filenames "
+                                "and resolve the ArcGIS mirror",
+                                informational=True))
+
         if name == "t100" and res.error and not args.offline and args.discover:
             from airlinesim.btsdata import discover
             discovery = discover.discover_t100(args.year, args.month)
@@ -371,11 +415,12 @@ def run(args) -> dict:
         results[plan.table.key] = res
         checks.extend(ck)
 
-    checks.extend(integration_checks(conn, results))
+    checks.extend(integration_checks(conn, results, requested=args.sources))
 
     failures = [c for c in checks if not c.ok and not c.informational]
     report = {
         "generated_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
+        "code_version": code_version(),
         "mode": "offline-fixtures" if args.offline else "network",
         "period": {"year": args.year, "month": args.month, "quarter": args.quarter},
         "row_limit": args.limit,
@@ -395,7 +440,13 @@ def run(args) -> dict:
 # ------------------------------------------------------------
 
 def to_markdown(report: dict) -> str:
+    cv = report.get("code_version") or {}
+    stamp = (f"probe format **v{cv.get('probe_format', '?')}** · commit "
+             f"`{cv.get('sha') or 'unknown'}`"
+             + (f" · ref `{cv['ref']}`" if cv.get("ref") else "")
+             + (f" · attempt {cv['run_attempt']}" if cv.get("run_attempt") else ""))
     out = [f"## BTS data probe — {'PASS' if report['ok'] else 'FAIL'}", "",
+           stamp, "",
            f"Mode **{report['mode']}** · period "
            f"{report['period']['year']}-{report['period']['month']:02d} "
            f"(Q{report['period']['quarter']}) · row limit "
