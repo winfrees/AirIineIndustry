@@ -301,11 +301,10 @@ def _carrier(world, bank, pid, name, method, terms, ops_plan, bases,
     acquired = []
     for i, (rs, ac) in enumerate(ops_plan):
         tail = f"{pid}-{i+1}"
-        # Bank.acquire() returns None when credit is denied or cash is short, and
-        # its docstring leaves attaching the Airplane to the caller. Attaching it
-        # unconditionally puts aircraft in the fleet that were never paid for,
-        # which silently inflates net worth — so only keep what actually funded.
-        if bank.acquire(p, ac, tail, method, terms, p.log) is None:
+        # Only keep what actually funded — see Bank.try_acquire(). Attaching the
+        # Airplane unconditionally puts aircraft in the fleet that were never
+        # paid for, which silently inflates net worth.
+        if not bank.try_acquire(p, ac, tail, method, terms, p.log):
             p.log.append(f"  NOT ACQUIRED {tail} ({ac.display_name}): "
                          f"acquisition failed, route {rs.spec_id} unstaffed")
             continue

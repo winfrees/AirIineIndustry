@@ -37,21 +37,6 @@ def _a320(repo):
     return spec
 
 
-def _acquire(bank, p, spec, tail, method, terms) -> bool:
-    """
-    Did the acquisition actually fund?
-
-    Bank.acquire() returns the Loan/Lease it created, or None when credit is
-    denied or cash is short — but None is ALSO the success value for BUY_CASH,
-    so that one case is disambiguated by watching the ledger.
-    """
-    before_cash = p.ledger.cash
-    result = bank.acquire(p, spec, tail, method, terms, p.log)
-    if method == AcquisitionMethod.BUY_CASH:
-        return p.ledger.cash < before_cash
-    return result is not None
-
-
 # Enough for both A320 down payments (20% of $110M each) plus working capital.
 # At $40M the second financing was denied for want of $4M, and the aircraft was
 # attached anyway — see _carrier.
@@ -64,14 +49,14 @@ def _carrier(world, bank, a320, out_r, ret_r, pid, name, method, terms, layout, 
     owned = method != AcquisitionMethod.OPERATING_LEASE
 
     # Only aircraft that actually funded join the fleet, and each one carries its
-    # own route op. Attaching the Airplane regardless of the bank's answer put
-    # aircraft in the fleet that were never paid for: FinanceAir flew two A320s
-    # against one loan, and the un-financed airframe still counted as an owned
-    # asset, overstating net worth by its full depreciated value.
+    # own route op — see Bank.try_acquire(). Attaching the Airplane regardless of
+    # the bank's answer put aircraft in the fleet that were never paid for:
+    # FinanceAir flew two A320s against one loan, and the un-financed airframe
+    # still counted as an owned asset, overstating net worth.
     p.fleet, ops = [], []
     for idx, (route, base) in enumerate(((out_r, "ORG"), (ret_r, "HUB")), start=1):
         tail = f"{pid}-{idx}"
-        if not _acquire(bank, p, a320, tail, method, terms):
+        if not bank.try_acquire(p, a320, tail, method, terms, p.log):
             p.log.append(f"  NOT ACQUIRED {tail}: route {route.spec_id} not opened")
             continue
         plane = Airplane(spec=a320, tail_number=tail, owner_id=pid, owned=owned,
