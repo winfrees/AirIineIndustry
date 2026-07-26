@@ -165,11 +165,21 @@ class FixtureFetcher:
 # Plans
 # ------------------------------------------------------------
 
-def build_plans(year: int, month: int, quarter: int, sources) -> list:
+def build_plans(year: int, month: int, quarter: int, sources,
+                t100_url: str = "", t100_market_url: str = "",
+                request_id: str = "") -> list:
+    # An operator-supplied URL or path wins outright: when a table is only
+    # obtainable through a hand-driven export there is nothing to guess at.
+    seg_cands = ([download.explicit_candidate(t100_url)] if t100_url
+                 else download.t100_candidates(year, month))
+    mkt_cands = ([download.explicit_candidate(t100_market_url)] if t100_market_url
+                 else download.t100_market_candidates(year, month, request_id))
+
     all_plans = {
-        "t100": SourcePlan(schema.T100_SEGMENT, year, month,
-                           download.t100_candidates(year, month),
+        "t100": SourcePlan(schema.T100_SEGMENT, year, month, seg_cands,
                            "t100_segment_sample.csv"),
+        "t100_market": SourcePlan(schema.T100_MARKET, year, month, mkt_cands,
+                                  "t100_market_sample.csv"),
         "db1b_market": SourcePlan(schema.DB1B_MARKET, year, quarter,
                                   download.db1b_candidates("Market", year, quarter),
                                   "db1b_market_sample.csv"),
@@ -287,22 +297,37 @@ def integration_checks(conn, loaded: dict, requested=None) -> list:
     have = {k for k, v in loaded.items() if v.rows_loaded > 0}
     truncated = any(v.truncated for v in loaded.values())
 
-    if "t100_segment" not in have:
+    # T-100 Segment is the preferred volume table; Market can stand in for
+    # PASSENGERS but carries no capacity at all (see schema.T100_MARKET).
+    vol = ("t100_segment" if "t100_segment" in have
+           else "t100_market" if "t100_market" in have else None)
+
+    if vol is None:
         # Distinguish "T-100 was asked for and failed" (a real failure — nothing
         # joins without it) from "this run deliberately probed a subset", which
         # must not be reported as a broken join.
-        asked = requested is None or "t100" in requested
+        asked = requested is None or bool({"t100", "t100_market"} & set(requested))
         return [Check("integration", not asked,
                       "no T-100 rows loaded; nothing to join" if asked else
-                      "skipped — T-100 not among the requested sources",
+                      "skipped — no T-100 table among the requested sources",
                       informational=not asked)]
 
+    if vol == "t100_market":
+        # Loud, because it silently removes the supply side of the model.
+        checks.append(Check(
+            "integration: capacity data present", False,
+            "T-100 MARKET only — it has no SEATS, DEPARTURES or AIRCRAFT_TYPE, so "
+            "load factor, de-censored demand, the evidence-based seat window and "
+            "equipment right-sizing are ALL unavailable. Passenger volumes are a "
+            "full census and usable; capacity is simply absent.",
+            informational=True))
+
     # Busiest airports and pairs, as the distiller will compute them.
-    top_airports = [r["iata"] for r in conn.execute("""
-        SELECT origin AS iata, SUM(passengers) AS pax FROM t100_segment
+    top_airports = [r["iata"] for r in conn.execute(f"""
+        SELECT origin AS iata, SUM(passengers) AS pax FROM {vol}
         GROUP BY origin ORDER BY pax DESC LIMIT 100""").fetchall()]
-    top_pairs = [(r["origin"], r["dest"]) for r in conn.execute("""
-        SELECT origin, dest, SUM(passengers) AS pax FROM t100_segment
+    top_pairs = [(r["origin"], r["dest"]) for r in conn.execute(f"""
+        SELECT origin, dest, SUM(passengers) AS pax FROM {vol}
         GROUP BY origin, dest ORDER BY pax DESC LIMIT 200""").fetchall()]
 
     # --- runway coverage: suitability already enforces min_runway_m, so a pair
@@ -352,23 +377,34 @@ def integration_checks(conn, loaded: dict, requested=None) -> list:
                             f"itineraries"))
 
     # --- de-censoring produces a coherent demand figure ---
-    row = conn.execute("""
-        SELECT SUM(passengers) AS pax, SUM(seats) AS seats
-        FROM t100_segment WHERE seats > 0""").fetchone()
-    pax, seats = row["pax"] or 0, row["seats"] or 0
-    lf = pax / seats if seats else 0.0
-    demand = pax / min(lf, TARGET_LOAD_FACTOR) if lf > 0 else 0.0
-    checks.append(Check("integration: load factor sane", 0.0 < lf <= 1.05,
-                        f"aggregate LF {lf:.1%}"))
-    checks.append(Check("integration: de-censored demand >= flown pax",
-                        demand >= pax > 0,
-                        f"{pax:,.0f} flown -> {demand:,.0f} implied demand "
-                        f"(target LF {TARGET_LOAD_FACTOR:.0%})"))
+    # Only possible with Segment: it needs SEATS, which Market does not have.
+    if vol == "t100_segment":
+        row = conn.execute("""
+            SELECT SUM(passengers) AS pax, SUM(seats) AS seats
+            FROM t100_segment WHERE seats > 0""").fetchone()
+        pax, seats = row["pax"] or 0, row["seats"] or 0
+        lf = pax / seats if seats else 0.0
+        demand = pax / min(lf, TARGET_LOAD_FACTOR) if lf > 0 else 0.0
+        checks.append(Check("integration: load factor sane", 0.0 < lf <= 1.05,
+                            f"aggregate LF {lf:.1%}"))
+        checks.append(Check("integration: de-censored demand >= flown pax",
+                            demand >= pax > 0,
+                            f"{pax:,.0f} flown -> {demand:,.0f} implied demand "
+                            f"(target LF {TARGET_LOAD_FACTOR:.0%})"))
+    else:
+        row = conn.execute("SELECT SUM(passengers) AS pax FROM t100_market").fetchone()
+        pax = row["pax"] or 0
+        checks.append(Check("integration: O&D passenger census usable", pax > 0,
+                            f"{pax:,.0f} market passengers (census, not a sample) — "
+                            f"but no seats, so no load factor and no de-censoring"))
     return checks
 
 
 def run(args) -> dict:
-    plans = build_plans(args.year, args.month, args.quarter, args.sources)
+    plans = build_plans(args.year, args.month, args.quarter, args.sources,
+                        t100_url=args.t100_url,
+                        t100_market_url=args.t100_market_url,
+                        request_id=args.t100_request_id)
     fetcher = FixtureFetcher(args.fixture_dir) if args.offline else NetworkFetcher(
         args.max_mb * 1024 * 1024)
 
@@ -541,7 +577,16 @@ def main(argv=None) -> int:
         prog="airlinesim-bts-probe",
         description="Verify BTS sources are downloadable, parseable and joinable.")
     p.add_argument("--sources", default="t100,db1b_market,db1b_coupon,airports,runways",
-                   help="comma-separated: t100,db1b_market,db1b_coupon,airports,runways")
+                   help="comma-separated: t100, t100_market, db1b_market, "
+                        "db1b_coupon, airports, runways")
+    p.add_argument("--t100-url", default="",
+                   help="explicit URL or LOCAL PATH for T-100 Segment — use for a "
+                        "TranStats session export, which has no stable URL")
+    p.add_argument("--t100-market-url", default="",
+                   help="explicit URL or LOCAL PATH for T-100 Market")
+    p.add_argument("--t100-request-id", default="",
+                   help="request-id prefix of a TranStats export, e.g. 896816367 "
+                        "for 896816367_T_T100_MARKET_ALL_CARRIER.zip")
     p.add_argument("--year", type=int, default=2024)
     p.add_argument("--month", type=int, default=6)
     p.add_argument("--quarter", type=int, default=2)

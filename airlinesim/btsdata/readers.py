@@ -152,6 +152,22 @@ def validate_t100(row) -> str | None:
     return None
 
 
+def validate_t100_market(row) -> str | None:
+    """
+    Like validate_t100 but WITHOUT the seats checks — T-100 Market has no SEATS
+    column, so there is nothing to compare passengers against.
+    """
+    if not _is_station(row.get("origin")) or not _is_station(row.get("dest")):
+        return "non-station origin/dest"
+    if row["origin"] == row["dest"]:
+        return "origin == dest"
+    if (row.get("passengers") or 0) < 0:
+        return "negative pax"
+    if (row.get("distance_mi") or 0) <= 0:
+        return "non-positive distance"
+    return None
+
+
 def validate_db1b_market(row) -> str | None:
     if not _is_station(row.get("origin")) or not _is_station(row.get("dest")):
         return "non-station origin/dest"
@@ -193,6 +209,7 @@ def validate_runway(row) -> str | None:
 
 VALIDATORS = {
     "t100_segment": validate_t100,
+    "t100_market": validate_t100_market,
     "db1b_market": validate_db1b_market,
     "db1b_coupon": validate_db1b_coupon,
     "airport_ref": validate_airport,

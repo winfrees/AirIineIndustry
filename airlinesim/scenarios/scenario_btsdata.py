@@ -32,9 +32,11 @@ from airlinesim.btsdata import discover, probe, readers, schema, warehouse
 
 def _args(db, **over):
     ns = argparse.Namespace(
-        sources=["t100", "db1b_market", "db1b_coupon", "airports", "runways"],
+        sources=["t100", "t100_market", "db1b_market", "db1b_coupon",
+                 "airports", "runways"],
         year=2024, month=6, quarter=2, limit=None, max_mb=400,
         db=db, offline=True, discover=False, discover_only=False,
+        t100_url="", t100_market_url="", t100_request_id="",
         fixture_dir=probe.FIXTURE_DIR)
     for k, v in over.items():
         setattr(ns, k, v)
@@ -49,6 +51,18 @@ def main():
     first = probe.run(_args(db))
     for c in first["checks"]:
         print(f"  [{c['mark']}] {c['name']}: {c['detail']}")
+
+    # T-100 Market cannot stand in for Segment: it carries no capacity. Prove the
+    # probe says so loudly rather than reporting a clean green on half a model.
+    print("\n=== MARKET-ONLY FALLBACK (no capacity) ===")
+    mkt_db = os.path.join(tmp, "market_only.sqlite")
+    mkt = probe.run(_args(mkt_db, sources=["t100_market", "db1b_market",
+                                           "airports", "runways"]))
+    cap = [c for c in mkt["checks"] if "capacity data present" in c["name"]]
+    for c in cap:
+        print(f"  [{c['mark']}] {c['name']}")
+    lf = [c for c in mkt["checks"] if "load factor" in c["name"]]
+    print(f"  load-factor checks attempted: {len(lf)} (expected 0 — no SEATS column)")
 
     print("\n=== IDEMPOTENCE (reload the same slices twice) ===")
     again = probe.run(_args(db))
@@ -127,8 +141,11 @@ def main():
     print("\n=== CHECKS ===")
     checks = [
         ("offline probe passes every check", first["ok"]),
-        ("all five sources loaded rows",
+        ("every source loaded rows",
          all(s["rows_loaded"] > 0 for s in first["sources"].values())),
+        ("T-100 Market alone flags the missing capacity data",
+         bool(cap) and cap[0]["mark"] == "WARN"),
+        ("no load-factor check is attempted without SEATS", not lf),
         ("reload is idempotent (no double-counting)",
          first["table_counts"] == again["table_counts"]),
         ("closed runway excluded from longest-runway backfill",

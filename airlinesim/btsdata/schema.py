@@ -107,6 +107,52 @@ T100_SEGMENT = SourceTable(
 
 
 # ============================================================
+# T-100 MARKET — O&D passenger census, but NO CAPACITY
+# ============================================================
+# One row per carrier x origin x dest x service class x month, where
+# origin/dest is the ON-FLIGHT MARKET (where the passenger boarded and
+# deplaned on that carrier) rather than the nonstop leg.
+#
+# READ THIS BEFORE TREATING IT AS A T-100 SEGMENT SUBSTITUTE. Market carries
+# PASSENGERS, FREIGHT and MAIL but has NO SEATS, NO DEPARTURES and NO
+# AIRCRAFT_TYPE. So it cannot supply:
+#     * load factor            -> the de-censoring rule is impossible
+#     * seats-per-departure    -> no evidence-based economic seat window
+#     * aircraft type by route -> nothing for equipment right-sizing
+#     * frequency              -> no gate-demand proxy
+# What it DOES give, and DB1B cannot, is a complete census of O&D passenger
+# volumes — far better than scaling a 10% ticket sample by 10. It is a genuine
+# demand source and a poor capacity source. See docs/route-data-design.md.
+
+T100_MARKET = SourceTable(
+    key="t100_market",
+    label="T-100 Domestic Market (all carriers) — O&D pax, no capacity",
+    columns=(
+        Column("year", ("YEAR",), "int"),
+        Column("month", ("MONTH",), "int", required=False),
+        Column("quarter", ("QUARTER",), "int", required=False),
+        Column("carrier", ("UNIQUE_CARRIER", "CARRIER", "OP_UNIQUE_CARRIER")),
+        Column("origin", ("ORIGIN",)),
+        Column("dest", ("DEST", "DESTINATION")),
+        Column("service_class", ("CLASS", "SERVICE_CLASS"), "str", required=False),
+        Column("passengers", ("PASSENGERS",), "float"),
+        Column("freight", ("FREIGHT",), "float", required=False),
+        Column("mail", ("MAIL",), "float", required=False),
+        Column("distance_mi", ("DISTANCE",), "float"),
+    ),
+    ddl="""
+        CREATE TABLE IF NOT EXISTS t100_market (
+            year INTEGER, month INTEGER, quarter INTEGER, carrier TEXT,
+            origin TEXT, dest TEXT, service_class TEXT,
+            passengers REAL, freight REAL, mail REAL, distance_mi REAL
+        )""",
+    # Market distances reach further than segment distances: a one-stop
+    # itinerary's market is coast-to-coast even though no leg is.
+    sane_means={"distance_mi": (50.0, 4000.0)},
+)
+
+
+# ============================================================
 # DB1B MARKET — fares
 # ============================================================
 # 10% ticket sample, quarterly. Directional O&D with a MILE-PRORATED fare.
@@ -225,5 +271,6 @@ RUNWAY_REF = SourceTable(
 )
 
 
-ALL_TABLES = (T100_SEGMENT, DB1B_MARKET, DB1B_COUPON, AIRPORT_REF, RUNWAY_REF)
+ALL_TABLES = (T100_SEGMENT, T100_MARKET, DB1B_MARKET, DB1B_COUPON,
+              AIRPORT_REF, RUNWAY_REF)
 TABLES_BY_KEY = {t.key: t for t in ALL_TABLES}
