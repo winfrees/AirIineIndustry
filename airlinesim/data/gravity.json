@@ -1,0 +1,30 @@
+{
+  "terms": [
+    "intercept",
+    "log_out_pax_origin",
+    "log_in_pax_dest",
+    "log_distance_km",
+    "log_distance_km_sq",
+    "hub30_flag",
+    "hub10_flag"
+  ],
+  "coefficients": [
+    -6.267023,
+    0.500687,
+    0.501285,
+    1.030722,
+    -0.108037,
+    -0.193894,
+    0.3747
+  ],
+  "calibration": 1.136802,
+  "r_squared": 0.5091,
+  "n": 6720,
+  "cross_validation": {
+    "folds": 7,
+    "held_out_routes": 6720,
+    "median_ratio": 1.004,
+    "within_2x": 0.6063,
+    "within_3x": 0.7824
+  }
+}

@@ -28,8 +28,17 @@ on:
   workflow_dispatch:
     inputs:
       sources:
-        description: "Comma-separated: t100,db1b_market,db1b_coupon,airports,runways"
+        description: "Comma-separated: t100,t100_market,db1b_market,db1b_coupon,airports,runways"
         default: "t100,db1b_market,db1b_coupon,airports,runways"
+      t100_url:
+        description: "Explicit URL for T-100 SEGMENT (a TranStats session export has no stable URL)"
+        default: ""
+      t100_market_url:
+        description: "Explicit URL for T-100 MARKET (warning: Market has no SEATS/departures)"
+        default: ""
+      t100_request_id:
+        description: "Request-id prefix of a TranStats export, e.g. 896816367"
+        default: ""
       year:
         description: "Year to probe (T-100 month and DB1B quarter below)"
         default: "2024"
@@ -120,6 +129,9 @@ jobs:
             --quarter "${{ inputs.quarter || '2' }}" \
             --limit "${{ inputs.limit || '200000' }}" \
             --max-mb "${{ inputs.max_mb || '400' }}" \
+            --t100-url "${{ inputs.t100_url }}" \
+            --t100-market-url "${{ inputs.t100_market_url }}" \
+            --t100-request-id "${{ inputs.t100_request_id }}" \
             --db warehouse.sqlite \
             --report probe-report.json \
             --summary "$GITHUB_STEP_SUMMARY"

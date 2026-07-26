@@ -23,8 +23,11 @@ constraint enforcement — not partial stubs.
       finance_cabin.py  # cabin classes + seat layout; financing/banking; depreciation
       builder.py        # build_demo_world() / run() convenience entry points
       cli.py            # `airlinesim` command (list / run / demo / probe)
+      routedata.py      # RUNTIME provider: 3-tier historic/comparable lookup
+      data/             # committed distilled snapshot (routes/airports/gravity)
       btsdata/          # DEV-TIME BTS ingest (schema/download/readers/warehouse/
-                        #   probe + fixtures). Never imported at runtime.
+                        #   ingest/distill/discover/probe + fixtures). Never
+                        #   imported at runtime.
       scenarios/        # runnable demos, each with a main()
     pyproject.toml      # pip-installable; console entry point `airlinesim`
 
@@ -62,6 +65,9 @@ constraint enforcement — not partial stubs.
     airlinesim run integration       # full-stack pass/fail check
     airlinesim run btsdata           # BTS ingest check (offline, fixtures)
     airlinesim probe --offline       # the same ingest probe, raw report
+    airlinesim run routedata         # 3-tier route data check (offline, snapshot)
+    airlinesim ingest --t100-market T_T100D_MARKET_ALL_CARRIER.zip \
+        --fetch-airport-ref --distill   # warehouse + regenerate the snapshot
 
 The `integration` scenario is the closest thing to a test suite — it wires every
 subsystem and asserts six invariants. Run it after any engine change.
@@ -75,9 +81,28 @@ demand code.
 
 - `airlinesim/btsdata/` is the dev-time ingest and is **never** imported by
   runtime code — the simulation will read distilled artifacts instead.
-- No BTS download URL has been confirmed live yet; `.github/workflows/bts-probe.yml`
-  is what verifies them, because sandboxes usually block bts.gov.
-- Nothing in the engine consumes this data yet.
+- **T-100 has no stable URL.** It is not in `/PREZIP/` at all; it comes out of the
+  TranStats field-picker as a per-request session export. So the working pattern
+  is export by hand, then `airlinesim ingest --t100-market <zip>`. DB1B and
+  OurAirports URLs *are* confirmed live and pinned in `download.py`.
+- **T-100 Market ≠ Segment.** Market (what's loaded today) has passengers but no
+  SEATS/departures/aircraft type, so load factor, de-censored demand and the
+  seat window are unavailable until a Segment export lands.
+- Warehouse state: T-100 Market 2023–2025 (749,662 rows, 36 monthly partitions,
+  43,170 directional pairs) + OurAirports. Fares (DB1B) not yet loaded.
+- The warehouse is derived and gitignored — rebuild with `airlinesim ingest`.
+  The **snapshot** in `airlinesim/data/` IS committed: 300 airports, 6,720
+  routes, ~364 KB.
+- `routedata.RouteDataProvider` serves three tiers: EXACT (measured pair),
+  COMPARABLE (gravity estimate from endpoint sizes), SYNTHETIC (engine
+  defaults). Every generated RouteSpec carries `data_tier` + `data_vintage`.
+- Tier-2 accuracy is cross-validated and travels in `data/gravity.json`:
+  median predicted/actual 1.004, 60.6% within 2x, 78.2% within 3x.
+- `routedata.py` must NEVER import `btsdata`. Shared logic
+  (`gravity_features`, `seat_window`) lives in `routedata` and `btsdata`
+  imports it, so the fit and the evaluation can't drift apart.
+- Nothing in the engine's demo/scenarios consumes the provider yet — that's
+  Phase 3 (`build_world_from_data`).
 
 ## Known limitations (accurate — don't "fix" silently)
 

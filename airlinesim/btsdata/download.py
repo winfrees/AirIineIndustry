@@ -89,6 +89,58 @@ def t100_candidates(year: int, month: int) -> list:
     ]
 
 
+# TranStats writes field-picker results to a per-request temp path, which is why
+# nothing matching T-100 lives under /PREZIP/ at all. Observed shape:
+#
+#     https://transtats.bts.gov/ftproot/TranStatsData/<request-id>_<TABLE>.zip
+#
+# The <request-id> is generated per form submission, so such a URL is NOT a
+# durable channel: it is the receipt for one export and will 404 once TranStats
+# reaps it. Fine for a one-off ingest, unusable as the monthly refresh channel —
+# for that we need the form POST reproduced (which is what discover.py scrapes
+# the field names for) or a manual re-export.
+FTPROOT = "https://transtats.bts.gov/ftproot/TranStatsData/"
+
+
+def explicit_candidate(url_or_path: str, member_hint: str = ".csv") -> Candidate:
+    """
+    Wrap a URL or local path the operator supplies directly — a session export
+    pasted from the TranStats UI, or a file downloaded by hand. This is the
+    pragmatic unblock when no stable URL exists: fetch it once, then validate the
+    whole chain against it.
+    """
+    channel = "explicit-url" if "://" in url_or_path else "local-file"
+    return Candidate(channel, url_or_path, member_hint=member_hint,
+                     note="supplied by the operator")
+
+
+def t100_export_candidates(table: str, request_id: str = "") -> list:
+    """
+    Candidates for a TranStats session export of a T-100 table.
+    `table` is the raw table name, e.g. T_T100_MARKET_ALL_CARRIER.
+    """
+    out = []
+    if request_id:
+        name = f"{request_id}_{table}.zip"
+        # Try both bases: the temp export root, and PREZIP in case this table
+        # is genuinely published there under the prefixed name.
+        out.append(Candidate("ftproot", FTPROOT + name,
+                             note="TranStats session export — transient"))
+        out.append(Candidate("prezip", f"https://transtats.bts.gov/PREZIP/{name}",
+                             note="prefixed name under PREZIP"))
+    return out
+
+
+def t100_market_candidates(year: int, month: int, request_id: str = "") -> list:
+    """T-100 Domestic Market (all carriers). NOTE: no SEATS/departures."""
+    return t100_export_candidates("T_T100_MARKET_ALL_CARRIER", request_id) + [
+        Candidate("prezip", "https://transtats.bts.gov/PREZIP/T_T100_MARKET_ALL_CARRIER.zip",
+                  note="unprefixed, all years"),
+        Candidate("prezip", f"https://transtats.bts.gov/PREZIP/T_T100_MARKET_ALL_CARRIER_{year}.zip",
+                  note="unprefixed, per-year"),
+    ]
+
+
 def db1b_candidates(table: str, year: int, quarter: int) -> list:
     """DB1B Market or Coupon for one (year, quarter). `table` in {Market, Coupon}."""
     return [
@@ -137,6 +189,19 @@ def fetch(cand: Candidate, max_bytes: int = DEFAULT_MAX_BYTES,
     diagnosable message rather than letting urllib's exception escape, because
     the probe reports these strings verbatim.
     """
+    # A locally downloaded export is a first-class source: when the only way to
+    # get a table is a hand-driven form export, the ingest must be able to read
+    # the file straight off disk.
+    if "://" not in cand.url:
+        try:
+            with open(cand.url, "rb") as fh:
+                payload = fh.read(max_bytes + 1)
+        except OSError as exc:
+            raise FetchError(f"local file unreadable: {exc}") from exc
+        if len(payload) > max_bytes:
+            raise FetchError(f"local file exceeds cap {max_bytes:,} bytes")
+        return payload
+
     last = ""
     for attempt in range(retries):
         req = urllib.request.Request(cand.url, data=cand.data, method=cand.method,

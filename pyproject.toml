@@ -32,4 +32,4 @@ where = ["."]
 include = ["airlinesim*"]
 
 [tool.setuptools.package-data]
-airlinesim = ["webui/**/*"]
+airlinesim = ["webui/**/*", "data/*.csv.gz", "data/*.json"]
