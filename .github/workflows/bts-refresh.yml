@@ -1,0 +1,146 @@
+name: BTS corpus refresh
+
+# Phase 4 of docs/route-data-plan.md — with one honest amendment to the original
+# design. The plan said "monthly cron fetches everything and opens a PR". The
+# probe runs established that the sources split in two:
+#
+#   AUTOMATABLE   DB1B Market/Coupon (stable per-quarter /PREZIP/ URLs) and
+#                 OurAirports (GitHub-hosted). These refresh unattended.
+#   MANUAL ONLY   T-100. It is not in /PREZIP/ at all — it comes out of the
+#                 TranStats field-picker as a per-request session export whose
+#                 URL is a receipt, not a channel. No cron can fetch it.
+#
+# So this workflow automates what is automatable and, for T-100, NOTICES that the
+# corpus has gone stale and says exactly what to re-export. The alternative — a
+# cron that quietly ships a year-old corpus — is worse than one that asks.
+#
+# The warehouse is cached rather than committed (it is derived and large), keyed
+# on the T-100 partitions it holds, so a monthly run doesn't re-download ~370 MB
+# of DB1B it already has.
+
+on:
+  workflow_dispatch:
+    inputs:
+      t100_url:
+        description: "URL or path of a T-100 SEGMENT export (preferred — has SEATS)"
+        default: ""
+      t100_market_url:
+        description: "URL or path of a T-100 MARKET export (no capacity data)"
+        default: ""
+      years:
+        description: "Years to refresh DB1B for (blank = the corpus's own years)"
+        default: ""
+      limit:
+        description: "Cap rows per DB1B member (0 = all; a quarter is ~370 MB)"
+        default: "0"
+      check_only:
+        description: "Only report staleness; write nothing"
+        type: boolean
+        default: false
+      allow_regression:
+        description: "Write the snapshot even if it loses data (not advised)"
+        type: boolean
+        default: false
+  schedule:
+    # Monthly. T-100 publishes ~2 months in arrears and DB1B ~45 days after
+    # quarter end, so more often than this would just re-report the same state.
+    - cron: "0 7 12 * *"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  refresh:
+    name: Refresh corpus and open a PR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e .
+
+      # Prove our own pipeline before touching the network, so a failure here
+      # can't be misread as BTS breaking.
+      - name: Offline pipeline check
+        run: |
+          set -o pipefail
+          python -m airlinesim.cli run btsdata | tee offline.log
+          grep -q "ALL CHECKS PASS" offline.log
+
+      # The warehouse holds the manually-exported T-100 data that a runner cannot
+      # re-fetch, so losing it means the corpus can't be rebuilt until someone
+      # re-exports. Restore-keys let a new run inherit the newest available cache.
+      - name: Restore warehouse cache
+        uses: actions/cache@v4
+        with:
+          path: warehouse.sqlite
+          key: bts-warehouse-${{ github.run_id }}
+          restore-keys: |
+            bts-warehouse-
+
+      - name: Report staleness
+        run: |
+          python -m airlinesim.cli refresh --db warehouse.sqlite --check-only \
+            | tee staleness.log || true
+          {
+            echo "## Corpus staleness"
+            echo '```'
+            cat staleness.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Refresh, distill and diff
+        if: success() && inputs.check_only != true
+        id: refresh
+        run: |
+          python -m airlinesim.cli refresh \
+            --db warehouse.sqlite \
+            --out airlinesim/data \
+            --t100-segment "${{ inputs.t100_url }}" \
+            --t100-market "${{ inputs.t100_market_url }}" \
+            --years "${{ inputs.years }}" \
+            --limit "${{ inputs.limit || '0' }}" \
+            ${{ inputs.allow_regression == true && '--allow-regression' || '' }} \
+            --report refresh-report.json \
+            --pr-body refresh-pr-body.md \
+            --summary "$GITHUB_STEP_SUMMARY"
+
+      # A regenerated snapshot must still satisfy the provider's invariants and
+      # actually fly a world before it is proposed for merge. This is the step
+      # that stops a plausible-looking but broken corpus reaching main.
+      - name: Validate the regenerated snapshot
+        if: success() && inputs.check_only != true
+        run: |
+          set -o pipefail
+          python -m airlinesim.cli run routedata | tee routedata.log
+          grep -q "ALL CHECKS PASS" routedata.log
+          python -m airlinesim.cli run databuilt | tee databuilt.log
+          grep -q "ALL CHECKS PASS" databuilt.log
+          python -m airlinesim.cli run integration | tee integration.log
+          grep -q "ALL CHECKS PASS" integration.log
+
+      - name: Open a PR if the snapshot changed
+        # success() is explicit: a bare `if:` REPLACES the implicit success()
+        # gate, so without it a failed or refused refresh would still open a PR.
+        if: success() && inputs.check_only != true
+        uses: peter-evans/create-pull-request@v6
+        with:
+          add-paths: airlinesim/data
+          branch: bts/corpus-refresh
+          delete-branch: true
+          commit-message: "data: refresh BTS corpus snapshot"
+          title: "data: refresh BTS corpus snapshot"
+          body-path: refresh-pr-body.md
+          labels: data
+
+      - name: Upload refresh report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bts-refresh-report
+          path: |
+            refresh-report.json
+            staleness.log
+          if-no-files-found: warn

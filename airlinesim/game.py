@@ -250,11 +250,17 @@ class GameSession:
                 return False, f"unknown acquisition method {method}"
             terms = _TERMS_BY_METHOD[method_enum]
 
+            # try_acquire() is the authoritative answer to "did it fund?". This
+            # used to decide by matching "DENIED" in the freshly appended log
+            # lines, which worked but coupled a financial invariant to log
+            # wording — rename a message and the player silently gets a free
+            # aircraft. The log lines are still used for the REASON shown to the
+            # player, which is presentation rather than control flow.
             before = len(p.log)
-            self.bank.acquire(p, spec, tail_number, method_enum, terms, p.log)
-            new_msgs = p.log[before:]
-            if any("DENIED" in m for m in new_msgs):
-                return False, "; ".join(m.strip() for m in new_msgs)
+            if not self.bank.try_acquire(p, spec, tail_number, method_enum,
+                                         terms, p.log):
+                reasons = [m.strip() for m in p.log[before:] if m.strip()]
+                return False, "; ".join(reasons) or "acquisition denied"
 
             plane = Airplane(spec=spec, tail_number=tail_number, owner_id=p.player_id,
                               owned=(method_enum != AcquisitionMethod.OPERATING_LEASE),

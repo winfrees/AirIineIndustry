@@ -1,7 +1,7 @@
 # Historic route data — implementation plan (Option C)
 
 Companion to `route-data-design.md`, which has the source investigation. This is
-the agreed build. Status: **plan, awaiting go-ahead.**
+the agreed build. Status: **Phases 0–5 complete.** The one input still missing is a T-100 *Segment* export (see Phase 5).
 
 ## Decisions locked
 
@@ -255,18 +255,102 @@ aggregation are pure functions over file objects, kept strictly separate from
 **Phase 2 — distill + provider.** `distill.py`, `routedata.py`, the gravity fit,
 both backends behind the one interface.
 
-**Phase 3 — engine integration.** `SpecRepository.load(RouteSpec, ...)` — the seam
-CLAUDE.md reserved for this and which is currently unused — plus a
-`build_world_from_data()` alongside `build_demo_world()`. No engine or subsystem
-changes beyond the two additive `RouteSpec` fields.
+**Phase 3 — engine integration. DONE.** `airlinesim/databuilder.py` with
+`build_world_from_data()` / `run_from_data()`, specs flowing through
+`SpecRepository.load()`, and `airlinesim run databuilt` asserting 17 invariants.
+No engine or subsystem changes beyond the two additive `RouteSpec` fields, as
+planned.
 
-**Phase 4 — self-updating refresh.** `.github/workflows/bts-refresh.yml`, monthly
-cron: refresh → distill → open a PR with the regenerated artifact and manifest. It
-must fail loudly rather than commit a partial corpus when BTS is unavailable. The
-"database that updates itself" is therefore a reviewed data commit, which keeps
-every sim reproducible from a git SHA.
+Results on the real corpus (hub ORD, 4 destinations, both directions):
 
-**Phase 5 — docs.** Update CLAUDE.md's known-limitations with the caveats below.
+| Route | Demand | Distance | Aircraft chosen | Seat window |
+|---|---|---|---|---|
+| ORD-LGA | 3,468/day | 1,180 km | 787-9 (290) | 204-600 |
+| ORD-LAX | 3,173/day | 2,807 km | 787-9 (290) | 186-600 |
+| ORD-DEN | 2,817/day | 1,429 km | A320 (180) | 165-600 |
+| ORD-SFO | 2,525/day | 2,971 km | A320 (180) | 148-600 |
+
+Three things the integration surfaced that pure unit checks would not:
+
+- **Frequency has to come from the data too.** One rotation a day against a
+  3,400 px/day market flies ~50% full and makes the corpus look wrong when it
+  isn't. Frequency is now derived from measured demand and capped by airframe
+  hours — after which cabin duty limits trim it further on most trunk ops, so
+  the data-implied schedule genuinely meets the real duty envelope.
+- **Crew depth must scale with the flying based at a station.** A flat two crews
+  per base left a hub originating four routes reporting "no legal crew
+  available" while every aircraft sat serviceable.
+- **Failed acquisitions must not join the fleet.** `Bank.acquire()` returns None
+  when credit is denied, and attaching the Airplane anyway put aircraft in the
+  fleet that were never paid for, inflating net worth to $1.3B. Fixed here;
+  `builder.py` still has the same latent bug and is flagged in CLAUDE.md.
+
+**Phase 4 — self-updating refresh. DONE, with one amendment the data forced.**
+
+The plan assumed a cron could fetch everything. It can't, and the probe runs
+established exactly where the line falls:
+
+| Source | Refresh |
+|---|---|
+| DB1B Market / Coupon | **automatic** — stable per-quarter `/PREZIP/` URLs |
+| OurAirports | **automatic** — GitHub-hosted |
+| T-100 | **manual export only** — no stable URL exists |
+
+So `.github/workflows/bts-refresh.yml` (monthly) automates what is automatable
+and, for T-100, reports staleness with the exact re-export instruction. A cron
+that quietly ships a year-old corpus would be worse than one that asks.
+
+`airlinesim refresh` reports staleness per source, fetches what it can, skips
+partitions already loaded (a DB1B quarter is ~370 MB), re-distills, and diffs
+against the committed snapshot so a reviewer sees which routes moved rather than
+an opaque binary change. The workflow then re-runs `routedata`, `databuilt` and
+`integration` against the regenerated snapshot before opening a PR.
+
+**It refuses to write a snapshot that loses data** — Segment→Market, >10% of
+routes, or a drop in fare/connecting coverage. This matters because a partial
+ingest still distills *successfully*, so a blind cron would cheerfully replace a
+corpus that has capacity and fares with one that has neither.
+
+Fares landed here too, since DB1B is reachable from a runner even though it isn't
+from a dev sandbox:
+
+- **Fares** from DB1B **nonstop markets only** (`market_coupons = 1`). A market
+  fare is the whole journey's mile-prorated fare, so attributing a one-stop fare
+  to a single leg would overstate that leg. Passenger-weighted p25/median/p75.
+- **Connecting share** from DB1B **Coupon**, per segment — Market can't do it, as
+  it only knows the whole journey. `-1.0` means *unknown*, not zero.
+- The provider exposes `suggested_price()` (median, or p75 for a premium
+  carrier), and `route_spec()` now uses the **measured** connecting share to set
+  the segment mix. Business-vs-leisure remains a split of what's left over: no
+  source carries trip purpose.
+- Fares carry their **own vintage** in the manifest, because DB1B collection
+  ended Q2 2025 and generally lags the volume window.
+
+Also hardened: gravity coefficients are **withheld** below 200 routes or with
+non-positive R². The fixture corpus (20 routes) fits at R² = −3044, and serving
+that as a "comparable route" would be fabrication — unknown pairs now resolve
+SYNTHETIC instead.
+
+**Phase 5 — docs. DONE.** CLAUDE.md's known-limitations now separates engine
+caveats from data caveats and tags every data field MEASURED / DERIVED /
+HEURISTIC, mirroring `MANIFEST.json`. README gained a Historic route data section
+with the cross-validated Tier-2 accuracy, and a stale claim was corrected there
+(it said the segment-to-cabin revenue link was unwired; it isn't).
+
+### The one thing still missing
+
+**A T-100 Segment export.** Everything else is in place, and it is a single
+command once you have the file:
+
+```bash
+airlinesim refresh --t100-segment <export.zip>
+```
+
+That one input unlocks, in order of value: real de-censoring (so demand stops
+being understated on full routes), load factor, a *measured* seats-per-departure
+window instead of the frequency-band heuristic, and per-route aircraft-type
+evidence for the "AI right-sizes equipment" next step. Until then the corpus
+declares `demand_basis: censored` and the scenarios assert that it does.
 
 ## Testing, given this sandbox has no BTS access
 

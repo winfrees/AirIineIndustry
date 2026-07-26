@@ -63,17 +63,29 @@ def build():
 
 def make_carrier(world, bank, a320, out_r, ret_r, pid, name, method, terms, layout, price):
     p = Player(pid, name)
-    p.ledger = Ledger(cash=40_000_000)
-    tail = f"{pid}-1"
-    bank.acquire(p, a320, tail, method, terms, p.log)
-    plane = Airplane(spec=a320, tail_number=tail, owner_id=pid,
-                     owned=(method != AcquisitionMethod.OPERATING_LEASE),
-                     location_iata="ORG", acquired_at=world.sim_time)
-    plane2 = Airplane(spec=a320, tail_number=tail+"b", owner_id=pid,
-                      owned=(method != AcquisitionMethod.OPERATING_LEASE),
-                      location_iata="HUB", acquired_at=world.sim_time)
-    bank.acquire(p, a320, tail+"b", method, terms, p.log)
-    p.fleet += [plane, plane2]
+    # $60M covers both 20% down payments plus working capital. At $40M the second
+    # financing was denied for want of $4M and the aircraft was attached anyway,
+    # so this scenario asserted its financial invariants over an airframe that
+    # was never paid for.
+    p.ledger = Ledger(cash=60_000_000)
+    owned = method != AcquisitionMethod.OPERATING_LEASE
+
+    # Only funded aircraft join the fleet, each with its own route op — see
+    # Bank.try_acquire(): acquire() returns None for a denial, and attaching
+    # regardless overstates net worth by a whole airframe.
+    planes, ops = [], []
+    for tail, base, route in ((f"{pid}-1", "ORG", out_r),
+                              (f"{pid}-1b", "HUB", ret_r)):
+        if not bank.try_acquire(p, a320, tail, method, terms, p.log):
+            p.log.append(f"  NOT ACQUIRED {tail}: route {route.spec_id} not opened")
+            continue
+        plane = Airplane(spec=a320, tail_number=tail, owner_id=pid, owned=owned,
+                         location_iata=base, acquired_at=world.sim_time)
+        planes.append(plane)
+        ops.append(RouteOp(spec=route, plane=plane, cockpit=None, cabin=None,
+                           ticket_price=price, daily_frequency=1, owner_id=pid,
+                           layout=layout))
+    p.fleet += planes
     p.crews.append(CrewUnit(CrewSpec("MX","MX",crew_type=CrewType.MAINTENANCE,
                     cost_per_member_hour=75, certifications=("A320",)), headcount=8, owner_id=pid))
     # crew pools at both bases
@@ -83,10 +95,7 @@ def make_carrier(world, bank, a320, out_r, ret_r, pid, name, method, terms, layo
                 cost_per_member_hour=220, certifications=("A320",)), headcount=2, owner_id=pid, home_iata=base))
             p.cabin_pool.append(CrewUnit(CrewSpec("CC",f"CC-{base}{i}",crew_type=CrewType.CABIN,
                 cost_per_member_hour=60), headcount=4, owner_id=pid, home_iata=base))
-    p.route_ops.append(RouteOp(spec=out_r, plane=plane, cockpit=None, cabin=None,
-                               ticket_price=price, daily_frequency=1, owner_id=pid, layout=layout))
-    p.route_ops.append(RouteOp(spec=ret_r, plane=plane2, cockpit=None, cabin=None,
-                               ticket_price=price, daily_frequency=1, owner_id=pid, layout=layout))
+    p.route_ops += ops
     return p
 
 

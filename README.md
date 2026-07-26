@@ -85,6 +85,46 @@ competitor is adding a `Player`, not rewriting allocation logic.
 | `deadhead`    | crews repositioning home on revenue seats                   |
 | `route`       | market structure + equipment/crew suitability validation   |
 | `finance`     | buy vs finance vs lease, with depreciation                  |
+| `btsdata`     | BTS ingest pipeline against committed fixtures (offline)    |
+| `routedata`   | the three-tier historic/comparable route lookup             |
+| `databuilt`   | the engine running on real BTS route data                   |
+| `refresh_cx`  | corpus staleness, diffing, and the data-loss guard          |
+
+## Historic route data
+
+Routes can be modeled from real US Bureau of Transportation Statistics data
+instead of hand-authored constants, with a calibrated fallback when a market
+isn't in the record:
+
+```bash
+airlinesim demo --data --hub ORD    # a world built from the BTS corpus
+airlinesim run routedata            # inspect the three-tier lookup
+airlinesim refresh --check-only      # is the corpus stale? what needs re-export?
+```
+
+A committed snapshot (~364 KB, 300 airports, 6,720 directional routes) ships in
+`airlinesim/data/`, so this works offline with no database to build. Lookups
+resolve in three tiers, and every generated `RouteSpec` records which one it came
+from:
+
+| tier | when | source |
+|---|---|---|
+| `exact` | BTS recorded this directional pair | measured passengers, distance, 12-month seasonal shape |
+| `comparable` | pair absent, both airports known | gravity model fitted on the measured pairs, using each endpoint's real traffic as its size |
+| `synthetic` | an airport is unknown | the engine's own defaults, unchanged |
+
+The comparable-route model is cross-validated rather than asserted, and the
+numbers ship with the data in `data/gravity.json`: **median predicted/actual
+1.004, 60.6% of held-out routes within 2×, 78.2% within 3×**.
+
+Rebuilding the corpus from a fresh BTS export:
+
+```bash
+airlinesim ingest --t100-market <export.zip> --fetch-airport-ref --distill
+```
+
+See `docs/route-data-design.md` for which BTS tables cover what, and
+`docs/route-data-plan.md` for the build.
 
 ## Extending
 
@@ -103,13 +143,21 @@ simplifications:
 - Maintenance intervals, depreciation rates, and duty limits are
   industry-*shaped* defaults for game balance, not certified figures. They are
   data and trivially swappable.
-- Route demand maps conceptually onto cabin classes but the segment-to-cabin
-  revenue link is not yet wired (segments drive total demand; cabin split is
-  separate).
+- Route demand *is* wired through to cabin revenue — each segment is its own
+  priced, capacity-bound pool — but the segment-to-cabin split fractions are a
+  single global default rather than per-route.
 - Crew positioning deadheads direct-to-base only; multi-hop routing and ferry
   (positioning) flights are not yet implemented.
 - The bundled AI adjusts price/frequency but does not yet use route suitability
   to right-size equipment.
+- On the historic data specifically: the shipped corpus is built from T-100
+  **Market**, which carries no seat counts, so demand equals passengers *flown*
+  and is understated on full routes. Capacity, load factor and a measured seat
+  window need a T-100 **Segment** export. Day-of-week profiles and the
+  business-vs-leisure split are not from data at all — no BTS source carries trip
+  purpose. Gate counts and fuel throughput have no public dataset and remain
+  heuristics. Each field's footing is tagged MEASURED / DERIVED / HEURISTIC in
+  `airlinesim/data/MANIFEST.json`.
 
 ## License
 

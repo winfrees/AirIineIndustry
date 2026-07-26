@@ -249,11 +249,34 @@ class Bank:
         cash = max(1.0, player.ledger.cash)
         return (projected / cash) <= self.max_debt_to_cash
 
+    def try_acquire(self, player, spec, tail_number: str,
+                    method: AcquisitionMethod, terms: FinancingTerms,
+                    log: list) -> bool:
+        """
+        acquire(), but answering the question callers actually have: DID IT FUND?
+
+        Prefer this over acquire() unless you need the Loan/Lease object. Because
+        acquire() returns None both for a denial AND for a successful BUY_CASH,
+        every call site was re-deriving that distinction — and three of them got
+        it wrong by attaching the Airplane regardless, putting aircraft in fleets
+        that were never paid for and overstating net worth by a whole airframe.
+
+        Attach the Airplane only when this returns True.
+        """
+        before_cash = player.ledger.cash
+        result = self.acquire(player, spec, tail_number, method, terms, log)
+        if method == AcquisitionMethod.BUY_CASH:
+            return player.ledger.cash < before_cash
+        return result is not None
+
     def acquire(self, player, spec, tail_number: str, method: AcquisitionMethod,
                 terms: FinancingTerms, log: list) -> Optional[object]:
         """
         Execute an acquisition. Returns the created Loan/Lease (or None for cash).
         Mutates the player's ledger and debt books. Caller attaches the Airplane.
+
+        CAUTION: None means "denied" for FINANCE/OPERATING_LEASE but "succeeded"
+        for BUY_CASH. Use try_acquire() unless you need the returned object.
         """
         price = spec.list_price
 

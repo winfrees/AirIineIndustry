@@ -65,12 +65,35 @@ def crews(pid):
     return mx, fd, cc
 
 
+# Working capital every carrier starts with, on top of whatever its acquisition
+# method actually costs up front.
+WORKING_CAPITAL = 30_000_000
+
+
+def required_cash(a320, method, terms) -> float:
+    """
+    Up-front outlay the chosen method demands. Sizing every carrier at a flat
+    $30M meant CashAir was told to buy a $110M aircraft outright: the ledger
+    debit was DENIED and the aircraft was attached anyway, so this scenario
+    spent its life contrasting a cash purchase that never happened against two
+    that did.
+    """
+    if method == AcquisitionMethod.BUY_CASH:
+        return a320.list_price
+    if method == AcquisitionMethod.FINANCE:
+        return a320.list_price * terms.down_payment_frac
+    return 0.0            # operating lease: no capital outlay, just rent
+
+
 def make_carrier(world, bank, a320, route, pid, name, method, terms, layout, price):
     p = Player(pid, name)
-    p.ledger = Ledger(cash=30_000_000)
+    p.ledger = Ledger(cash=required_cash(a320, method, terms) + WORKING_CAPITAL)
     tail = f"{pid}-001"
-    # acquire via the bank using the chosen method
-    bank.acquire(p, a320, tail, method, terms, p.log)
+    # try_acquire() rather than acquire(), so a denial can't leave an
+    # unpaid-for aircraft in the fleet inflating net worth.
+    if not bank.try_acquire(p, a320, tail, method, terms, p.log):
+        raise RuntimeError(f"{name}: could not acquire {tail} via {method.name} "
+                           f"— required_cash() is understating the outlay")
     plane = Airplane(spec=a320, tail_number=tail, owner_id=pid,
                      owned=(method != AcquisitionMethod.OPERATING_LEASE),
                      location_iata="ORG", acquired_at=world.sim_time)
@@ -147,8 +170,13 @@ def main():
     print()
 
     ctx = {"market": MarketConditions()}
+    # Each carrier was funded with its method's up-front outlay plus the same
+    # working capital, so all three enter service with identical cash and the
+    # only differences are debt and asset ownership — which is the contrast this
+    # scenario exists to show. (This line used to say "starting cash" while
+    # printing the post-acquisition balance.)
     for p in (cashco, finco, leaseco):
-        print(f"{p.name}: starting cash ${p.ledger.cash:,.0f}")
+        print(f"{p.name}: working capital after acquisition ${p.ledger.cash:,.0f}")
 
     print("\n=== 1 YEAR OPERATION ===")
     for day in range(365):

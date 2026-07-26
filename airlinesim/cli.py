@@ -7,9 +7,10 @@ Usage:
     python -m airlinesim.cli demo [--days N]
     python -m airlinesim.cli gui [--port N] [--no-browser]
     python -m airlinesim.cli probe [--offline] [--year Y --month M]
+    python -m airlinesim.cli refresh [--check-only]
 
 Scenarios: competitive, integration, crew, deadhead, roster, route, finance,
-           btsdata, routedata
+           btsdata, routedata, databuilt, refresh_cx
 """
 import argparse
 import importlib
@@ -25,6 +26,8 @@ SCENARIOS = {
     "finance":     "airlinesim.scenarios.scenario_finance_cabin",
     "btsdata":     "airlinesim.scenarios.scenario_btsdata",
     "routedata":   "airlinesim.scenarios.scenario_routedata",
+    "databuilt":   "airlinesim.scenarios.scenario_databuilt",
+    "refresh_cx":  "airlinesim.scenarios.scenario_refresh",
 }
 
 
@@ -48,6 +51,10 @@ def cmd_run(args):
 
 
 def cmd_demo(args):
+    if getattr(args, "data", False):
+        from airlinesim.databuilder import run_from_data
+        run_from_data(days=args.days, hub=args.hub)
+        return
     from airlinesim import build_demo_world, run
     _, engine = build_demo_world()
     run(engine, days=args.days)
@@ -83,6 +90,9 @@ def main(argv=None):
     if args_in and args_in[0] == "ingest":
         from airlinesim.btsdata.ingest import main as ingest_main
         sys.exit(ingest_main(args_in[1:]))
+    if args_in and args_in[0] == "refresh":
+        from airlinesim.btsdata.refresh import main as refresh_main
+        sys.exit(refresh_main(args_in[1:]))
 
     parser = argparse.ArgumentParser(prog="airlinesim",
         description="Airline asset & resource management simulator.")
@@ -96,6 +106,10 @@ def main(argv=None):
 
     pd = sub.add_parser("demo", help="run the built-in two-carrier demo")
     pd.add_argument("--days", type=int, default=60, help="days to simulate")
+    pd.add_argument("--data", action="store_true",
+                    help="build the world from the BTS corpus instead of "
+                         "hand-authored constants")
+    pd.add_argument("--hub", default="ORD", help="hub airport for --data")
     pd.set_defaults(func=cmd_demo)
 
     sub.add_parser("probe", add_help=False,
@@ -104,6 +118,9 @@ def main(argv=None):
     sub.add_parser("ingest", add_help=False,
                    help="load BTS exports into the SQLite warehouse "
                         "(try: ingest --help)")
+    sub.add_parser("refresh", add_help=False,
+                   help="refresh the corpus: staleness, fetch, distill, diff "
+                        "(try: refresh --help)")
 
     pg = sub.add_parser("gui", help="launch the browser-based game GUI")
     pg.add_argument("--port", type=int, default=8765, help="port to serve on")
