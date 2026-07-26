@@ -12,6 +12,17 @@ name: BTS data probe
 # Expect the first run to FAIL on header or URL guesses. That is the job doing
 # its work: the summary prints the actual headers and the channel that answered,
 # which is what you paste back into schema.py / download.py.
+#
+# READING THE RESULT — two traps, both hit already:
+#
+#  * "Re-run jobs" REPLAYS THE ORIGINAL COMMIT. It never picks up new code, so a
+#    re-run after a fix reproduces the identical summary. Always start a fresh
+#    dispatch, and pick the branch holding the fix in the Run-workflow dropdown.
+#    Every summary now carries a "probe format vN · commit <sha>" line; if that
+#    line is missing or the sha isn't what you expect, you are reading stale code.
+#  * The `live` job is continue-on-error, so the green tick reflects the workflow,
+#    not the data. The verdict is the "## BTS data probe — PASS/FAIL" heading in
+#    the run summary.
 
 on:
   workflow_dispatch:
