@@ -106,9 +106,11 @@ push (`v*`), on manual dispatch, and on PRs touching the engine or build tooling
 - A tag must match `pyproject.toml` *and* `airlinesim/__init__.__version__` —
   the workflow refuses to publish an artifact whose name disagrees with the
   version inside it. Bump both when releasing.
-- The embeddable zip is fetched over HTTPS from python.org and is only pinned if
-  a maintainer passes `--sha256` / the `embed_sha256` dispatch input. The build
-  prints the digest it saw so it can be pinned.
+- The embeddable zip is fetched from python.org and its sha256 is pinned in
+  `KNOWN_SHA256`. Bumping the bundled CPython means adding the new digest
+  (cross-checked against python.org's published sums) — a mismatch is meant to
+  stop the build, not to be worked around by dropping the pin. A version with no
+  entry still builds and prints its digest so it can be added.
 
 ## Historic route data (in progress)
 

@@ -32,7 +32,7 @@ on:
         description: "Embeddable CPython to bundle (must satisfy requires-python)"
         default: "3.12.10"
       embed_sha256:
-        description: "Expected sha256 of the embeddable zip (optional but recommended)"
+        description: "Override the built-in digest pin (needed only for a python_version with no pin)"
         default: ""
       prerelease_tag:
         description: "Publish a pre-release under this tag (leave empty to only build)"

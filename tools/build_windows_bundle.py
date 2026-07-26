@@ -41,6 +41,16 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PYTHON = "3.12.10"
 EMBED_URL = ("https://www.python.org/ftp/python/{v}/python-{v}-embed-{arch}.zip")
 
+# Digests of the official embeddable zips, so the interpreter we ship is pinned
+# rather than trusted on HTTPS alone. Recorded from a python.org download in CI
+# (run 30194658891); cross-check against python.org's published checksums before
+# adding or changing an entry. A version with no entry here still builds — the
+# digest is printed instead of verified, and --sha256 always overrides.
+KNOWN_SHA256 = {
+    ("3.12.10", "amd64"):
+        "4acbed6dd1c744b0376e3b1cf57ce906f9dc9e95e68824584c8099a63025a3c3",
+}
+
 
 # --------------------------------------------------------------------------
 # embeddable CPython
@@ -65,13 +75,16 @@ def fetch_embeddable(version: str, arch: str, cache: Path,
         if digest.lower() != expected_sha256.lower():
             raise SystemExit(
                 f"embeddable zip digest mismatch\n  expected {expected_sha256}\n"
-                f"  got      {digest}")
-        print("[bundle] digest matches --sha256")
+                f"  got      {digest}\n"
+                f"Either the download is wrong or KNOWN_SHA256 is stale for "
+                f"{version}/{arch}. Do not 'fix' this by deleting the pin.")
+        print("[bundle] digest verified against the pin")
     else:
         # Honest about what is and isn't verified: the transport is HTTPS to
-        # python.org, but nothing pins the artifact unless a maintainer passes
-        # the digest above. Printed so it can be pinned.
-        print("[bundle] NOTE: no --sha256 given; artifact is trusted on HTTPS alone")
+        # python.org, but nothing pins this artifact — no KNOWN_SHA256 entry and
+        # no --sha256. Printed so it can be pinned.
+        print(f"[bundle] NOTE: {version}/{arch} is unpinned; the download is "
+              f"trusted on HTTPS alone. Add the digest above to KNOWN_SHA256.")
     return dest
 
 
@@ -340,7 +353,8 @@ def main(argv=None) -> int:
     p.add_argument("--cache", type=Path, default=Path(".embed-cache"),
                    help="where to keep the downloaded embeddable zip")
     p.add_argument("--sha256", default=os.environ.get("EMBED_SHA256") or None,
-                   help="expected sha256 of the embeddable zip (recommended)")
+                   help="expected sha256 of the embeddable zip; overrides the "
+                        "built-in pin for this version/arch")
     p.add_argument("--commit", default=os.environ.get("GITHUB_SHA", "unknown"),
                    help="commit recorded in BUILD-INFO.txt")
     args = p.parse_args(argv)
@@ -349,8 +363,9 @@ def main(argv=None) -> int:
         raise SystemExit(f"--wheel not found: {args.wheel}")
     args.out.mkdir(parents=True, exist_ok=True)
 
+    sha256 = args.sha256 or KNOWN_SHA256.get((args.python_version, args.arch))
     build(args.version, args.python_version, args.arch, args.out,
-          args.wheel, args.cache, args.sha256, args.commit)
+          args.wheel, args.cache, sha256, args.commit)
     return 0
 
 
