@@ -37,18 +37,49 @@ def _a320(repo):
     return spec
 
 
+def _acquire(bank, p, spec, tail, method, terms) -> bool:
+    """
+    Did the acquisition actually fund?
+
+    Bank.acquire() returns the Loan/Lease it created, or None when credit is
+    denied or cash is short — but None is ALSO the success value for BUY_CASH,
+    so that one case is disambiguated by watching the ledger.
+    """
+    before_cash = p.ledger.cash
+    result = bank.acquire(p, spec, tail, method, terms, p.log)
+    if method == AcquisitionMethod.BUY_CASH:
+        return p.ledger.cash < before_cash
+    return result is not None
+
+
+# Enough for both A320 down payments (20% of $110M each) plus working capital.
+# At $40M the second financing was denied for want of $4M, and the aircraft was
+# attached anyway — see _carrier.
+START_CASH = 60_000_000
+
+
 def _carrier(world, bank, a320, out_r, ret_r, pid, name, method, terms, layout, price):
     p = Player(pid, name)
-    p.ledger = Ledger(cash=40_000_000)
-    bank.acquire(p, a320, f"{pid}-1", method, terms, p.log)
-    bank.acquire(p, a320, f"{pid}-2", method, terms, p.log)
+    p.ledger = Ledger(cash=START_CASH)
     owned = method != AcquisitionMethod.OPERATING_LEASE
-    p.fleet = [
-        Airplane(spec=a320, tail_number=f"{pid}-1", owner_id=pid, owned=owned,
-                 location_iata="ORG", acquired_at=world.sim_time),
-        Airplane(spec=a320, tail_number=f"{pid}-2", owner_id=pid, owned=owned,
-                 location_iata="HUB", acquired_at=world.sim_time),
-    ]
+
+    # Only aircraft that actually funded join the fleet, and each one carries its
+    # own route op. Attaching the Airplane regardless of the bank's answer put
+    # aircraft in the fleet that were never paid for: FinanceAir flew two A320s
+    # against one loan, and the un-financed airframe still counted as an owned
+    # asset, overstating net worth by its full depreciated value.
+    p.fleet, ops = [], []
+    for idx, (route, base) in enumerate(((out_r, "ORG"), (ret_r, "HUB")), start=1):
+        tail = f"{pid}-{idx}"
+        if not _acquire(bank, p, a320, tail, method, terms):
+            p.log.append(f"  NOT ACQUIRED {tail}: route {route.spec_id} not opened")
+            continue
+        plane = Airplane(spec=a320, tail_number=tail, owner_id=pid, owned=owned,
+                         location_iata=base, acquired_at=world.sim_time)
+        p.fleet.append(plane)
+        ops.append(RouteOp(spec=route, plane=plane, cockpit=None, cabin=None,
+                           ticket_price=price, daily_frequency=1, owner_id=pid,
+                           layout=layout))
     p.crews.append(CrewUnit(CrewSpec("MX", "MX", crew_type=CrewType.MAINTENANCE,
                    cost_per_member_hour=75, certifications=("A320",)), headcount=8, owner_id=pid))
     for base in ("ORG", "HUB"):
@@ -57,12 +88,7 @@ def _carrier(world, bank, a320, out_r, ret_r, pid, name, method, terms, layout, 
                 cost_per_member_hour=220, certifications=("A320",)), headcount=2, owner_id=pid, home_iata=base))
             p.cabin_pool.append(CrewUnit(CrewSpec("CC", f"CC-{base}{i}", crew_type=CrewType.CABIN,
                 cost_per_member_hour=60), headcount=4, owner_id=pid, home_iata=base))
-    p.route_ops = [
-        RouteOp(spec=out_r, plane=p.fleet[0], cockpit=None, cabin=None,
-                ticket_price=price, daily_frequency=1, owner_id=pid, layout=layout),
-        RouteOp(spec=ret_r, plane=p.fleet[1], cockpit=None, cabin=None,
-                ticket_price=price, daily_frequency=1, owner_id=pid, layout=layout),
-    ]
+    p.route_ops = ops
     return p
 
 

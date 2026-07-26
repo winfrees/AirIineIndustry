@@ -133,12 +133,16 @@ demand code.
 - The bundled AI adjusts price/frequency but doesn't use route suitability to
   right-size equipment.
 - Roster is conservative — can leave capacity unflown.
-- **BUG (pre-existing, in `builder.py`)**: `build_demo_world()` attaches an
-  Airplane even when `Bank.acquire()` returns None. FinanceAir ends up with a
-  fleet of 2 but only 1 loan — FIN-2 is credit-denied, yet flies and counts as an
-  owned asset, overstating net worth. `databuilder.py` does NOT have this (it
-  skips failed acquisitions); fixing `builder.py` would change the demo and
-  `integration` baselines, so it is left flagged rather than changed silently.
+- `Bank.acquire()` returns the Loan/Lease or **None** on denial, and leaves
+  attaching the Airplane to the caller — so every call site must check. Missing
+  the check puts aircraft in a fleet that were never paid for and overstates net
+  worth. `builder.py` (via `_acquire()`) and `databuilder.py` check; `game.py`
+  checks by matching "DENIED" in the log. **Still unchecked:**
+  `scenarios/integration.py` (manifests it — FinanceAir flies 2 A320s against 1
+  loan at $40M starting cash) and `scenarios/scenario_finance_cabin.py` (latent;
+  its single $22M down payment currently fits in $30M cash). Note that None is
+  also the *success* value for `BUY_CASH`, which is why `_acquire()`
+  disambiguates that case via the ledger.
 
 ## Good next steps (from prior design discussion)
 
