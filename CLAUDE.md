@@ -132,19 +132,17 @@ demand code.
 
 ## Known limitations (accurate — don't "fix" silently)
 
+### Engine
+
 - Maintenance intervals, depreciation rates, duty limits are industry-*shaped*
   defaults for game balance, NOT certified figures.
-- Route demand splits into business/leisure/connecting segments, each segment
-  is now its own priced, capacity-bound demand pool resolved independently
-  by the arbiter. Each segment's demand is partitioned across its cabin(s) by
-  a fixed fraction (business -> 12.5% FIRST / 87.5% BUSINESS; leisure ->
-  15.2% PREMIUM / 84.8% ECONOMY; connecting -> 100% ECONOMY), so every cabin
-  now has a real segment source with no double-counting. Pool size responds
-  to a capacity-weighted average price signal, so segment elasticity
-  actually bites. The FIRST/BUSINESS and PREMIUM/ECONOMY split fractions are
-  fixed game-balance defaults (matched to the existing
-  `DEFAULT_SEAT_CLASSES` demand_share ratios), not derived per-route or
-  certified figures — see `route.py`'s `SEGMENT_CABIN_SPLIT`.
+- Route demand splits into business/leisure/connecting segments, each its own
+  priced, capacity-bound pool resolved independently by the arbiter. Each
+  segment's demand is partitioned across its cabin(s) by a fixed fraction
+  (business -> 12.5% FIRST / 87.5% BUSINESS; leisure -> 15.2% PREMIUM / 84.8%
+  ECONOMY; connecting -> 100% ECONOMY). Those split fractions are global
+  game-balance defaults matched to `DEFAULT_SEAT_CLASSES`, not per-route or
+  certified — see `route.py`'s `SEGMENT_CABIN_SPLIT`.
 - Crew deadheading is direct-to-base only; no multi-hop routing or ferry flights.
 - The bundled AI adjusts price/frequency but doesn't use route suitability to
   right-size equipment.
@@ -153,9 +151,63 @@ demand code.
   Loan/Lease object. `acquire()` returns None both for a denial AND for a
   successful `BUY_CASH`, and it leaves attaching the Airplane to the caller;
   three call sites got that wrong and flew aircraft that were never paid for,
-  overstating net worth by whole airframes. `try_acquire()` answers "did it
-  fund?" and every call site in the package now uses it — builders, scenarios
-  and `game.py` alike. Attach the Airplane only when the answer is True.
+  overstating net worth by whole airframes. Every call site in the package now
+  uses `try_acquire()`. Attach the Airplane only when it returns True.
+
+### Historic route data — what is measured, derived, and guessed
+
+`airlinesim/data/MANIFEST.json` tags every field. Summary:
+
+**MEASURED** (straight from BTS): passenger volumes, distance, the 12 monthly
+multipliers, runway lengths, per-airport inbound/outbound traffic. Plus, when
+DB1B is loaded: nonstop-market fares and per-segment connecting share.
+
+**DERIVED** (a stated transformation): the single-harmonic seasonal fit, the
+gravity coefficients, and de-censoring where capacity exists.
+
+**HEURISTIC** (no public dataset — game balance):
+- `total_gates` and `fuel_supply_per_day_l` — scaled off passenger volume.
+- `min_runway_m` as a route *requirement* — banded by stage length. The
+  airports' actual runway lengths are measured; what a route *requires* is not
+  in any dataset and can't be inferred without aircraft types.
+- The economic seat window — derived from a plausible daily-frequency band
+  (0.7–20 departures at 85% load factor), standing in for the
+  seats-per-departure distribution a Segment export would give us.
+- `databuilder`'s `CARRIER_MARKET_SHARE`, `DAILY_UTILIZATION_H`, `CREW_DEPTH`.
+
+**Specific caveats that must not be "fixed" silently:**
+
+1. **Demand is CENSORED in the shipped corpus.** T-100 passengers are those
+   *flown* — `min(demand, capacity)` after the carrier already optimized. The
+   shipped corpus is T-100 **Market**, which has no `SEATS`, so there is nothing
+   to de-censor against and demand is understated on full routes. A T-100
+   **Segment** export fixes this and is the single highest-value missing input.
+2. **`dow_profile` is not from data.** T-100 is monthly; nothing in it informs
+   day-of-week. It stays `route.py`'s constants.
+3. **Business-vs-leisure is not measured.** With DB1B coupons loaded, the
+   *connecting* share is real; business vs leisure is then just a split of the
+   remainder in the caller's ratio. No BTS source carries trip purpose.
+4. **Fares are journey fares, restricted to nonstop markets.** DB1B market fare
+   covers a whole itinerary, so only `market_coupons = 1` rows are used. It is a
+   10% sample, so thin pairs are noisy, and fares are in their own year's dollars
+   with **no deflator**.
+5. **Fare vintage lags volume vintage.** DB1B collection ended Q2 2025; the
+   manifest records the two windows separately rather than implying one.
+6. **Tier-2 is a fitted estimate, not a measurement.** Cross-validated at median
+   predicted/actual 1.004, 60.6% within 2×, 78.2% within 3× — so roughly a third
+   of comparable routes are off by more than 2×. A more accurate variant with a
+   size-interaction term was **rejected**: it inverts the origin-size elasticity
+   for destinations below ~1,100 inbound pax/day (51% of corpus airports), and a
+   model where a route thins out as its origin grows is qualitatively wrong.
+   `scenario_routedata` asserts monotonicity so it can't creep back.
+7. **Gravity is withheld below 200 routes or non-positive R².** A 7-parameter fit
+   on 20 routes returns R² = −3044; unknown pairs then resolve SYNTHETIC rather
+   than being served a fabricated comparable.
+8. **`/PREZIP/` is undocumented** and can vanish. T-100 is not there at all — it
+   is a TranStats field-picker session export whose URL is a receipt, not a
+   channel. OD40/DB1C (which replaced DB1B) needs its own reader.
+9. **The 2015 vintage question is moot** — the loaded export turned out to be
+   2023–2025, so the corpus is the intended recent post-COVID window.
 
 ## Good next steps (from prior design discussion)
 

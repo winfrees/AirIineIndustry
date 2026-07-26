@@ -1,7 +1,7 @@
 # Historic route data — implementation plan (Option C)
 
 Companion to `route-data-design.md`, which has the source investigation. This is
-the agreed build. Status: **plan, awaiting go-ahead.**
+the agreed build. Status: **Phases 0–5 complete.** The one input still missing is a T-100 *Segment* export (see Phase 5).
 
 ## Decisions locked
 
@@ -331,7 +331,26 @@ non-positive R². The fixture corpus (20 routes) fits at R² = −3044, and serv
 that as a "comparable route" would be fabrication — unknown pairs now resolve
 SYNTHETIC instead.
 
-**Phase 5 — docs.** Update CLAUDE.md's known-limitations with the caveats below.
+**Phase 5 — docs. DONE.** CLAUDE.md's known-limitations now separates engine
+caveats from data caveats and tags every data field MEASURED / DERIVED /
+HEURISTIC, mirroring `MANIFEST.json`. README gained a Historic route data section
+with the cross-validated Tier-2 accuracy, and a stale claim was corrected there
+(it said the segment-to-cabin revenue link was unwired; it isn't).
+
+### The one thing still missing
+
+**A T-100 Segment export.** Everything else is in place, and it is a single
+command once you have the file:
+
+```bash
+airlinesim refresh --t100-segment <export.zip>
+```
+
+That one input unlocks, in order of value: real de-censoring (so demand stops
+being understated on full routes), load factor, a *measured* seats-per-departure
+window instead of the frequency-band heuristic, and per-route aircraft-type
+evidence for the "AI right-sizes equipment" next step. Until then the corpus
+declares `demand_basis: censored` and the scenarios assert that it does.
 
 ## Testing, given this sandbox has no BTS access
 
