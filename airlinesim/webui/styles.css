@@ -78,12 +78,33 @@ html, body {
 .btn.warn { border-color: var(--bad); color: var(--bad); }
 .btn.small { padding: 0.25rem 0.55rem; font-size: 0.75rem; }
 
+/* Two-column block grid. Blocks are whole units — a card is either 1x1 (one
+   column) or 1x2 (both). Heights follow content; the two cards sharing a row
+   stretch to match each other, so a row still reads as a pair of blocks. */
 main {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.9rem;
   padding: 0.9rem;
   padding-bottom: calc(0.9rem + env(safe-area-inset-bottom));
+}
+
+/* 1x2 — full width. These hold the wide tables and the multi-control forms,
+   which need the whole row to lay out without wrapping. */
+#playersCard,
+#routesCard,
+#fleetCard,
+#logCard { grid-column: 1 / -1; }
+
+/* 1x1 — the Crew / Airports pair, side by side. */
+#crewCard,
+#marketCard { grid-column: span 1; }
+
+/* Below two usable columns, every block becomes full width. */
+@media (max-width: 720px) {
+  main { grid-template-columns: minmax(0, 1fr); }
+  #crewCard,
+  #marketCard { grid-column: 1 / -1; }
 }
 
 .card {
@@ -99,6 +120,10 @@ main {
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
+
+/* Tables are wide (Routes is 9 columns). Scroll them inside their block so a
+   narrow viewport never gives the whole page a horizontal scrollbar. */
+#routes, #fleet, #airports { overflow-x: auto; }
 
 table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
 th, td { text-align: left; padding: 0.35rem 0.4rem; border-bottom: 1px solid var(--card-border); }
