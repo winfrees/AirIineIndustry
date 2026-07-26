@@ -138,9 +138,8 @@ demand code.
   successful `BUY_CASH`, and it leaves attaching the Airplane to the caller;
   three call sites got that wrong and flew aircraft that were never paid for,
   overstating net worth by whole airframes. `try_acquire()` answers "did it
-  fund?" and every builder/scenario now uses it. `game.py` predates it and
-  checks by matching "DENIED" in the log — correct, but fragile.
-  Attach the Airplane only when the answer is True.
+  fund?" and every call site in the package now uses it — builders, scenarios
+  and `game.py` alike. Attach the Airplane only when the answer is True.
 
 ## Good next steps (from prior design discussion)
 
