@@ -8,6 +8,9 @@ venv/
 .pytest_cache/
 .DS_Store
 
+# downloaded embeddable CPython for the Windows bundle (rebuildable)
+.embed-cache/
+
 # BTS warehouse (derived, rebuildable from exports — never commit)
 *.sqlite
 *.sqlite-journal

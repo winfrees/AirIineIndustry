@@ -30,6 +30,9 @@ constraint enforcement — not partial stubs.
                         #   ingest/distill/discover/probe + fixtures). Never
                         #   imported at runtime.
       scenarios/        # runnable demos, each with a main()
+    tools/              # DEV-TIME build tooling (never imported by the package):
+                        #   build_windows_bundle.py  portable Windows build
+                        #   smoke_windows_bundle.py  scenario/CLI/GUI smoke test
     pyproject.toml      # pip-installable; console entry point `airlinesim`
 
 ## Core architecture (do not break these)
@@ -76,6 +79,38 @@ constraint enforcement — not partial stubs.
 
 The `integration` scenario is the closest thing to a test suite — it wires every
 subsystem and asserts six invariants. Run it after any engine change.
+
+`python tools/smoke_windows_bundle.py` is the wider net: every self-checking
+scenario (grepping for `ALL CHECKS PASS`, since scenarios signal failure in
+their *output*, not their exit code), the report-only scenarios, the CLI, and a
+live GUI server fetch. Runs on any OS despite the name. It requires the package
+to be **installed** and runs every subprocess in a temp directory, deliberately:
+`python -m airlinesim.cli` puts the working directory on `sys.path`, so a run
+from the repo root imports the checkout and the install is never tested — which
+is how `btsdata/fixtures/*.csv` shipped missing from the wheel. Any new non-`.py`
+file under `airlinesim/` needs a matching `[tool.setuptools.package-data]` entry.
+
+## Windows releases
+
+`.github/workflows/windows-release.yml` builds a portable Windows bundle on tag
+push (`v*`), on manual dispatch, and on PRs touching the engine or build tooling.
+
+- The bundle is the official **embeddable CPython** zip + the package installed
+  into `python\Lib\site-packages` + `.bat` launchers. Not PyInstaller, not a
+  zipapp: `routedata.DATA_DIR` and `server.WEBUI_DIR` are `__file__`-relative
+  and need real files on disk. Keep it that way or rewrite both to
+  `importlib.resources` first.
+- The launchers set `PYTHONUTF8=1` and `chcp 65001`. The engine prints em
+  dashes, arrows and `R²`; under Windows' legacy code pages those raise
+  `UnicodeEncodeError` as soon as output is piped or redirected.
+- A tag must match `pyproject.toml` *and* `airlinesim/__init__.__version__` —
+  the workflow refuses to publish an artifact whose name disagrees with the
+  version inside it. Bump both when releasing.
+- The embeddable zip is fetched from python.org and its sha256 is pinned in
+  `KNOWN_SHA256`. Bumping the bundled CPython means adding the new digest
+  (cross-checked against python.org's published sums) — a mismatch is meant to
+  stop the build, not to be worked around by dropping the pin. A version with no
+  entry still builds and prints its digest so it can be added.
 
 ## Historic route data (in progress)
 
