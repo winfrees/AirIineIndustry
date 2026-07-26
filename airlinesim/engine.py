@@ -134,6 +134,12 @@ class RouteSpec(SpecBase):
     # equipment + crew requirements (route.py)
     equipment_req: object = None      # EquipmentRequirements
     crew_req: object = None           # CrewRequirements
+    # provenance, set by routedata.RouteDataProvider (empty for hand-authored
+    # specs). 'exact' = measured BTS pair, 'comparable' = gravity estimate,
+    # 'synthetic' = engine defaults. Carried so a fitted estimate can never be
+    # mistaken for a measurement downstream.
+    data_tier: str = ""
+    data_vintage: str = ""
 
 
 # ============================================================

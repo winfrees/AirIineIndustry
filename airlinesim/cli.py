@@ -9,7 +9,7 @@ Usage:
     python -m airlinesim.cli probe [--offline] [--year Y --month M]
 
 Scenarios: competitive, integration, crew, deadhead, roster, route, finance,
-           btsdata
+           btsdata, routedata
 """
 import argparse
 import importlib
@@ -24,6 +24,7 @@ SCENARIOS = {
     "route":       "airlinesim.scenarios.scenario_route",
     "finance":     "airlinesim.scenarios.scenario_finance_cabin",
     "btsdata":     "airlinesim.scenarios.scenario_btsdata",
+    "routedata":   "airlinesim.scenarios.scenario_routedata",
 }
 
 

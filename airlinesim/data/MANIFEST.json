@@ -1,0 +1,75 @@
+{
+  "generated_at": "2026-07-26T07:29:12.229984+00:00",
+  "volume_table": "t100_market",
+  "years": [
+    2023,
+    2025
+  ],
+  "span_days": 1095.8,
+  "passenger_class": "F",
+  "corpus_airports": 300,
+  "routes": 6720,
+  "airports": 300,
+  "demand_basis": [
+    "censored"
+  ],
+  "target_load_factor": 0.85,
+  "min_pax_per_day": 10.0,
+  "gravity": {
+    "terms": [
+      "intercept",
+      "log_out_pax_origin",
+      "log_in_pax_dest",
+      "log_distance_km",
+      "log_distance_km_sq",
+      "hub30_flag",
+      "hub10_flag"
+    ],
+    "coefficients": [
+      -6.267023,
+      0.500687,
+      0.501285,
+      1.030722,
+      -0.108037,
+      -0.193894,
+      0.3747
+    ],
+    "calibration": 1.136802,
+    "r_squared": 0.5091,
+    "n": 6720,
+    "cross_validation": {
+      "folds": 7,
+      "held_out_routes": 6720,
+      "median_ratio": 1.004,
+      "within_2x": 0.6063,
+      "within_3x": 0.7824
+    }
+  },
+  "provenance": {
+    "MEASURED": [
+      "pax_per_day",
+      "distance_km",
+      "m1..m12",
+      "runway_m",
+      "out_pax_per_day",
+      "in_pax_per_day"
+    ],
+    "DERIVED": [
+      "season_amp",
+      "season_peak_day",
+      "gravity.coefficients"
+    ],
+    "HEURISTIC": [
+      "min_viable_seats",
+      "max_viable_seats",
+      "min_runway_m",
+      "est_gates",
+      "est_fuel_l_per_day",
+      "demand_per_day (CENSORED \u2014 equals flown pax; no SEATS in T-100 Market, so it understates demand on full routes)"
+    ]
+  },
+  "known_gaps": [
+    "T-100 Market carries no SEATS/departures/aircraft type: no load factor, no de-censoring, no measured seat window, nothing for equipment right-sizing.",
+    "No DB1B fares loaded: ticket prices and elasticity remain engine defaults, and traveler-segment mix uses route.py's global default rather than a per-route fare/connecting split."
+  ]
+}

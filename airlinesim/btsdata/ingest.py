@@ -179,6 +179,14 @@ def main(argv=None) -> int:
     p.add_argument("--fetch-airport-ref", action="store_true",
                    help="download OurAirports airports+runways (GitHub-hosted)")
     p.add_argument("--limit", type=int, default=0, help="cap rows per member (0=all)")
+    p.add_argument("--distill", nargs="?", const="airlinesim/data", default="",
+                   metavar="OUT_DIR",
+                   help="after loading, write the snapshot the simulation reads "
+                        "(default airlinesim/data)")
+    p.add_argument("--corpus-airports", type=int, default=0,
+                   help="top N airports in the snapshot (default 300)")
+    p.add_argument("--min-pax-per-day", type=float, default=-1.0,
+                   help="drop directional pairs below this (default 10)")
     args = p.parse_args(argv)
 
     jobs = [(schema.T100_MARKET, args.t100_market),
@@ -237,6 +245,15 @@ def main(argv=None) -> int:
         if s["rejects"]:
             print(f"  {s['table']} rejects: {s['rejects']}")
         print(f"  {s['table']} distinct directional pairs: {s['pairs']:,}")
+
+    if args.distill:
+        from airlinesim.btsdata import distill as _distill
+        print(f"\n=== DISTILL -> {args.distill} ===")
+        _distill.distill(
+            conn, args.distill,
+            corpus_airports=args.corpus_airports or _distill.CORPUS_AIRPORTS,
+            min_pax_per_day=(args.min_pax_per_day if args.min_pax_per_day >= 0
+                             else _distill.MIN_PAX_PER_DAY))
 
     conn.close()
     print(f"\nwarehouse: {args.db}")
