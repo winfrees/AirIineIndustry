@@ -1,0 +1,282 @@
+name: Windows release
+
+# Builds the thing a Windows tester can actually run: a portable folder with its
+# own CPython, the airlinesim package, and .bat launchers — no Python install,
+# no pip, no network. Plus the ordinary wheel/sdist for people who do have
+# Python.
+#
+# WHAT PRODUCES A RELEASE
+#   * push a tag `v<version>`  -> builds, tests, and publishes a GitHub Release
+#   * workflow_dispatch        -> builds and tests; publishes only if you fill
+#                                 in `prerelease_tag`
+#   * pull request touching the engine or the build tooling -> builds and tests,
+#                                 publishes nothing
+#
+# THE TAG MUST MATCH pyproject. Version lives in pyproject.toml and
+# airlinesim/__init__.py; this workflow refuses to publish a tag that disagrees
+# with them rather than shipping an artifact whose name lies about its contents.
+#
+# THE GREEN TICK MEANS THE BUNDLE RAN. `test` runs the scenario suite against a
+# normal install on the supported Python range; `bundle` re-runs the same suite
+# through the packaged launchers, boots the GUI server and fetches from it, and
+# asserts the interpreter and the route corpus resolve *inside* the bundle. A
+# bundle that quietly falls back to the runner's Python fails here.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      python_version:
+        description: "Embeddable CPython to bundle (must satisfy requires-python)"
+        default: "3.12.10"
+      embed_sha256:
+        description: "Expected sha256 of the embeddable zip (optional but recommended)"
+        default: ""
+      prerelease_tag:
+        description: "Publish a pre-release under this tag (leave empty to only build)"
+        default: ""
+  pull_request:
+    paths:
+      - "airlinesim/**"
+      - "tools/**"
+      - "pyproject.toml"
+      - ".github/workflows/windows-release.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_BUILD_VERSION: ${{ inputs.python_version || '3.12.10' }}
+
+jobs:
+  test:
+    name: Scenarios on Windows (py${{ matrix.python }})
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # The ends of pyproject's requires-python range. The bundle ships 3.12;
+        # 3.10 is here so the floor doesn't rot unnoticed.
+        python: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install
+        run: python -m pip install --upgrade pip && python -m pip install .
+      - name: Run the scenario suite, the CLI and the GUI server
+        # Exits non-zero on the first failing check; scenarios signal failure in
+        # their output rather than their exit code, so the script greps for
+        # "ALL CHECKS PASS" as well as checking the return code.
+        run: python tools/smoke_windows_bundle.py
+
+  bundle:
+    name: Portable Windows bundle
+    runs-on: windows-latest
+    timeout-minutes: 45
+    needs: test
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      bundle: ${{ steps.version.outputs.bundle }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        # Inputs come through the environment, never interpolated into the
+        # script body — a `"` in a dispatch input must not become shell syntax.
+        env:
+          PRERELEASE_TAG: ${{ inputs.prerelease_tag }}
+        run: |
+          set -euo pipefail
+          proj=$(python -c "import tomllib,pathlib;print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
+          init=$(python -c "import re,pathlib;print(re.search(r'__version__ = \"([^\"]+)\"', pathlib.Path('airlinesim/__init__.py').read_text()).group(1))")
+          if [ "$proj" != "$init" ]; then
+            echo "::error::version mismatch: pyproject.toml says $proj, airlinesim/__init__.py says $init"
+            exit 1
+          fi
+          tag=""
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then tag="${GITHUB_REF_NAME}"; fi
+          if [ -n "${PRERELEASE_TAG:-}" ]; then tag="${PRERELEASE_TAG}"; fi
+          if [ -n "$tag" ]; then
+            want="${tag#v}"
+            if [ "$want" != "$proj" ]; then
+              echo "::error::tag $tag does not match version $proj — bump pyproject.toml and airlinesim/__init__.py, or retag"
+              exit 1
+            fi
+            version="$proj"
+          else
+            # Not a release build: make it obvious which commit it came from.
+            version="${proj}-dev.${GITHUB_SHA::7}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "bundle=AirlineSim-${version}-win-amd64" >> "$GITHUB_OUTPUT"
+          echo "Building version $version"
+
+      - name: Build wheel and sdist
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      - name: Cache the embeddable CPython download
+        uses: actions/cache@v4
+        with:
+          path: .embed-cache
+          key: embed-python-${{ env.PYTHON_BUILD_VERSION }}-amd64
+
+      - name: Build the portable bundle
+        shell: bash
+        env:
+          EMBED_SHA256: ${{ inputs.embed_sha256 }}
+        run: |
+          set -euo pipefail
+          wheel=$(ls dist/airlinesim-*.whl)
+          python tools/build_windows_bundle.py \
+            --version "${{ steps.version.outputs.version }}" \
+            --python-version "${PYTHON_BUILD_VERSION}" \
+            --arch amd64 \
+            --wheel "$wheel" \
+            --out dist \
+            --cache .embed-cache
+
+      - name: Pre-compile with the bundled interpreter
+        # Not required — Python would do it on first run — but it means the
+        # tester's first launch isn't the slow one, and it proves the embedded
+        # interpreter can import every module we ship.
+        run: |
+          dist\${{ steps.version.outputs.bundle }}\python\python.exe -m compileall -q dist\${{ steps.version.outputs.bundle }}\python\Lib\site-packages\airlinesim
+
+      - name: Smoke-test the bundle as a tester would run it
+        run: python tools/smoke_windows_bundle.py --bundle dist\${{ steps.version.outputs.bundle }}
+
+      - name: Re-zip after pre-compilation
+        # build_windows_bundle.py zips before compileall runs; rebuild the
+        # archive so the shipped zip matches the folder that was just tested.
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          rm -f "${{ steps.version.outputs.bundle }}.zip"
+          python -c "import shutil,sys; shutil.make_archive(sys.argv[1], 'zip', '.', sys.argv[1])" "${{ steps.version.outputs.bundle }}"
+          ls -l
+
+      - name: Checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          rm -f SHA256SUMS.txt
+          sha256sum *.zip *.whl *.tar.gz > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Summary
+        shell: bash
+        run: |
+          {
+            echo "## Windows build — ${{ steps.version.outputs.version }}"
+            echo
+            echo "Portable bundle: \`${{ steps.version.outputs.bundle }}.zip\` "
+            echo "(embedded CPython ${PYTHON_BUILD_VERSION}, amd64 — no Python install needed)."
+            echo
+            echo "Unzip, then run \`AirlineSim-GUI.bat\` to play or \`Run-Checks.bat\` to verify."
+            echo
+            echo '```'
+            cat dist/SHA256SUMS.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the portable bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.version.outputs.bundle }}
+          path: dist/${{ steps.version.outputs.bundle }}.zip
+          if-no-files-found: error
+
+      - name: Upload wheel, sdist and checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: airlinesim-python-dists-${{ steps.version.outputs.version }}
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: bundle
+    if: github.event_name == 'push' || inputs.prerelease_tag != ''
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.bundle.outputs.version }}
+      BUNDLE: ${{ needs.bundle.outputs.bundle }}
+      TAG: ${{ inputs.prerelease_tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Write release notes
+        run: |
+          cat > notes.md <<EOF
+          Portable Windows build of airlinesim $VERSION.
+
+          ## Run it on Windows (no Python needed)
+
+          1. Download \`$BUNDLE.zip\`
+          2. Extract it — running the .bat files from inside Explorer's zip preview does not work
+          3. \`AirlineSim-GUI.bat\` to play in a browser, \`Run-Checks.bat\` to verify the build,
+             or \`airlinesim.bat demo --days 60\` for the headless demo
+
+          The bundle carries its own CPython ${{ env.PYTHON_BUILD_VERSION }} (amd64) and the
+          route corpus, and runs fully offline. It is not code-signed, so SmartScreen will
+          warn on first launch. The GUI binds to the LAN so a phone or tablet can connect;
+          declining the firewall prompt still leaves it working at http://127.0.0.1:8765 .
+
+          ## Already have Python (3.10+)?
+
+          \`pip install airlinesim-$VERSION-py3-none-any.whl\`, then \`airlinesim gui\`.
+
+          ## Verifying
+
+          \`SHA256SUMS.txt\` covers every asset here.
+
+          Every asset was built and smoke-tested on windows-latest: the scenario suite on
+          Python 3.10 and 3.12, then the same suite re-run through the bundle's own
+          interpreter and launchers, including a live GUI server fetch.
+          EOF
+          cat notes.md
+
+      - name: Create or update the release
+        run: |
+          set -euo pipefail
+          ls -l artifacts
+          prerelease=""
+          if [ -n "${{ inputs.prerelease_tag }}" ]; then prerelease="--prerelease"; fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" artifacts/* --clobber
+            gh release edit "$TAG" --notes-file notes.md
+          else
+            gh release create "$TAG" artifacts/* \
+              --title "airlinesim $VERSION" \
+              --notes-file notes.md \
+              $prerelease
+          fi

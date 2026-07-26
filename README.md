@@ -18,6 +18,35 @@ pip install .
 
 This installs the `airlinesim` package and an `airlinesim` command.
 
+### Windows, without installing Python
+
+Every release ships a portable build — `AirlineSim-<version>-win-amd64.zip` on
+the [Releases page](../../releases). Unzip it (Explorer's zip preview is not
+enough — extract the folder) and run:
+
+| launcher | what it does |
+|-------------------------|---------------------------------------------|
+| `AirlineSim-GUI.bat`    | play in a browser; starts the local server  |
+| `AirlineSim-Demo.bat`   | the 60-day two-carrier demo in a console    |
+| `Run-Checks.bat`        | run the bundled scenarios and print PASS/FAIL |
+| `airlinesim.bat ...`    | the full CLI, e.g. `airlinesim.bat run integration` |
+
+The bundle carries its own CPython and the route corpus, so it needs no Python,
+no pip and no network. It is not code-signed: SmartScreen warns on first launch.
+
+To build one yourself (or from a branch), run the **Windows release** workflow
+from the Actions tab — it builds and smoke-tests the bundle and attaches it to
+the run. Locally, on Windows:
+
+```bash
+python -m build                                          # wheel + sdist
+python tools/build_windows_bundle.py --version 0.1.0 --wheel dist/airlinesim-0.1.0-py3-none-any.whl
+python tools/smoke_windows_bundle.py --bundle dist/AirlineSim-0.1.0-win-amd64
+```
+
+Tagging `v<version>` (matching `pyproject.toml`) publishes a GitHub Release with
+the bundle, the wheel, the sdist and `SHA256SUMS.txt`.
+
 ## Quick start
 
 ```python
