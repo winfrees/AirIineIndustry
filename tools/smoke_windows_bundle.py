@@ -5,7 +5,7 @@ Two modes, same checks, so a plain `pip install` and the portable Windows
 bundle are held to one bar:
 
     python tools/smoke_windows_bundle.py                       # this interpreter
-    python tools/smoke_windows_bundle.py --bundle dist/AirlineSim-0.1.0-win-amd64
+    python tools/smoke_windows_bundle.py --bundle dist/AirlineSim-0.2.0-win-amd64
 
 The scenarios never exit non-zero — they print "ALL CHECKS PASS" or
 "SOME CHECKS FAILED" (see scenarios/integration.py). So the pass condition is

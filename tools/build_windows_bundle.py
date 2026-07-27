@@ -15,8 +15,8 @@ Why not PyInstaller / a single .exe:
 
 Usage (normally called from .github/workflows/windows-release.yml):
 
-    python tools/build_windows_bundle.py --version 0.1.0 --out dist
-    python tools/build_windows_bundle.py --version 0.1.0 --wheel dist/foo.whl
+    python tools/build_windows_bundle.py --version 0.2.0 --out dist
+    python tools/build_windows_bundle.py --version 0.2.0 --wheel dist/foo.whl
 
 Runs on any OS (it only downloads and unzips), but the smoke test that proves
 the bundle actually works has to run on Windows — see smoke_windows_bundle.py.

@@ -23,7 +23,7 @@ Or use the bundled scenarios / CLI:
     python -m airlinesim.cli run integration
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 # --- core engine ---
 from airlinesim.engine import (
