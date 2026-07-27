@@ -37,6 +37,14 @@ from airlinesim.finance_cabin import (
 )
 from airlinesim.builder import build_demo_world
 
+
+def _pkg_version() -> str:
+    # Inline import: `from airlinesim import __version__` at module top would
+    # work today (nothing in __init__ imports game), but keeping it lazy means
+    # this file can never become the module that closes an import cycle.
+    import airlinesim
+    return airlinesim.__version__
+
 # Reference financing products a human can choose at acquisition time. Same
 # shape/values as builder.py and scenarios/integration.py already use.
 _LOAN_TERMS = FinancingTerms("LOAN", AcquisitionMethod.FINANCE,
@@ -339,6 +347,10 @@ class GameSession:
         with self.lock:
             w = self.world
             return {
+                # Which build produced this state. The GUI shows it in the
+                # topbar so "which version am I actually running?" is read off
+                # the screen instead of reverse-engineered from the layout.
+                "engine_version": _pkg_version(),
                 "sim_time_hours": w.sim_time,
                 "day": int(w.sim_time // 24),
                 "paused": self.paused,
