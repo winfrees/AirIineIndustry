@@ -222,7 +222,20 @@ separate path that can drift.
 (equipment chosen on cost per seat-km over the mission it actually flies),
 cabin configuration at acquisition, service tiers, crew hiring and hub
 selection, in three archetypes (Low-Cost / Legacy / Regional) that are one
-policy engine with different weights. Enable per world with
+policy engine with different weights. Any number can run at once — naming a
+carrier in `ai_profiles` that isn't in the base roster adds it as a new
+leasing entrant, so a three-way market is three names.
+
+Two balance figures in there are load-bearing rather than cosmetic.
+`max_fleet` must leave headroom above the fleet a carrier STARTS with: set at
+the starting size, the carrier can never acquire, so never has an idle
+aircraft to deploy, so never opens a route, and reads as broken rather than
+disciplined. And the price ceiling is clamped OUTSIDE the cost-plus floor —
+clamping the floor last lets a thin route bid its own fare upward without
+limit (costs over few passengers raise the floor, the higher fare sheds more
+passengers), which reached nine-figure fares before it was caught. A cost
+floor above what the market bears means the route is unviable, which
+`_close_bad_routes` answers. Enable per world with
 `build_world_from_data(ai_profiles={player_id: archetype})` or
 `new_game(world="data", ai_profiles=...)`; with no profiles nothing in ai.py
 runs. Honest limits: route evaluation is a STATIC forecast that does not
@@ -230,6 +243,15 @@ model how incumbents respond to entry (a perfectly predictive AI would be
 unbeatable, and that error is the seam a player out-plans it through); it
 only considers routes from hubs and current aircraft locations, so it never
 opens a second base from scratch; and it never recabins after acquisition.
+
+A HUB costs `hub_fee_per_day` and buys two things: it is the only place its
+carrier can do maintenance (`MaintenanceEngine._find_facility`), and it gives
+preferential gates there — `HUB_GATE_PRIORITY` multiplies the gate claim's
+priority, so it decides only when gates are actually oversubscribed. Without
+that second half a hub was pure cost and one cheap hub was always optimal,
+with no reason to ever open a second. Closing your last hub while you still
+have a fleet is refused: it would leave every check with nowhere to go and
+quietly turn into "flying on risk" weeks later.
 
 Airport fee schedules (gate/amenities/baggage/hub) are HEURISTIC but scaled
 off measured traffic in the corpus, so a secondary field is a genuine cost

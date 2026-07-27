@@ -85,7 +85,11 @@ class Archetype:
     # --- fleet ---
     fleet_review_days: int = 14
     min_cash_buffer: float = 25_000_000.0    # never spend below this
-    max_fleet: int = 12
+    # Growth ceiling. Must leave headroom above the fleet a carrier STARTS
+    # with, or it can never acquire, never has an idle aircraft to deploy, and
+    # so never opens a route — a cap set at the starting size reads as "this
+    # archetype is broken" rather than "this archetype is disciplined".
+    max_fleet: int = 20
     acquisition_method: str = "LEASE"
     plane_classes: tuple = (PlaneClass.NARROWBODY,)
     idle_days_before_shedding: int = 21
@@ -94,6 +98,13 @@ class Archetype:
     service_tier: int = 2
     business_seat_frac: float = 0.0    # share of cabin slots given to business
     premium_seat_frac: float = 0.0
+
+    # --- hubs ---
+    # A hub costs daily overhead and buys preferential gates plus the only
+    # place this carrier can do maintenance. A network carrier wants several;
+    # a low-cost point-to-point operator deliberately runs lean on bases.
+    max_hubs: int = 1
+    hub_min_routes_each: int = 4       # routes per hub before opening another
 
 
 LOW_COST = Archetype(
@@ -105,9 +116,10 @@ LOW_COST = Archetype(
     network_review_days=6, candidates_per_review=16,
     min_stage_km=300.0, max_stage_km=4200.0,
     min_est_daily_profit=6_000.0, bad_days_before_close=14,
-    fleet_review_days=12, min_cash_buffer=18_000_000.0, max_fleet=14,
+    fleet_review_days=12, min_cash_buffer=18_000_000.0, max_fleet=24,
     acquisition_method="LEASE", plane_classes=(PlaneClass.NARROWBODY,),
     service_tier=1, business_seat_frac=0.0, premium_seat_frac=0.0,
+    max_hubs=1, hub_min_routes_each=99,
 )
 
 LEGACY = Archetype(
@@ -119,10 +131,11 @@ LEGACY = Archetype(
     network_review_days=9, candidates_per_review=12,
     min_stage_km=600.0, max_stage_km=12_000.0,
     min_est_daily_profit=12_000.0, bad_days_before_close=28,
-    fleet_review_days=18, min_cash_buffer=40_000_000.0, max_fleet=12,
+    fleet_review_days=18, min_cash_buffer=40_000_000.0, max_fleet=20,
     acquisition_method="LEASE",
     plane_classes=(PlaneClass.NARROWBODY, PlaneClass.WIDEBODY),
     service_tier=3, business_seat_frac=0.14, premium_seat_frac=0.10,
+    max_hubs=3, hub_min_routes_each=4,
 )
 
 REGIONAL = Archetype(
@@ -134,10 +147,11 @@ REGIONAL = Archetype(
     network_review_days=7, candidates_per_review=18,
     min_stage_km=200.0, max_stage_km=2_400.0,
     min_est_daily_profit=3_500.0, bad_days_before_close=18,
-    fleet_review_days=14, min_cash_buffer=12_000_000.0, max_fleet=10,
+    fleet_review_days=14, min_cash_buffer=12_000_000.0, max_fleet=22,
     acquisition_method="LEASE",
     plane_classes=(PlaneClass.REGIONAL, PlaneClass.NARROWBODY),
     service_tier=2, business_seat_frac=0.0, premium_seat_frac=0.06,
+    max_hubs=2, hub_min_routes_each=6,
 )
 
 ARCHETYPES = {a.name: a for a in (LOW_COST, LEGACY, REGIONAL)}
@@ -225,6 +239,7 @@ class AICarrierSubsystem(Subsystem):
             if world.sim_time >= mem.next_network_review:
                 mem.next_network_review = world.sim_time + arch.network_review_days * 24.0
                 self._ensure_hub(world, p, mem)
+                self._align_product(world, p, mem, arch)
                 self._close_bad_routes(world, p, mem, arch)
                 self._staff_up(world, p, mem)
                 self._deploy_idle_aircraft(world, p, mem, arch)
@@ -243,10 +258,20 @@ class AICarrierSubsystem(Subsystem):
                 out.setdefault(market_key(op.spec), []).append((p.player_id, op.ticket_price))
         return out
 
+    # Below this many passengers, "cost per passenger" is arithmetic noise:
+    # a route that carried two people divides a full day of fuel, crew and
+    # fees by two. Pricing off that number is how a cost-plus rule runs away.
+    MIN_PAX_FOR_UNIT_COST = 5.0
+
     @staticmethod
     def _unit_cost(op) -> float:
-        """Variable cost per passenger from last tick's actuals, fees included."""
-        if op.last_pax > 1e-6 and op.last_variable_cost > 0:
+        """
+        Variable cost per passenger from last tick's actuals, fees included.
+        Returns 0.0 (meaning "no usable estimate") when the sample is too thin
+        to divide by — see MIN_PAX_FOR_UNIT_COST.
+        """
+        if op.last_pax >= AICarrierSubsystem.MIN_PAX_FOR_UNIT_COST \
+                and op.last_variable_cost > 0:
             return (op.last_variable_cost + getattr(op, "last_fees", 0.0)) / op.last_pax
         return 0.0
 
@@ -273,7 +298,15 @@ class AICarrierSubsystem(Subsystem):
                 if cheapest < old and shaded > cost_floor:
                     target = min(target, shaded)
 
-            target = max(cost_floor, min(arch.price_ceiling, target))
+            # The CEILING is the outermost bound, deliberately. Clamping the
+            # cost floor last lets a thin route bid its own fare upward without
+            # limit: costs spread over few passengers raise the floor, the
+            # higher fare sheds more passengers, and the loop diverges — it
+            # reached nine-figure fares before this was pinned down. A cost
+            # floor above what the market bears means the route is unviable,
+            # which _close_bad_routes is what answers; it is never a reason to
+            # price beyond the ceiling.
+            target = min(arch.price_ceiling, max(cost_floor, target))
             op.prev_profit = op.last_profit
             op.prev_price = old
             actions.set_price(world, p, actions.op_id(op), round(target, 2))
@@ -319,20 +352,80 @@ class AICarrierSubsystem(Subsystem):
     # HUBS + STAFFING
     # ------------------------------------------------------------------
     def _ensure_hub(self, world, p, mem):
-        """Without a hub there's nowhere to do checks — grounded fleet later."""
-        if p.hub_iatas:
+        """
+        Hub policy. The first hub is survival: without one there is nowhere to
+        do maintenance and the fleet eventually flies on risk. Beyond that a
+        hub is a real trade — daily overhead against preferential gates and
+        maintenance reach at a second station — so how many to run is an
+        archetype decision, not a universal one.
+        """
+        arch = mem.archetype
+        if not p.hub_iatas:
+            base = p.fleet[0].location_iata if p.fleet else None
+            for iata in ([base] if base else []) + [
+                    ap.iata for ap in world.repo.all(AirportSpec)
+                    if ap.has_maintenance_facility]:
+                if not iata:
+                    continue
+                ok, msg = actions.set_hub(world, p, iata, True)
+                if ok:
+                    self._note(p, mem, msg)
+                    return
             return
-        base = p.fleet[0].location_iata if p.fleet else None
-        candidates = [base] if base else []
-        candidates += [ap.iata for ap in world.repo.all(AirportSpec)
-                       if ap.has_maintenance_facility]
-        for iata in candidates:
-            if not iata:
+
+        if len(p.hub_iatas) >= arch.max_hubs:
+            return
+        # Only add a base once the existing ones are carrying real traffic —
+        # a second hub bought too early is pure overhead.
+        if len(p.route_ops) < arch.hub_min_routes_each * len(p.hub_iatas):
+            return
+        cand = self._best_new_hub(world, p)
+        if cand is None:
+            return
+        ap = actions.airport(world, cand)
+        # don't take on overhead the carrier can't carry for long
+        if ap is not None and ap.hub_fee_per_day * 60 > p.ledger.cash:
+            return
+        ok, msg = actions.set_hub(world, p, cand, True)
+        if ok:
+            self._note(p, mem, f"{msg} — second base for "
+                               f"{len(p.route_ops)} routes")
+
+    def _best_new_hub(self, world, p):
+        """
+        The station this carrier already flies to most, excluding current
+        hubs. Basing where the network already is turns overhead into
+        preferential gates on routes it actually operates.
+        """
+        traffic = {}
+        for op in p.route_ops:
+            if op.spec.dest_iata in p.hub_iatas:
                 continue
-            ok, msg = actions.set_hub(world, p, iata, True)
-            if ok:
-                self._note(p, mem, msg)
-                return
+            traffic[op.spec.dest_iata] = traffic.get(op.spec.dest_iata, 0) + 1
+        for iata, _n in sorted(traffic.items(), key=lambda kv: -kv[1]):
+            ap = actions.airport(world, iata)
+            if ap is not None and ap.has_maintenance_facility:
+                return iata
+        return None
+
+    def _align_product(self, world, p, mem, arch):
+        """
+        Run ONE product standard across the network. A carrier that sells
+        basic service on the routes it opened and standard service on the
+        ones it inherited isn't running a strategy, it's running whatever it
+        was handed — and the archetype stops being legible to the player.
+        Service tier is a per-route cost, so this is also a real spend
+        decision, not cosmetic.
+        """
+        changed = 0
+        for op in p.route_ops:
+            if op.service_tier != arch.service_tier:
+                ok, _ = actions.set_service_tier(world, p, actions.op_id(op),
+                                                 arch.service_tier)
+                changed += bool(ok)
+        if changed:
+            self._note(p, mem, f"moved {changed} route(s) to service tier "
+                               f"{arch.service_tier}")
 
     def _staff_up(self, world, p, mem):
         """

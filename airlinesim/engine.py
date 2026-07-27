@@ -410,6 +410,19 @@ class DemandMarket:
     reference_price: float = 0.0
 
 
+# What a hub buys at its own airport, on top of being the only place its
+# carrier can do maintenance. Preferential gates are real: a hub carrier
+# leases its gates rather than competing for common-use ones per turn, so
+# under contention it is served first. This multiplies the gate claim's
+# priority, so it decides ONLY when gates are actually oversubscribed —
+# at an uncongested field it changes nothing.
+#
+# The number is game balance. Too low and a hub is pure cost (the state this
+# model was in: one cheap hub was always optimal); too high and hub carriers
+# become unassailable at their own airports and nobody can contest a hub.
+HUB_GATE_PRIORITY = 1.6
+
+
 def market_key(rs: "RouteSpec") -> str:
     """The demand pool a route draws from — its market_id, else its own id."""
     return getattr(rs, "market_id", "") or rs.spec_id
@@ -961,9 +974,18 @@ class OperationsSubsystem(Subsystem):
                                         desirability=desirability))
                     ops_with_claims.add(id(op))
 
-                # gate claim: one gate per frequency, priority = willingness to pay (price)
+                # Gate claim: one gate per frequency. Priority is willingness to
+                # pay, LIFTED at an airport this carrier runs as a hub — a hub
+                # carrier holds preferential gates rather than bidding for
+                # common-use ones every morning. That is what a hub buys for its
+                # daily overhead: without it the cheapest single hub is always
+                # optimal and there is no reason to ever open a second.
+                gate_priority = op.ticket_price
+                if op.spec.dest_iata in getattr(p, "hub_iatas", ()):
+                    gate_priority *= HUB_GATE_PRIORITY
                 claims.append(Claim(p.player_id, ResourceKind.GATE, op.spec.dest_iata,
-                                    amount=op.daily_frequency, priority=op.ticket_price, payload=op))
+                                    amount=op.daily_frequency, priority=gate_priority,
+                                    payload=op))
                 # fuel claim
                 fh = (op.spec.distance_km / op.plane.spec.cruise_speed_kmh) * op.daily_frequency * day_frac
                 litres = op.plane.spec.fuel_burn_lph * fh
