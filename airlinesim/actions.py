@@ -1,0 +1,513 @@
+"""
+ACTIONS — the airline decision surface, player-agnostic.
+========================================================
+
+Every decision an airline can make (open a route, buy or sell an airframe,
+recabin it, declare a hub, hire crew, set a price) lives here as a plain
+function over ``(world, player, ...)`` returning ``(ok, message)``.
+
+Why this module exists: these actions used to live inside ``GameSession``,
+hard-wired to the human player and to the session lock, which meant an AI
+competitor could only compete by mutating engine state directly — running
+its own parallel copy of the validation, fee, credit and teardown rules.
+Two copies drift, and when they drift the AI ends up playing a different
+game than the human.
+
+So: this is the single implementation, and it is *neutral*.
+
+  - ``GameSession`` commands are thin wrappers: take the lock, call in here
+    with the human player.
+  - ``AIStrategySubsystem`` calls exactly the same functions with an AI
+    player, inside the tick.
+
+An AI therefore cannot cheat by construction. It passes the same equipment
+validation, the same ``Bank`` credit gate, the same cash checks, and the
+same route teardown as the player does. If a rule changes, it changes for
+everyone at once.
+
+Nothing here locks or assumes a session — callers own concurrency.
+"""
+
+from __future__ import annotations
+
+from typing import Optional
+
+from airlinesim.engine import (
+    AircraftSpec, AirportSpec, RouteSpec, CrewSpec, CrewUnit, RouteOp,
+    Airplane, CrewType, market_key,
+)
+from airlinesim.finance_cabin import (
+    CabinClass, SeatLayout, DEFAULT_SEAT_CLASSES, cabin_slots_for,
+    AcquisitionMethod, FinancingTerms, Bank, aircraft_value,
+)
+
+# Reference financing products. Same shape/values builder.py and the
+# integration scenario already use.
+LOAN_TERMS = FinancingTerms("LOAN", AcquisitionMethod.FINANCE,
+                            down_payment_frac=0.20, annual_rate=0.06, term_months=120)
+LEASE_TERMS = FinancingTerms("LEASE", AcquisitionMethod.OPERATING_LEASE,
+                             lease_rate_frac_per_year=0.11, lease_term_months=84)
+METHOD_BY_NAME = {
+    "CASH": AcquisitionMethod.BUY_CASH,
+    "FINANCE": AcquisitionMethod.FINANCE,
+    "LEASE": AcquisitionMethod.OPERATING_LEASE,
+}
+TERMS_BY_METHOD = {
+    AcquisitionMethod.BUY_CASH: None,
+    AcquisitionMethod.FINANCE: LOAN_TERMS,
+    AcquisitionMethod.OPERATING_LEASE: LEASE_TERMS,
+}
+
+# Selling into the used market doesn't realize full book value: dealers take
+# a spread and a motivated seller takes a discount. Game-balance figure.
+SALE_HAIRCUT = 0.85
+
+
+def bank_for(world) -> Bank:
+    """
+    The world's shared lender. Attached lazily so worlds pickled before the
+    bank moved onto World still work. Sharing one Bank keeps loan/lease ids
+    unique across every carrier; a resumed pre-existing save may briefly run
+    a session-owned bank alongside this one, which only affects the cosmetic
+    id sequence (lookups are by tail number, never by id).
+    """
+    bank = getattr(world, "bank", None)
+    if bank is None:
+        bank = Bank(max_debt_to_cash=6.0)
+        world.bank = bank
+    return bank
+
+
+# ============================================================
+# LOOKUP / VALIDATION HELPERS (shared by commands and AI policy)
+# ============================================================
+
+def op_id(op: RouteOp) -> str:
+    return f"{op.owner_id}:{op.spec.spec_id}:{op.plane.tail_number}"
+
+
+def find_route_op(player, route_op_id: str) -> Optional[RouteOp]:
+    return next((o for o in player.route_ops if op_id(o) == route_op_id), None)
+
+
+def find_plane(player, tail_number: str):
+    return next((a for a in player.fleet if a.tail_number == tail_number), None)
+
+
+def plane_is_busy(world, plane) -> str:
+    """Reason the tail can't be traded/reconfigured right now, or ''."""
+    if plane.reconfiguring_until > 0:
+        return "aircraft is being reconfigured"
+    if not plane.in_service or plane.grounded_until > world.sim_time:
+        return "aircraft is grounded for maintenance"
+    return ""
+
+
+def airport(world, iata: str) -> Optional[AirportSpec]:
+    try:
+        return world.repo.get(AirportSpec, iata)
+    except KeyError:
+        return None
+
+
+def build_layout(seats: dict, max_seats: int):
+    """(SeatLayout, None) or (None, error). Accepts cabin names or enums."""
+    try:
+        counts = {}
+        for k, v in seats.items():
+            cc = k if isinstance(k, CabinClass) else CabinClass[str(k).upper()]
+            counts[cc] = int(v)
+    except KeyError as e:
+        return None, f"unknown cabin class {e}"
+    layout = SeatLayout(counts)
+    if not layout.is_valid(cabin_slots_for(max_seats), DEFAULT_SEAT_CLASSES):
+        return None, "layout exceeds cabin capacity"
+    return layout, None
+
+
+def validate_equipment(world, route_spec, aircraft_spec):
+    """(ok, reasons) — the same check RouteSuitabilitySubsystem runs per tick."""
+    from airlinesim.route import route_can_fly
+    return route_can_fly(route_spec, aircraft_spec,
+                         airport(world, route_spec.origin_iata),
+                         airport(world, route_spec.dest_iata))
+
+
+def resolve_route(world, route_spec_id: str):
+    """
+    Find a pre-authored RouteSpec, or build one on the fly for an "ORG-DST"
+    airport pair (great-circle distance, metro-pair market). Registers the
+    spec and its demand market. Returns (spec, error_message).
+    """
+    repo = world.repo
+    try:
+        return repo.get(RouteSpec, route_spec_id), None
+    except KeyError:
+        pass
+    parts = route_spec_id.replace("->", "-").split("-")
+    if len(parts) != 2:
+        return None, f"unknown route {route_spec_id}"
+    origin_iata, dest_iata = parts[0].strip().upper(), parts[1].strip().upper()
+    if origin_iata == dest_iata:
+        return None, "origin and destination must differ"
+    origin, dest = airport(world, origin_iata), airport(world, dest_iata)
+    if origin is None:
+        return None, f"unknown airport {origin_iata}"
+    if dest is None:
+        return None, f"unknown airport {dest_iata}"
+
+    spec = _route_spec_from_corpus(world, origin, dest)
+    repo._tables[RouteSpec][spec.spec_id] = spec
+    ensure_market(world, spec)
+    return spec, None
+
+
+def _route_spec_from_corpus(world, origin, dest):
+    """
+    Build a RouteSpec for an arbitrary pair. Prefers the committed BTS corpus
+    (measured demand where the pair exists, a fitted gravity estimate where it
+    doesn't — see routedata.RouteDataProvider), and falls back to engine
+    defaults for worlds with no corpus attached. The provider stamps
+    data_tier/data_vintage so an estimate can't be mistaken for a measurement.
+    """
+    provider = getattr(world, "route_data", None)
+    if provider is not None:
+        spec = provider.route_spec(origin.iata, dest.iata)
+        if spec is not None:
+            return spec
+    from airlinesim.route import haversine, default_segments
+    dist = haversine(origin.lat, origin.lon, dest.lat, dest.lon)
+    demand = 400.0
+    return RouteSpec(
+        spec_id=f"{origin.iata}-{dest.iata}",
+        display_name=f"{origin.iata}-{dest.iata}",
+        origin_iata=origin.iata, dest_iata=dest.iata, distance_km=dist,
+        base_demand_per_day=int(demand), segments=default_segments(demand),
+        data_tier="synthetic")
+
+
+def ensure_market(world, route_spec):
+    """
+    Register the demand pool this route draws from, if it's new. The pool is
+    keyed by market_key(), so when routes carry a market_id every airport pair
+    in that market competes for the same travelers; otherwise a route is its
+    own market, which is the legacy behavior.
+    """
+    from airlinesim.engine import DemandMarket
+    key = market_key(route_spec)
+    if key not in world.demand:
+        world.demand[key] = DemandMarket(
+            route_id=key,
+            base_demand_per_day=route_spec.base_demand_per_day,
+            seasonality_amplitude=route_spec.seasonality_amplitude,
+            segments=route_spec.segments,
+            reference_price=getattr(route_spec, "reference_price", 0.0) or 0.0)
+    return world.demand[key]
+
+
+def retire_tail(player, tail_number: str) -> int:
+    """
+    Remove an airframe and every route op flying it. Mirrors the teardown
+    BankingSubsystem performs when a lease expires. Returns how many route
+    ops were closed — the "disabling route(s)" consequence of losing a plane.
+    """
+    closed = [o for o in player.route_ops if o.plane.tail_number == tail_number]
+    player.route_ops = [o for o in player.route_ops if o.plane.tail_number != tail_number]
+    player.fleet = [a for a in player.fleet if a.tail_number != tail_number]
+    return len(closed)
+
+
+# ============================================================
+# ROUTE ACTIONS
+# ============================================================
+
+def set_price(world, player, route_op_id: str, price: float):
+    op = find_route_op(player, route_op_id)
+    if op is None:
+        return False, "route not found"
+    if price <= 0:
+        return False, "price must be positive"
+    op.ticket_price = round(float(price), 2)
+    return True, f"price set to ${op.ticket_price:.0f}"
+
+
+def set_frequency(world, player, route_op_id: str, freq: int):
+    op = find_route_op(player, route_op_id)
+    if op is None:
+        return False, "route not found"
+    op.daily_frequency = max(0, int(freq))
+    return True, f"frequency set to {op.daily_frequency}/day"
+
+
+def set_layout(world, player, route_op_id: str, seats: dict):
+    op = find_route_op(player, route_op_id)
+    if op is None:
+        return False, "route not found"
+    layout, err = build_layout(seats, op.plane.spec.max_seats)
+    if err:
+        return False, err
+    op.layout = layout
+    return True, "layout updated"
+
+
+def set_service_tier(world, player, route_op_id: str, tier: int):
+    """
+    Buy a better (or cheaper) passenger experience at the airports this route
+    uses. Higher tiers cost more in gate/amenities/baggage fees and make the
+    op more desirable to passengers.
+    """
+    op = find_route_op(player, route_op_id)
+    if op is None:
+        return False, "route not found"
+    t = int(tier)
+    if t < 1 or t > 3:
+        return False, "service tier must be 1 (basic), 2 (standard) or 3 (premium)"
+    op.service_tier = t
+    return True, f"service tier set to {t}"
+
+
+def open_route(world, player, route_spec_id: str, tail_number: str, price: float,
+               freq: int = 1, seats: Optional[dict] = None, service_tier: int = 2):
+    """
+    Open a route. `route_spec_id` may be a pre-authored route id or an
+    "ORG-DST" airport pair — any two airports in the repository can become a
+    route. Equipment is validated up front so an aircraft that can't
+    physically serve the pair is refused with reasons rather than silently
+    grounded every tick.
+    """
+    plane = find_plane(player, tail_number)
+    if plane is None:
+        return False, f"no aircraft {tail_number} in fleet"
+
+    route_spec, err = resolve_route(world, route_spec_id)
+    if err:
+        return False, err
+    if any(o.plane.tail_number == tail_number and o.spec.spec_id == route_spec.spec_id
+           for o in player.route_ops):
+        return False, "already operating this route with that aircraft"
+
+    ok, reasons = validate_equipment(world, route_spec, plane.spec)
+    if not ok:
+        return False, "; ".join(reasons)
+
+    layout = None
+    if seats:
+        layout, err = build_layout(seats, plane.spec.max_seats)
+        if err:
+            return False, err
+    player.route_ops.append(RouteOp(
+        spec=route_spec, plane=plane, cockpit=None, cabin=None,
+        ticket_price=float(price), daily_frequency=max(0, int(freq)),
+        owner_id=player.player_id, layout=layout,
+        service_tier=max(1, min(3, int(service_tier)))))
+    return True, (f"opened {route_spec.origin_iata}->{route_spec.dest_iata} "
+                  f"({route_spec.distance_km:.0f}km) with {tail_number}")
+
+
+def close_route(world, player, route_op_id: str):
+    op = find_route_op(player, route_op_id)
+    if op is None:
+        return False, "route not found"
+    player.route_ops.remove(op)
+    return True, f"closed {op.spec.origin_iata}->{op.spec.dest_iata}"
+
+
+# ============================================================
+# FLEET ACTIONS
+# ============================================================
+
+def acquire_aircraft(world, player, spec_id: str, tail_number: str, method: str,
+                     base_iata: Optional[str] = None, seats: Optional[dict] = None,
+                     bank: Optional[Bank] = None):
+    """
+    Acquire an airframe. `seats` sets the cabin CONFIGURATION at acquisition —
+    the cheap moment to choose it, since changing it later costs money and
+    downtime (see reconfigure_aircraft).
+    """
+    if any(a.tail_number == tail_number for a in player.fleet):
+        return False, "tail number already in use"
+    try:
+        spec = world.repo.get(AircraftSpec, spec_id)
+    except KeyError:
+        return False, f"unknown aircraft spec {spec_id}"
+    method_enum = METHOD_BY_NAME.get(method.upper())
+    if method_enum is None:
+        return False, f"unknown acquisition method {method}"
+    terms = TERMS_BY_METHOD[method_enum]
+
+    layout = None
+    if seats:
+        layout, err = build_layout(seats, spec.max_seats)
+        if err:
+            return False, err
+
+    bank = bank or bank_for(world)
+    # try_acquire() is the authoritative answer to "did it fund?" — acquire()
+    # returns None both for a denial AND for a successful cash buy, and the
+    # call sites that re-derived that distinction got it wrong, attaching
+    # aircraft that were never paid for. Never attach the Airplane unless this
+    # returns True.
+    before = len(player.log)
+    if not bank.try_acquire(player, spec, tail_number, method_enum, terms, player.log):
+        reason = "; ".join(m.strip() for m in player.log[before:]) or "financing denied"
+        return False, reason
+
+    player.fleet.append(Airplane(
+        spec=spec, tail_number=tail_number, owner_id=player.player_id,
+        owned=(method_enum != AcquisitionMethod.OPERATING_LEASE),
+        location_iata=base_iata or next(iter(world.gates)),
+        acquired_at=world.sim_time, layout=layout))
+    return True, f"acquired {tail_number} ({spec.display_name}) via {method_enum.name}"
+
+
+def sell_aircraft(world, player, tail_number: str):
+    """
+    Sell an owned airframe at market value less a liquidity haircut. Any loan
+    secured on the tail must be cleared out of the proceeds — you cannot sell
+    collateral and keep the debt.
+    """
+    plane = find_plane(player, tail_number)
+    if plane is None:
+        return False, f"no aircraft {tail_number} in fleet"
+    if not plane.owned:
+        return False, "leased aircraft can't be sold — break the lease instead"
+    busy = plane_is_busy(world, plane)
+    if busy:
+        return False, busy
+
+    proceeds = aircraft_value(plane, world.sim_time) * SALE_HAIRCUT
+    loan = next((l for l in player.loans if l.tail_number == tail_number), None)
+    payoff = loan.remaining if loan else 0.0
+    if payoff > proceeds + player.ledger.cash:
+        return False, (f"sale denied: ${payoff:,.0f} loan payoff exceeds "
+                       f"${proceeds:,.0f} proceeds plus cash on hand")
+
+    player.ledger.credit(proceeds, f"sold {tail_number} ({plane.spec.display_name})", player.log)
+    if loan is not None:
+        player.ledger.debit(payoff, f"loan {loan.loan_id} payoff on sale of {tail_number}",
+                            player.log)
+        player.loans.remove(loan)
+    closed = retire_tail(player, tail_number)
+    net = proceeds - payoff
+    msg = f"sold {tail_number} for ${proceeds:,.0f} (net ${net:,.0f})"
+    if closed:
+        msg += f"; closed {closed} route(s)"
+    return True, msg
+
+
+def break_lease(world, player, tail_number: str):
+    """
+    Hand a leased airframe back early. Costs the early-termination penalty
+    (capped months of rent) plus the usual return-condition cost.
+    """
+    plane = find_plane(player, tail_number)
+    if plane is None:
+        return False, f"no aircraft {tail_number} in fleet"
+    lease = next((l for l in player.leases if l.tail_number == tail_number), None)
+    if lease is None:
+        return False, "no lease on that aircraft — sell it instead"
+    busy = plane_is_busy(world, plane)
+    if busy:
+        return False, busy
+
+    penalty = lease.break_penalty(LEASE_TERMS.lease_break_penalty_months)
+    if penalty > player.ledger.cash:
+        return False, f"insufficient cash for ${penalty:,.0f} early-termination cost"
+    player.ledger.debit(penalty, f"lease {lease.lease_id} early termination ({tail_number})",
+                        player.log)
+    player.leases.remove(lease)
+    closed = retire_tail(player, tail_number)
+    msg = f"returned {tail_number} early for ${penalty:,.0f}"
+    if closed:
+        msg += f"; closed {closed} route(s)"
+    return True, msg
+
+
+def reconfigure_aircraft(world, player, tail_number: str, seats: dict):
+    """
+    Change an airframe's cabin configuration. Costs per cabin slot and grounds
+    the tail for the type's reconfiguration downtime — the reason choosing
+    well at acquisition matters.
+    """
+    plane = find_plane(player, tail_number)
+    if plane is None:
+        return False, f"no aircraft {tail_number} in fleet"
+    busy = plane_is_busy(world, plane)
+    if busy:
+        return False, busy
+    layout, err = build_layout(seats, plane.spec.max_seats)
+    if err:
+        return False, err
+
+    slots = cabin_slots_for(plane.spec.max_seats)
+    cost = plane.spec.reconfig_cost_per_slot * slots
+    if cost > player.ledger.cash:
+        return False, f"insufficient cash for ${cost:,.0f} reconfiguration"
+    days = plane.spec.reconfig_days
+    if cost > 0 and not player.ledger.debit(cost, f"reconfigure {tail_number}", player.log):
+        return False, "reconfiguration payment failed"
+
+    plane.layout = layout
+    # Only ground the tail if the type actually carries downtime. Specs
+    # authored before reconfig_days existed default to 0, which means an
+    # instant swap — grounding on a zero-length window would strand the
+    # aircraft, since there'd be no future time to return at.
+    if days > 0:
+        plane.reconfiguring_until = world.sim_time + days * 24.0
+        plane.in_service = False
+    # a per-op layout override would mask the new airframe config
+    for op in player.route_ops:
+        if op.plane.tail_number == tail_number:
+            op.layout = None
+    return True, (f"reconfiguring {tail_number}: ${cost:,.0f}, down {days:.0f} days"
+                  if days > 0 else f"reconfigured {tail_number}: ${cost:,.0f}, no downtime")
+
+
+# ============================================================
+# NETWORK / STAFFING ACTIONS
+# ============================================================
+
+def set_hub(world, player, iata: str, enabled: bool = True):
+    """
+    Declare (or drop) an airport as a maintenance base. Hubs cost their daily
+    overhead, and once ANY hub is declared a carrier's aircraft can only get
+    checks done at its own hubs.
+    """
+    code = iata.strip().upper()
+    ap = airport(world, code)
+    if ap is None:
+        return False, f"unknown airport {code}"
+    if enabled:
+        if code in player.hub_iatas:
+            return False, f"{code} is already a hub"
+        if not ap.has_maintenance_facility:
+            return False, f"{code} has no maintenance facility"
+        player.hub_iatas.append(code)
+        return True, f"{code} opened as a hub (${ap.hub_fee_per_day:,.0f}/day)"
+    if code not in player.hub_iatas:
+        return False, f"{code} is not a hub"
+    player.hub_iatas.remove(code)
+    return True, f"{code} closed as a hub"
+
+
+def hire_crew(world, player, crew_type: str, base_iata: str, headcount: int,
+              cost_per_hour: float, certs: tuple = ()):
+    try:
+        ctype = CrewType[str(crew_type).upper()]
+    except KeyError:
+        return False, f"unknown crew type {crew_type}"
+    if headcount <= 0:
+        return False, "headcount must be positive"
+    seq = len(player.crews) + len(player.cockpit_pool) + len(player.cabin_pool) + 1
+    spec = CrewSpec(spec_id=f"{ctype.name}-{seq}", display_name=f"{ctype.name} crew {seq}",
+                    crew_type=ctype, cost_per_member_hour=float(cost_per_hour),
+                    certifications=tuple(certs))
+    unit = CrewUnit(spec, headcount=int(headcount), owner_id=player.player_id,
+                    home_iata=base_iata)
+    if ctype == CrewType.COCKPIT:
+        player.cockpit_pool.append(unit)
+    elif ctype == CrewType.CABIN:
+        player.cabin_pool.append(unit)
+    else:
+        player.crews.append(unit)
+    return True, f"hired {headcount}x {ctype.name} at {base_iata}"
