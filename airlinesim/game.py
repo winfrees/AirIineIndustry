@@ -38,6 +38,15 @@ from airlinesim.finance_cabin import (
 from airlinesim.builder import build_demo_world
 
 
+def route_op_id(op: RouteOp) -> str:
+    """Stable identifier for a route operation.
+
+    Module-level so explorer.py addresses route ops by the same string the game
+    GUI shows; if this format ever changes, both move together.
+    """
+    return f"{op.owner_id}:{op.spec.spec_id}:{op.plane.tail_number}"
+
+
 def _pkg_version() -> str:
     # Inline import: `from airlinesim import __version__` at module top would
     # work today (nothing in __init__ imports game), but keeping it lazy means
@@ -63,12 +72,17 @@ _TERMS_BY_METHOD = {
 }
 
 
-def new_game(human_name: str = "You", ai_name: str = "SkyRival",
-             ai_step_frac: float = 0.03) -> "GameSession":
+def build_game_world(human_name: str = "You", ai_name: str = "SkyRival",
+                     ai_step_frac: float = 0.03):
     """
-    Build a ready-to-play two-carrier game. Reuses build_demo_world()'s
-    validated setup (see builder.py / the integration scenario) and promotes
-    the second carrier to an active AI opponent.
+    Build the two-carrier game world and return (world, engine, human_player_id)
+    WITHOUT wrapping it in a GameSession.
+
+    Split out of new_game() because GameSession.__init__ starts a background
+    real-time thread, and explorer.py needs this exact starting state hundreds
+    of times over with no threads attached. Keeping it as one seam means the
+    explorer maps the same game the player plays — a second constructor here
+    would drift from it silently.
     """
     world, engine = build_demo_world()
     human, ai = engine.players
@@ -80,7 +94,18 @@ def new_game(human_name: str = "You", ai_name: str = "SkyRival",
     ops_idx = next(i for i, s in enumerate(engine.subsystems)
                    if isinstance(s, OperationsSubsystem))
     engine.subsystems.insert(ops_idx, AIStrategySubsystem(step_frac=ai_step_frac))
-    return GameSession(world, engine, human_player_id=human.player_id)
+    return world, engine, human.player_id
+
+
+def new_game(human_name: str = "You", ai_name: str = "SkyRival",
+             ai_step_frac: float = 0.03) -> "GameSession":
+    """
+    Build a ready-to-play two-carrier game. Reuses build_demo_world()'s
+    validated setup (see builder.py / the integration scenario) and promotes
+    the second carrier to an active AI opponent.
+    """
+    world, engine, human_id = build_game_world(human_name, ai_name, ai_step_frac)
+    return GameSession(world, engine, human_player_id=human_id)
 
 
 class GameSession:
@@ -192,9 +217,7 @@ class GameSession:
     def _human(self):
         return self._player(self.human_player_id)
 
-    @staticmethod
-    def _op_id(op: RouteOp) -> str:
-        return f"{op.owner_id}:{op.spec.spec_id}:{op.plane.tail_number}"
+    _op_id = staticmethod(route_op_id)
 
     def _find_route_op(self, player, route_op_id: str) -> Optional[RouteOp]:
         return next((o for o in player.route_ops if self._op_id(o) == route_op_id), None)

@@ -18,6 +18,8 @@ constraint enforcement — not partial stubs.
       engine.py         # core: specs, World, Player, arbiter, pricing, maintenance,
                         #       Operations/Finance/Banking/RouteSuitability subsystems,
                         #       SimulationEngine tick loop
+      explorer.py       # outcome-space exploration: fork a state, branch it,
+                        #   run N cycles, test a derivation, repeat
       crew.py           # duty/rest limits, rostering, positioning, deadheading
       route.py          # market segments, stage economics, equipment/crew suitability
       finance_cabin.py  # cabin classes + seat layout; financing/banking; depreciation
@@ -72,13 +74,17 @@ constraint enforcement — not partial stubs.
     airlinesim run routedata         # 3-tier route data check (offline, snapshot)
     airlinesim run databuilt         # engine running on real BTS routes
     airlinesim run refresh_cx        # corpus-refresh logic (offline)
+    airlinesim run explorer          # outcome-explorer + engine-determinism check
+    airlinesim explore               # the outcome-explorer GUI (same server as `gui`)
     airlinesim refresh --check-only  # is the corpus stale? what needs re-export?
     airlinesim demo --data --hub ORD # data-driven demo instead of constants
     airlinesim ingest --t100-market T_T100D_MARKET_ALL_CARRIER.zip \
         --fetch-airport-ref --distill   # warehouse + regenerate the snapshot
 
 The `integration` scenario is the closest thing to a test suite — it wires every
-subsystem and asserts six invariants. Run it after any engine change.
+subsystem and asserts six invariants. Run it after any engine change. Run
+`explorer` too: it is what pins the engine's determinism, which nothing else
+checks.
 
 `python tools/smoke_windows_bundle.py` is the wider net: every self-checking
 scenario (grepping for `ALL CHECKS PASS`, since scenarios signal failure in
@@ -89,6 +95,40 @@ to be **installed** and runs every subprocess in a temp directory, deliberately:
 from the repo root imports the checkout and the install is never tested — which
 is how `btsdata/fixtures/*.csv` shipped missing from the wheel. Any new non-`.py`
 file under `airlinesim/` needs a matching `[tool.setuptools.package-data]` entry.
+
+## Outcome explorer (second GUI)
+
+`explorer.py` + `webui/explore.html` answer "what is the shape of everything
+that could happen?", where `game.py` answers "what happens in the run I'm
+playing?". Both front ends are served by the same `server.py` — the game at `/`,
+the explorer at `/explore.html`.
+
+- **It rests on the engine being deterministic.** There is not one `random` call
+  in `engine.py`, so a forked state re-run with the same edits gives a
+  byte-identical result. That is what makes a tree of branches a *map* rather
+  than noise. `airlinesim run explorer` asserts it, and is the only scenario
+  that does — adding nondeterminism to a subsystem turns that check red, which
+  is the intended alarm, not a flaky test.
+- A **node** is a forked `(world, engine, ctx)` triple pickled to a blob, plus
+  the metrics projected off it. An **edge** is "apply these mutations, then run
+  N cycles". One cycle is one `engine.tick`, i.e. `engine.dt` = 24h = one day.
+- Forking is `pickle`, the same mechanism `GameSession.save/load` uses. It costs
+  ~11 KB per node on the demo world (~60 KB once a run has accrued state), so
+  the tree is capped at `MAX_NODES` (400) rather than growing until the process
+  dies. `sweep()` and `expand()` check the cap up front instead of leaving a
+  half-built tree behind.
+- `game.build_game_world()` is the shared seam: the explorer roots its tree from
+  the exact world `new_game()` plays, minus the background thread. Don't add a
+  second world constructor for the explorer — it will drift.
+- **Derivations are an AST whitelist, not a sandbox around `eval`.** Every node
+  is checked against `_ALLOWED_NODES` before anything compiles, so an expression
+  can't reach an import, a dunder, or any call but `abs/min/max/round`. This
+  matters because the server binds `0.0.0.0`: a derivation box wired to a bare
+  `eval()` would be remote code execution for anyone on the LAN. Extend the
+  whitelist deliberately, never by widening it to "whatever the user typed".
+- Adding a knob means one entry in `MUTATION_KINDS` — the HTTP layer and the
+  GUI's target pickers are both driven off that table. Add a probe for it in
+  `scenario_explorer`'s sensitivity check at the same time (see below).
 
 ## Windows releases
 
@@ -178,6 +218,14 @@ demand code.
   ECONOMY; connecting -> 100% ECONOMY). Those split fractions are global
   game-balance defaults matched to `DEFAULT_SEAT_CLASSES`, not per-route or
   certified — see `route.py`'s `SEGMENT_CABIN_SPLIT`.
+- **`MarketConditions.fuel_index` is a dead field.** It is declared on the
+  dataclass and threaded through `ctx["market"]`, but no subsystem ever reads it
+  — grep `engine.py` and the only hit is its own declaration. Setting it changes
+  nothing. Fuel is priced off `FuelMarket.spot_price()`, which derives from
+  `base_price_per_l`, so that is the knob with a real effect (and the one the
+  explorer's `fuel_price` mutation drives). Either wire `fuel_index` into
+  `OperationsSubsystem`'s fuel costing or delete it; leaving it as-is invites
+  the next caller to "adjust the fuel market" and measure nothing.
 - Crew deadheading is direct-to-base only; no multi-hop routing or ferry flights.
 - The bundled AI adjusts price/frequency but doesn't use route suitability to
   right-size equipment.
@@ -252,6 +300,9 @@ gravity coefficients, and de-censoring where capacity exists.
 - Multi-hop / ferry crew positioning.
 - Make the AI read suitability + per-route P&L to choose aircraft and cabins.
 - Resale / used-aircraft market feeding the existing depreciation + retirement.
+- Explorer: persist a tree to disk (it is in-memory and dies with the server),
+  and let a derivation *drive* expansion — branch only where it holds, so the
+  search follows the interesting frontier instead of the full cross product.
 
 ## Suggested first task for a new session
 

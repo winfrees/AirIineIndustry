@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>AirlineSim — Outcome Explorer</title>
+<meta name="theme-color" content="#0b2a42">
+<link rel="icon" href="/icons/icon-192.png">
+<link rel="stylesheet" href="/styles.css">
+<link rel="stylesheet" href="/explore.css">
+</head>
+<body class="explorer">
+<header id="topbar">
+  <div class="brand">AirlineSim</div>
+  <div class="pill mode">Outcome Explorer</div>
+  <div id="ver" class="ver"></div>
+  <div id="stats" class="ver"></div>
+  <div class="spacer"></div>
+  <div id="controls">
+    <a class="btn" href="/">&larr; Game</a>
+    <label class="speed">root warm-up
+      <input id="rootCycles" type="number" min="0" max="3650" step="10" value="0" title="cycles to run before the root state is captured">
+    </label>
+    <button id="btnReset" class="btn warn">Reset tree</button>
+  </div>
+</header>
+
+<div id="toast" class="toast hidden"></div>
+
+<main id="explorerMain">
+  <section id="graphPane">
+    <div id="graphToolbar">
+      <span class="hint">drag to pan &middot; scroll to zoom &middot; click a node to inspect</span>
+      <div class="spacer"></div>
+      <div id="legend" class="legend hidden"></div>
+      <button id="btnFit" class="btn small">Fit</button>
+    </div>
+    <svg id="graph"><g id="viewport"><g id="edges"></g><g id="nodes"></g></g></svg>
+    <div id="busy" class="busy hidden"><span></span>running…</div>
+  </section>
+
+  <aside id="inspector">
+    <section class="card">
+      <h2>Derivation</h2>
+      <p class="hint">An expression tested against every node. Colours the graph.</p>
+      <form id="formDerivation" class="form vertical">
+        <input id="derivExpr" placeholder="human.net_worth &gt; ai.net_worth" spellcheck="false">
+        <div class="row">
+          <button class="btn" type="submit">Apply</button>
+          <button id="btnClearDeriv" class="btn ghost" type="button">Clear</button>
+        </div>
+      </form>
+      <div id="derivStatus" class="status"></div>
+      <details class="vars">
+        <summary>available fields</summary>
+        <div id="varList" class="varlist"></div>
+      </details>
+    </section>
+
+    <section class="card" id="nodeCard">
+      <h2>Node <span id="nodeId" class="mono"></span></h2>
+      <div id="nodeBody" class="empty">Select a node in the graph.</div>
+    </section>
+
+    <section class="card">
+      <h2>Branch from selection</h2>
+      <p class="hint">Apply edits to a copy of the selected state, then run it.</p>
+      <div id="mutList"></div>
+      <button id="btnAddMut" class="btn ghost small" type="button">+ add edit</button>
+      <form id="formBranch" class="form vertical">
+        <label class="field">cycles
+          <input id="branchCycles" type="number" min="0" max="3650" step="1" value="60">
+        </label>
+        <button class="btn" type="submit">Branch &amp; run</button>
+      </form>
+    </section>
+
+    <section class="card">
+      <h2>Sweep</h2>
+      <p class="hint">One knob across a range — children differ only by it.</p>
+      <form id="formSweep" class="form vertical">
+        <label class="field">knob
+          <select id="sweepKind"></select>
+        </label>
+        <label class="field">target
+          <select id="sweepTarget"></select>
+        </label>
+        <div class="row3">
+          <label class="field">from <input id="sweepFrom" type="number" step="any" value="0.6"></label>
+          <label class="field">to <input id="sweepTo" type="number" step="any" value="1.6"></label>
+          <label class="field">steps <input id="sweepCount" type="number" min="1" max="40" step="1" value="5"></label>
+        </div>
+        <div class="row3">
+          <label class="field">cycles <input id="sweepCycles" type="number" min="0" max="3650" step="1" value="60"></label>
+          <label class="field">depth <input id="sweepDepth" type="number" min="1" max="5" step="1" value="1"></label>
+          <span class="field hint" id="sweepCost"></span>
+        </div>
+        <button class="btn" type="submit">Sweep</button>
+      </form>
+    </section>
+  </aside>
+</main>
+
+<script src="/explore.js"></script>
+</body>
+</html>

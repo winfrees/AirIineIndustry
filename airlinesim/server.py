@@ -17,8 +17,9 @@ import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
+from airlinesim.explorer import Mutation, ScenarioTree, linspace
 from airlinesim.game import GameSession, new_game
 
 WEBUI_DIR = Path(__file__).parent / "webui"
@@ -38,6 +39,38 @@ COMMANDS = {
 }
 
 
+def _as_dict(result) -> dict:
+    """Tree ops return dicts already; anything else is wrapped under 'result'."""
+    return result if isinstance(result, dict) else {"result": result}
+
+
+def _mutations(raw) -> tuple:
+    """Parse the JSON mutation list into Mutation objects.
+
+    Validation of `kind` belongs to explorer.MUTATION_KINDS, not here — this
+    only converts shapes, so a new knob needs no change in the HTTP layer.
+    """
+    out = []
+    for m in raw or ():
+        if not isinstance(m, dict):
+            raise ValueError("each mutation must be an object")
+        if "kind" not in m:
+            raise ValueError("mutation is missing 'kind'")
+        out.append(Mutation(str(m["kind"]), str(m.get("target", "")),
+                            float(m.get("value", 0.0))))
+    return tuple(out)
+
+
+def _values(body: dict) -> list:
+    """Sweep values: either an explicit list, or from/to/count as a range."""
+    if body.get("values"):
+        return [float(v) for v in body["values"]]
+    if "from" in body and "to" in body:
+        return linspace(float(body["from"]), float(body["to"]),
+                        int(body.get("count", 5)))
+    raise ValueError("sweep needs 'values', or 'from'/'to' (+ optional 'count')")
+
+
 class Hub:
     """Owns the live GameSession and fans out its tick snapshots to every
     connected SSE client. Swapping sessions (new game / load) re-wires the
@@ -48,6 +81,29 @@ class Hub:
         self._clients: list = []
         self.session: GameSession = None
         self._set_session(session)
+        # The scenario tree is independent of the live game — it has its own
+        # root world and is never ticked by the real-time loop. Built lazily so
+        # a player who only ever opens the game GUI doesn't pay to construct
+        # one, and so `airlinesim gui` starts as fast as it used to.
+        self._tree: ScenarioTree = None
+        self._tree_lock = threading.Lock()
+
+    @property
+    def tree(self) -> ScenarioTree:
+        with self._tree_lock:
+            if self._tree is None:
+                self._tree = ScenarioTree()
+            return self._tree
+
+    def reset_tree(self, cycles: int = 0) -> ScenarioTree:
+        with self._tree_lock:
+            if self._tree is None:
+                self._tree = ScenarioTree()
+                if cycles:
+                    self._tree.reset(cycles)
+            else:
+                self._tree.reset(cycles)
+            return self._tree
 
     def _set_session(self, session: GameSession):
         if self.session is not None:
@@ -148,6 +204,14 @@ def make_handler(hub: Hub):
                 self._send_json(hub.session.catalog())
             elif path == "/api/events":
                 self._serve_sse()
+            elif path == "/api/explore/tree":
+                self._send_json(hub.tree.to_json())
+            elif path == "/api/explore/targets":
+                self._send_json(hub.tree.targets())
+            elif path == "/api/explore/node":
+                qs = parse_qs(urlparse(self.path).query)
+                node_id = (qs.get("id") or [""])[0]
+                self._explore(lambda: hub.tree.node_detail(node_id))
             else:
                 self._serve_static(path)
 
@@ -205,8 +269,56 @@ def make_handler(hub: Hub):
                          if k in ("human_name", "ai_name", "ai_step_frac")}
                 hub.new_game(**kwargs)
                 self._send_json({"ok": True, "state": hub.session.snapshot()})
+            elif path.startswith("/api/explore/"):
+                self._handle_explore(path[len("/api/explore/"):], body)
             else:
                 self.send_error(404)
+
+        # -- scenario explorer -------------------------------------------
+        # Branching is CPU-bound (it ticks the engine), so these are plain
+        # synchronous request handlers: the response IS the completed run.
+        # ScenarioTree takes its own lock, so concurrent tabs serialize there.
+
+        def _explore(self, fn):
+            """Run a tree operation, mapping its exceptions onto status codes."""
+            try:
+                self._send_json({"ok": True, **_as_dict(fn())})
+            except KeyError as e:
+                self._send_json({"ok": False, "message": str(e).strip("'\"")},
+                                status=404)
+            except (ValueError, TypeError) as e:
+                self._send_json({"ok": False, "message": str(e)}, status=400)
+
+        def _handle_explore(self, action: str, body: dict):
+            tree = hub.tree
+            if action == "branch":
+                self._explore(lambda: tree.branch(
+                    body.get("parent") or tree.root_id,
+                    _mutations(body.get("mutations", ())),
+                    int(body.get("cycles", 30)),
+                    body.get("label", "")).to_json())
+            elif action == "sweep":
+                self._explore(lambda: {"created": [
+                    n.to_json() for n in tree.sweep(
+                        body.get("parent") or tree.root_id,
+                        body.get("kind", ""), body.get("target", ""),
+                        _values(body), int(body.get("cycles", 30)))]})
+            elif action == "expand":
+                self._explore(lambda: {"created": [
+                    n.to_json() for n in tree.expand(
+                        body.get("parent") or tree.root_id,
+                        body.get("kind", ""), body.get("target", ""),
+                        _values(body), int(body.get("cycles", 30)),
+                        int(body.get("depth", 2)))]})
+            elif action == "evaluate":
+                self._explore(lambda: tree.evaluate(body.get("expr", "")))
+            elif action == "delete":
+                self._explore(lambda: {"removed": tree.delete(body.get("node_id", ""))})
+            elif action == "reset":
+                self._explore(lambda: hub.reset_tree(int(body.get("cycles", 0))).to_json())
+            else:
+                self._send_json({"ok": False, "message": f"unknown explore action {action}"},
+                                status=404)
 
         def _handle_command(self, body: dict):
             handler = COMMANDS.get(body.get("type"))
