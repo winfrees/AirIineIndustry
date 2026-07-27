@@ -131,6 +131,11 @@ def make_handler(hub: Hub):
             self.send_response(200)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(data)))
+            # The shell is served off localhost/LAN and is versioned by whatever
+            # build is installed, not by a URL hash — so heuristic browser
+            # caching has nothing to key on and will happily serve last week's
+            # CSS after an upgrade. Revalidate every time; the fetch is local.
+            self.send_header("Cache-Control", "no-cache")
             self.end_headers()
             self.wfile.write(data)
 
