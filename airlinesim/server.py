@@ -355,9 +355,10 @@ def make_handler(hub: Hub):
     return Handler
 
 
-def run_server(host: str = "0.0.0.0", port: int = 8765, session: GameSession = None):
+def run_server(host: str = "0.0.0.0", port: int = 8765, session: GameSession = None,
+               world: str = "demo", hub_iata: str = "ORD"):
     """Build and return (httpd, hub); caller owns calling serve_forever()."""
-    session = session or new_game()
+    session = session or new_game(world=world, hub=hub_iata)
     hub = Hub(session)
     httpd = ThreadingHTTPServer((host, port), make_handler(hub))
     httpd.daemon_threads = True

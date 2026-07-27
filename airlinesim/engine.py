@@ -97,6 +97,15 @@ class AircraftSpec(SpecBase):
     maint_cost_per_hour: float = 0.0
     maint_program: Optional[MaintenanceProgram] = None
     economic_life_d_checks: int = 3
+    # Balanced-field takeoff length at typical MTOW/sea level/ISA. 0 = unset,
+    # which skips the runway check (keeps pre-existing hand-authored specs valid).
+    takeoff_runway_m: float = 0.0
+    # Shared type ratings are real: the A320 family is one rating, 737NG/MAX
+    # one, 757/767 one. "" = fall back to spec_id/manufacturer certs matching.
+    type_rating: str = ""
+    # Cabin reconfiguration: cost per cabin slot, and how long the tail is down.
+    reconfig_cost_per_slot: float = 0.0
+    reconfig_days: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -107,7 +116,30 @@ class AirportSpec(SpecBase):
     has_maintenance_facility: bool = False
     facility_max_class: Optional[PlaneClass] = None
     fuel_supply_per_day_l: float = 0.0   # contested capacity
-    landing_fee: float = 0.0
+    landing_fee: float = 0.0             # per landing, scaled by plane class
+    # --- geography (great-circle distance + metro-pair markets) ---
+    lat: float = 0.0
+    lon: float = 0.0
+    metro_id: str = ""
+    # How easily this airport's catchment population can reach it, relative to
+    # a typical airport (1.0 = typical). This is the seam for real catchment /
+    # census data: with it, the LGA-vs-JFK-vs-EWR choice becomes real. The
+    # committed BTS corpus carries no catchment data, so it stays 1.0 there and
+    # only service tier moves desirability — see docs and route.py.
+    access_index: float = 1.0
+    # --- fee schedule; tier-indexed tuples, index = RouteOp.service_tier ---
+    # Empty tuple = no such fee at this airport (keeps legacy specs free).
+    gate_fee_by_tier: tuple = ()         # per departure turn
+    hub_fee_per_day: float = 0.0         # per day to run this as a MX base
+    amenities_fee_by_tier: tuple = ()    # per pax (lounge tier 0..2)
+    baggage_fee_by_tier: tuple = ()      # per pax (handling tier 1..3)
+
+    def fee_at_tier(self, table: tuple, tier: int) -> float:
+        """Read a tier-indexed fee, clamping out-of-range tiers rather than
+        raising mid-tick. Empty table -> no fee."""
+        if not table:
+            return 0.0
+        return table[max(0, min(int(tier), len(table) - 1))]
 
 
 class CrewType(Enum):
@@ -129,6 +161,12 @@ class RouteSpec(SpecBase):
     distance_km: float = 0.0
     base_demand_per_day: int = 0
     seasonality_amplitude: float = 0.2
+    # Which demand pool this route draws from. "" means the route is its own
+    # market (legacy behavior, keyed by spec_id). A metro-pair key like
+    # "LA|NYC" makes every airport pair between two metros compete for the
+    # SAME travelers — JFK-LAX and EWR-LAX chasing one New York-Los Angeles
+    # market, which is the point of modeling airport choice at all.
+    market_id: str = ""
     # market structure (route.py) — tuple of SegmentDemand; None -> flat fallback
     segments: tuple = ()
     # equipment + crew requirements (route.py)
@@ -188,11 +226,26 @@ class Airplane:
     d_checks_completed: int = 0
     structural_work_pending: bool = False
     retired: bool = False
+    # Cabin configuration belongs to the AIRFRAME: chosen at acquisition and
+    # changed only by a paid, downtime-incurring reconfiguration. None means
+    # all-economy. RouteOp.layout stays supported as a per-op override for
+    # pre-existing scenarios (see effective_layout()).
+    layout: object = None                # SeatLayout
+    reconfiguring_until: float = 0.0     # sim_time the recabin completes
 
     def __post_init__(self):
         for t in CheckTier:
             self.hours_since.setdefault(t, 0.0)
             self.days_since.setdefault(t, 0.0)
+
+    def effective_layout(self):
+        """
+        The layout revenue and demand claims should use. Per-op override wins
+        (legacy scenarios set RouteOp.layout), then the airframe's own
+        configuration, then all-economy.
+        """
+        from airlinesim.finance_cabin import SeatLayout
+        return self.layout or SeatLayout.all_economy(self.spec.max_seats)
 
 
 @dataclass
@@ -249,6 +302,12 @@ class RouteOp:
     deadhead_seats: int = 0            # seats reserved for repositioning crew this tick
     suitable: bool = True              # does equipment+crew satisfy route requirements
     suitability_reasons: list = field(default_factory=list)
+    # Service level bought at the airports this op uses: 1 = remote stand/bus
+    # boarding + basic handling (cheap, unpleasant), 2 = standard jetbridge,
+    # 3 = premium gate + flagship lounge + priority baggage. Drives both the
+    # fees charged and the desirability passengers assign to this op.
+    service_tier: int = 2
+    last_fees: float = 0.0             # airport fees paid last tick
 
 
 @dataclass
@@ -288,6 +347,10 @@ class Player:
     loans: list = field(default_factory=list)        # Loan (financed aircraft)
     leases: list = field(default_factory=list)       # Lease (operating leases)
     log: list = field(default_factory=list)
+    # Airports this carrier runs as maintenance bases. Costs hub_fee_per_day
+    # each, and (once any hub is declared) restricts where its aircraft can
+    # get checks done. Empty = legacy behavior: maintenance anywhere rated.
+    hub_iatas: list = field(default_factory=list)
 
     def maintenance_crews(self) -> list:
         return [c for c in self.crews if c.spec.crew_type == CrewType.MAINTENANCE]
@@ -332,11 +395,24 @@ class FuelMarket:
 
 @dataclass
 class DemandMarket:
-    """Per-route passenger demand — contested across all carriers on it."""
+    """
+    A passenger demand pool contested by every carrier serving it. Keyed by
+    a route's market_id: one pool per route by default, or one pool per
+    metro-pair when routes declare a shared market.
+    """
     route_id: str
     base_demand_per_day: int
     seasonality_amplitude: float
     segments: tuple = ()      # SegmentDemand tuple; empty -> flat fallback
+    # Fare this market is calibrated around. Wealthy, business-heavy markets
+    # sustain higher fares before demand falls off. 0 -> use the global
+    # PricingModel.reference_price (legacy behavior).
+    reference_price: float = 0.0
+
+
+def market_key(rs: "RouteSpec") -> str:
+    """The demand pool a route draws from — its market_id, else its own id."""
+    return getattr(rs, "market_id", "") or rs.spec_id
 
 
 class World:
@@ -356,9 +432,10 @@ class World:
         self.fuel[spec.iata] = FuelMarket(spec.iata, spec.fuel_supply_per_day_l, fuel_base_price)
 
     def add_demand_market(self, rs: RouteSpec):
-        self.demand[rs.spec_id] = DemandMarket(rs.spec_id, rs.base_demand_per_day,
-                                               rs.seasonality_amplitude,
-                                               segments=getattr(rs, "segments", ()))
+        key = market_key(rs)
+        self.demand[key] = DemandMarket(key, rs.base_demand_per_day,
+                                        rs.seasonality_amplitude,
+                                        segments=getattr(rs, "segments", ()))
 
     def reset_daily_markets(self):
         for fm in self.fuel.values():
@@ -389,6 +466,11 @@ class Claim:
     # DEMAND only: the cabin name when the route is segmented (each cabin is
     # its own priced pool), None for the legacy flat whole-route pool.
     sub_key: Optional[str] = None
+    # DEMAND only: how attractive this offer is beyond its fare — how easy the
+    # airport is to reach from where the market's travelers actually live, and
+    # what level of service is being bought. 1.0 = neutral, so legacy claims
+    # are unaffected.
+    desirability: float = 1.0
 
 
 @dataclass
@@ -495,13 +577,16 @@ class ResourceArbiter:
             # total demand pool — this is what makes segment elasticity (and,
             # for the flat fallback, nothing — it doesn't use price_ratio)
             # actually bite, instead of always sizing the pool at price_ratio=1.
+            # A market can carry its own reference fare (wealthier, more
+            # business-heavy metro pairs sustain higher prices before demand
+            # sags); otherwise fall back to the global one.
+            ref = dm.reference_price or self.pricing.reference_price
             total_amt = sum(c.amount for c in group)
             if total_amt > 1e-9:
                 avg_price = sum(c.priority * c.amount for c in group) / total_amt
             else:
-                avg_price = self.pricing.reference_price
-            price_ratio = (avg_price / self.pricing.reference_price
-                          if self.pricing.reference_price > 0 else 1.0)
+                avg_price = ref
+            price_ratio = (avg_price / ref) if ref > 0 else 1.0
 
             if sub_key is None:
                 total_demand = self.pricing.route_demand(dm, self.world.sim_time, price_ratio)
@@ -521,9 +606,13 @@ class ResourceArbiter:
         that fills up spills its remainder to whoever still has room.
         """
         # attractiveness via logit: weight = price^elasticity (elasticity<0,
-        # so a LOWER price yields a HIGHER weight). This is the share kernel.
+        # so a LOWER price yields a HIGHER weight) SCALED by desirability —
+        # convenience of the airport and level of service bought. That product
+        # is the trade a traveler actually makes: a cheap fare from an
+        # awkward airport can lose to a pricier one that's easy to reach.
         remaining = {id(c): c.amount for c in group}   # seat capacity left
-        weights = {id(c): max(1e-9, c.priority ** self.pricing.elasticity)
+        weights = {id(c): max(1e-9, (c.priority ** self.pricing.elasticity)
+                              * max(0.0, c.desirability))
                    for c in group}
         granted = {id(c): 0.0 for c in group}
 
@@ -643,10 +732,16 @@ class MaintenanceEngine:
             return False
         return ((plane.c_checks_completed + 1) % prog.c_3c_every_n_c) == 0
 
-    def _find_facility(self, plane: Airplane, cd: CheckDefinition) -> Optional[str]:
-        # NOW resolves against real airport specs in the repo (stub closed)
+    def _find_facility(self, plane: Airplane, cd: CheckDefinition,
+                       hubs: Optional[list] = None) -> Optional[str]:
+        # Resolves against real airport specs in the repo. If the owner has
+        # declared hubs, only those can do the work — a carrier's maintenance
+        # reach is the network it pays to run. No hubs declared = legacy
+        # behavior (any rated field will do).
         for ap in self.repo.all(AirportSpec):
             if not ap.has_maintenance_facility or ap.facility_max_class is None:
+                continue
+            if hubs and ap.iata not in hubs:
                 continue
             if ap.facility_max_class.value >= cd.min_facility_class.value:
                 return ap.iata
@@ -661,7 +756,8 @@ class MaintenanceEngine:
                 return c
         return None
 
-    def try_schedule(self, plane: Airplane, crews: list, now: float, log: list):
+    def try_schedule(self, plane: Airplane, crews: list, now: float, log: list,
+                     hubs: Optional[list] = None):
         if plane.retired or not plane.in_service:
             return None
         tier = self.highest_due_tier(plane)
@@ -713,9 +809,10 @@ class MaintenanceEngine:
             extra_cost += lay.extra_base_cost
             label = "D+struct"
 
-        facility = self._find_facility(plane, cd)
+        facility = self._find_facility(plane, cd, hubs)
         if facility is None:
-            log.append(f"  {plane.tail_number}: {tier.name} DUE but no rated facility — flying on risk")
+            where = " at any hub" if hubs else ""
+            log.append(f"  {plane.tail_number}: {tier.name} DUE but no rated facility{where} — flying on risk")
             return None
         crew = self._find_crew(plane, crews, now)
         if crew is None:
@@ -829,14 +926,19 @@ class OperationsSubsystem(Subsystem):
                     op.last_pax = 0.0
                     continue
 
-                dm = world.demand.get(op.spec.spec_id)
+                mkey = market_key(op.spec)
+                dm = world.demand.get(mkey)
+                # how appealing this op is beyond its fare: how reachable its
+                # origin airport is for the market's travelers, and what
+                # service level it buys them. 1.0 for worlds without geography.
+                desirability = self._desirability(op)
                 if dm and dm.segments:
                     # one priced claim per (op, cabin fed by a segment) — NOT
                     # per segment. Capacity belongs to a cabin; if two
                     # segments target the same cabin (leisure + connecting ->
                     # economy) their demand sums into ONE pool for it instead
                     # of each claiming the same physical seats twice.
-                    layout = op.layout or SeatLayout.all_economy(op.plane.spec.max_seats)
+                    layout = op.layout or op.plane.effective_layout()
                     fed_cabins = {name for seg in dm.segments
                                  for name, _ in SEGMENT_CABIN_SPLIT.get(seg.segment, ())}
                     for cabin_name in fed_cabins:
@@ -846,15 +948,17 @@ class OperationsSubsystem(Subsystem):
                             continue
                         seat_capacity = seats_cfg * op.daily_frequency * day_frac
                         fare = op.ticket_price * DEFAULT_SEAT_CLASSES[cabin].price_multiplier
-                        claims.append(Claim(p.player_id, ResourceKind.DEMAND, op.spec.spec_id,
+                        claims.append(Claim(p.player_id, ResourceKind.DEMAND, mkey,
                                             amount=seat_capacity, priority=fare,
-                                            payload=(op, cabin), sub_key=cabin_name))
+                                            payload=(op, cabin), sub_key=cabin_name,
+                                            desirability=desirability))
                         ops_with_claims.add(id(op))
                 else:
                     # legacy flat pool (route has no segments configured)
                     seats = op.plane.spec.max_seats * op.daily_frequency * day_frac
-                    claims.append(Claim(p.player_id, ResourceKind.DEMAND, op.spec.spec_id,
-                                        amount=seats, priority=op.ticket_price, payload=op))
+                    claims.append(Claim(p.player_id, ResourceKind.DEMAND, mkey,
+                                        amount=seats, priority=op.ticket_price, payload=op,
+                                        desirability=desirability))
                     ops_with_claims.add(id(op))
 
                 # gate claim: one gate per frequency, priority = willingness to pay (price)
@@ -950,14 +1054,14 @@ class OperationsSubsystem(Subsystem):
                             crew.duty.log_flight(world.sim_time, flown_fh)
                             crew_flew.add(id(crew))
 
-                layout = op.layout or SeatLayout.all_economy(op.plane.spec.max_seats)
+                layout = op.layout or op.plane.effective_layout()
                 base_fare = op.ticket_price
                 revenue = 0.0
                 class_pax = {}
                 total_seats_offered = 0.0
                 # deadheading crew occupy economy seats, removing them from sale
                 dh_seats = getattr(op, "deadhead_seats", 0)
-                dm = world.demand.get(op.spec.spec_id)
+                dm = world.demand.get(market_key(op.spec))
 
                 if dm and dm.segments:
                     # --- SEGMENT-DRIVEN REVENUE ---
@@ -1037,9 +1141,82 @@ class OperationsSubsystem(Subsystem):
                 if crew_cost > 0:
                     p.ledger.debit(crew_cost, f"flight crew {op.plane.tail_number}", p.log)
                 self.maint.accrue(op.plane, flight_hours=fh, calendar_days=day_frac)
+
+                # --- AIRPORT FEES ---
+                # Per operated flight: landing (dest, scaled by how much
+                # aircraft is being put on the runway) and gate turns at both
+                # ends. Per carried passenger: amenities and baggage handling.
+                # All indexed by the op's service tier, so buying a better
+                # passenger experience genuinely costs more.
+                fees = self._airport_fees(world, op, eff_freq * day_frac, actual_pax)
+                if fees > 0:
+                    p.ledger.debit(fees, f"airport fees {op.spec.origin_iata}/"
+                                         f"{op.spec.dest_iata} (tier {op.service_tier})", p.log)
+                op.last_fees = fees
+
                 op.last_revenue = revenue
-                op.last_variable_cost = fuel_cost + crew_cost
-                op.last_profit = revenue - (fuel_cost + crew_cost)
+                op.last_variable_cost = fuel_cost + crew_cost + fees
+                op.last_profit = revenue - (fuel_cost + crew_cost + fees)
+
+    def _desirability(self, op: RouteOp) -> float:
+        """
+        Non-price attractiveness of this op — what makes a passenger pick one
+        carrier over another at the same fare. Neutral 1.0 for a default
+        service tier, so worlds that never touch service behave exactly as
+        they did before this existed.
+        """
+        from airlinesim.route import service_desirability
+        repo = self.arbiter.world.repo
+
+        def access(iata):
+            try:
+                return repo.get(AirportSpec, iata).access_index
+            except KeyError:
+                return 1.0
+        return service_desirability(op.service_tier, access(op.spec.origin_iata),
+                                    access(op.spec.dest_iata))
+
+    # landing fees are weight-based in reality; a class multiplier stands in.
+    _LANDING_CLASS_MULT = {
+        PlaneClass.REGIONAL: 0.55, PlaneClass.NARROWBODY: 1.0, PlaneClass.WIDEBODY: 1.9,
+    }
+
+    def _airport_fees(self, world: World, op: RouteOp, flights: float,
+                      pax: float) -> float:
+        """
+        Airport charges for the flights actually operated this tick. Returns 0
+        for worlds whose airport specs carry no fee schedule, so legacy
+        scenarios are unaffected.
+        """
+        if flights <= 0:
+            return 0.0
+        repo = world.repo
+        tier = op.service_tier
+        total = 0.0
+        try:
+            origin = repo.get(AirportSpec, op.spec.origin_iata)
+        except KeyError:
+            origin = None
+        try:
+            dest = repo.get(AirportSpec, op.spec.dest_iata)
+        except KeyError:
+            dest = None
+
+        if dest is not None and dest.landing_fee:
+            mult = self._LANDING_CLASS_MULT.get(op.plane.spec.plane_class, 1.0)
+            total += dest.landing_fee * mult * flights
+        # a turn is bought at both ends of the leg
+        for ap in (origin, dest):
+            if ap is not None:
+                total += ap.fee_at_tier(ap.gate_fee_by_tier, tier) * flights
+        # per-passenger service costs, charged where the pax are handled
+        if pax > 0:
+            for ap in (origin, dest):
+                if ap is None:
+                    continue
+                total += ap.fee_at_tier(ap.amenities_fee_by_tier, tier) * pax
+                total += ap.fee_at_tier(ap.baggage_fee_by_tier, tier) * pax
+        return total
 
 
 class MaintenanceSubsystem(Subsystem):
@@ -1050,7 +1227,16 @@ class MaintenanceSubsystem(Subsystem):
         players_by_id = {p.player_id: p for p in players}
         for p in players:
             for plane in p.fleet:
-                self.maint.try_schedule(plane, p.maintenance_crews(), world.sim_time, p.log)
+                # a tail in the shop for a recabin isn't available for checks,
+                # and returns to service on its own schedule (no MX job, no crew)
+                if plane.reconfiguring_until > 0:
+                    if world.sim_time >= plane.reconfiguring_until:
+                        plane.reconfiguring_until = 0.0
+                        plane.in_service = True
+                        p.log.append(f"  {plane.tail_number}: reconfiguration complete, back in service")
+                    continue
+                self.maint.try_schedule(plane, p.maintenance_crews(), world.sim_time,
+                                        p.log, getattr(p, "hub_iatas", None))
         self.maint.update(world.sim_time, players_by_id, world.log)
 
 
@@ -1087,13 +1273,24 @@ class BankingSubsystem(Subsystem):
 
 
 class FinanceSubsystem(Subsystem):
-    """Standing payroll for non-flight staff + (future) loans/leasing."""
+    """Standing payroll for non-flight staff, plus hub overhead."""
     def tick(self, world: World, players: list, dt: float, ctx: dict):
+        day_frac = dt / 24.0
         for p in players:
             for c in p.crews:
                 if c.spec.crew_type in (CrewType.GROUND, CrewType.BAGGAGE,
                                         CrewType.METEOROLOGY, CrewType.MAINTENANCE):
                     p.ledger.debit(c.hourly_cost() * dt, f"{c.spec.crew_type.name} payroll", p.log)
+            # running an airport as a maintenance base costs whether or not
+            # anything is in the hangar today — that's what makes hub choice
+            # a real commitment rather than a free capability.
+            for iata in getattr(p, "hub_iatas", []):
+                try:
+                    ap = world.repo.get(AirportSpec, iata)
+                except KeyError:
+                    continue
+                if ap.hub_fee_per_day:
+                    p.ledger.debit(ap.hub_fee_per_day * day_frac, f"hub overhead {iata}", p.log)
 
 
 class AIStrategySubsystem(Subsystem):

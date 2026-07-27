@@ -35,6 +35,7 @@ from airlinesim.finance_cabin import (
     CabinClass, SeatLayout, DEFAULT_SEAT_CLASSES, cabin_slots_for,
     AcquisitionMethod, FinancingTerms, Bank, aircraft_value,
 )
+from airlinesim import actions
 from airlinesim.builder import build_demo_world
 
 
@@ -73,7 +74,8 @@ _TERMS_BY_METHOD = {
 
 
 def build_game_world(human_name: str = "You", ai_name: str = "SkyRival",
-                     ai_step_frac: float = 0.03):
+                     ai_step_frac: float = 0.03, world: str = "demo",
+                     ai_profiles=None, hub: str = "ORD", n_destinations: int = 5):
     """
     Build the two-carrier game world and return (world, engine, human_player_id)
     WITHOUT wrapping it in a GameSession.
@@ -84,6 +86,23 @@ def build_game_world(human_name: str = "You", ai_name: str = "SkyRival",
     explorer maps the same game the player plays — a second constructor here
     would drift from it silently.
     """
+    if world == "data":
+        # The BTS-corpus world, with rivals that plan networks (ai.py) rather
+        # than only repricing. Routes opened later resolve through the same
+        # corpus, so a mid-game route is sourced like a starting one.
+        from airlinesim.databuilder import build_world_from_data
+        profiles = ai_profiles or {"LSE": "Low-Cost"}
+        w, engine, _report = build_world_from_data(
+            hub=hub, n_destinations=n_destinations, verbose=False,
+            ai_profiles=profiles)
+        human = next(p for p in engine.players if p.player_id not in profiles)
+        human.name = human_name
+        for p in engine.players:
+            p.is_ai = p.player_id in profiles
+            if p.is_ai and p.player_id == next(iter(profiles), None):
+                p.name = ai_name
+        return w, engine, human.player_id
+
     world, engine = build_demo_world()
     human, ai = engine.players
     human.name = human_name
@@ -98,14 +117,22 @@ def build_game_world(human_name: str = "You", ai_name: str = "SkyRival",
 
 
 def new_game(human_name: str = "You", ai_name: str = "SkyRival",
-             ai_step_frac: float = 0.03) -> "GameSession":
+             ai_step_frac: float = 0.03, world: str = "demo",
+             ai_profiles=None, hub: str = "ORD",
+             n_destinations: int = 5) -> "GameSession":
     """
-    Build a ready-to-play two-carrier game. Reuses build_demo_world()'s
-    validated setup (see builder.py / the integration scenario) and promotes
-    the second carrier to an active AI opponent.
+    Build a ready-to-play game.
+
+      world="demo" — the two-airport sandbox, with the price/frequency bot.
+      world="data" — the BTS-corpus network out of `hub`, with rivals that run
+                     whole airlines (routes, fleet, cabins, service, crew).
+                     Assign styles with ai_profiles={player_id: archetype};
+                     see ai.ARCHETYPES.
     """
-    world, engine, human_id = build_game_world(human_name, ai_name, ai_step_frac)
-    return GameSession(world, engine, human_player_id=human_id)
+    w, engine, human_id = build_game_world(human_name, ai_name, ai_step_frac,
+                                           world=world, ai_profiles=ai_profiles,
+                                           hub=hub, n_destinations=n_destinations)
+    return GameSession(w, engine, human_player_id=human_id)
 
 
 class GameSession:
@@ -120,7 +147,9 @@ class GameSession:
         self.paused = True   # start paused so the player can look around first
         self.game_over = False
         self.game_over_reason = ""
-        self.bank = Bank(max_debt_to_cash=6.0)   # same leverage cap builder.py uses
+        # the world's shared lender — AI carriers borrow from the same bank,
+        # under the same leverage cap, with globally unique loan/lease ids
+        self.bank = actions.bank_for(world)
         self._init_runtime()
 
     # -- runtime state that can't (and shouldn't) be pickled --------------
@@ -219,134 +248,86 @@ class GameSession:
 
     _op_id = staticmethod(route_op_id)
 
+    @staticmethod
+    def _op_id(op: RouteOp) -> str:
+        return actions.op_id(op)
+
     def _find_route_op(self, player, route_op_id: str) -> Optional[RouteOp]:
-        return next((o for o in player.route_ops if self._op_id(o) == route_op_id), None)
+        return actions.find_route_op(player, route_op_id)
 
-    # -- command API ---------------------------------------------------
-    # Every command takes the lock, mutates via existing engine machinery,
-    # and returns (ok: bool, message: str) so the HTTP layer can surface
-    # engine-side rejections (e.g. Bank's credit gate) instead of no-ops.
+    # Delegating shims so scenarios/tests can inspect without a command.
+    def _find_plane(self, player, tail_number: str):
+        return actions.find_plane(player, tail_number)
 
-    def set_price(self, route_op_id: str, price: float):
-        with self.lock:
-            op = self._find_route_op(self._human(), route_op_id)
-            if op is None:
-                return False, "route not found"
-            if price <= 0:
-                return False, "price must be positive"
-            op.ticket_price = round(float(price), 2)
-            return True, f"price set to ${op.ticket_price:.0f}"
-
-    def set_frequency(self, route_op_id: str, freq: int):
-        with self.lock:
-            op = self._find_route_op(self._human(), route_op_id)
-            if op is None:
-                return False, "route not found"
-            op.daily_frequency = max(0, int(freq))
-            return True, f"frequency set to {op.daily_frequency}/day"
-
-    def set_layout(self, route_op_id: str, seats: dict):
-        with self.lock:
-            op = self._find_route_op(self._human(), route_op_id)
-            if op is None:
-                return False, "route not found"
-            layout, err = self._build_layout(seats, op.plane.spec.max_seats)
-            if err:
-                return False, err
-            op.layout = layout
-            return True, "layout updated"
+    def _plane_is_busy(self, plane) -> str:
+        return actions.plane_is_busy(self.world, plane)
 
     def _build_layout(self, seats: dict, max_seats: int):
-        try:
-            seat_counts = {CabinClass[k.upper()]: int(v) for k, v in seats.items()}
-        except KeyError as e:
-            return None, f"unknown cabin class {e}"
-        layout = SeatLayout(seat_counts)
-        if not layout.is_valid(cabin_slots_for(max_seats), DEFAULT_SEAT_CLASSES):
-            return None, "layout exceeds cabin capacity"
-        return layout, None
+        return actions.build_layout(seats, max_seats)
 
-    def acquire_aircraft(self, spec_id: str, tail_number: str, method: str,
-                          base_iata: Optional[str] = None):
+    def _resolve_route(self, route_spec_id: str):
+        return actions.resolve_route(self.world, route_spec_id)
+
+    def _ensure_market(self, route_spec):
+        return actions.ensure_market(self.world, route_spec)
+
+    def _validate_equipment(self, route_spec, aircraft_spec):
+        return actions.validate_equipment(self.world, route_spec, aircraft_spec)
+
+    def _retire_tail(self, player, tail_number: str) -> int:
+        return actions.retire_tail(player, tail_number)
+
+    # -- command API ---------------------------------------------------
+    # Thin wrappers: take the session lock, then call the shared action with
+    # the HUMAN player. AI carriers call those identical functions inside the
+    # tick (see ai.py), so both sides face the same validation, credit gate,
+    # fees and teardown — the AI cannot cheat by construction.
+
+    def _do(self, fn, *args, **kwargs):
         with self.lock:
-            p = self._human()
-            if any(a.tail_number == tail_number for a in p.fleet):
-                return False, "tail number already in use"
-            try:
-                spec = self.world.repo.get(AircraftSpec, spec_id)
-            except KeyError:
-                return False, f"unknown aircraft spec {spec_id}"
-            method_enum = _METHOD_BY_NAME.get(method.upper())
-            if method_enum is None:
-                return False, f"unknown acquisition method {method}"
-            terms = _TERMS_BY_METHOD[method_enum]
+            return fn(self.world, self._human(), *args, **kwargs)
 
-            # try_acquire() is the authoritative answer to "did it fund?". This
-            # used to decide by matching "DENIED" in the freshly appended log
-            # lines, which worked but coupled a financial invariant to log
-            # wording — rename a message and the player silently gets a free
-            # aircraft. The log lines are still used for the REASON shown to the
-            # player, which is presentation rather than control flow.
-            before = len(p.log)
-            if not self.bank.try_acquire(p, spec, tail_number, method_enum,
-                                         terms, p.log):
-                reasons = [m.strip() for m in p.log[before:] if m.strip()]
-                return False, "; ".join(reasons) or "acquisition denied"
+    def set_price(self, route_op_id: str, price: float):
+        return self._do(actions.set_price, route_op_id, price)
 
-            plane = Airplane(spec=spec, tail_number=tail_number, owner_id=p.player_id,
-                              owned=(method_enum != AcquisitionMethod.OPERATING_LEASE),
-                              location_iata=base_iata or next(iter(self.world.gates)),
-                              acquired_at=self.world.sim_time)
-            p.fleet.append(plane)
-            return True, f"acquired {tail_number} ({spec.display_name}) via {method_enum.name}"
+    def set_frequency(self, route_op_id: str, freq: int):
+        return self._do(actions.set_frequency, route_op_id, freq)
+
+    def set_layout(self, route_op_id: str, seats: dict):
+        return self._do(actions.set_layout, route_op_id, seats)
+
+    def set_service_tier(self, route_op_id: str, tier: int):
+        return self._do(actions.set_service_tier, route_op_id, tier)
 
     def open_route(self, route_spec_id: str, tail_number: str, price: float,
-                    freq: int = 1, seats: Optional[dict] = None):
-        with self.lock:
-            p = self._human()
-            try:
-                route_spec = self.world.repo.get(RouteSpec, route_spec_id)
-            except KeyError:
-                return False, f"unknown route {route_spec_id}"
-            plane = next((a for a in p.fleet if a.tail_number == tail_number), None)
-            if plane is None:
-                return False, f"no aircraft {tail_number} in fleet"
-            if any(o.plane.tail_number == tail_number and o.spec.spec_id == route_spec_id
-                   for o in p.route_ops):
-                return False, "already operating this route with that aircraft"
-            layout = None
-            if seats:
-                layout, err = self._build_layout(seats, plane.spec.max_seats)
-                if err:
-                    return False, err
-            op = RouteOp(spec=route_spec, plane=plane, cockpit=None, cabin=None,
-                         ticket_price=float(price), daily_frequency=max(0, int(freq)),
-                         owner_id=p.player_id, layout=layout)
-            p.route_ops.append(op)
-            return True, f"opened {route_spec.origin_iata}->{route_spec.dest_iata} with {tail_number}"
+                   freq: int = 1, seats: Optional[dict] = None, service_tier: int = 2):
+        return self._do(actions.open_route, route_spec_id, tail_number, price,
+                        freq, seats, service_tier)
+
+    def close_route(self, route_op_id: str):
+        return self._do(actions.close_route, route_op_id)
+
+    def acquire_aircraft(self, spec_id: str, tail_number: str, method: str,
+                         base_iata: Optional[str] = None, seats: Optional[dict] = None):
+        return self._do(actions.acquire_aircraft, spec_id, tail_number, method,
+                        base_iata, seats, self.bank)
+
+    def sell_aircraft(self, tail_number: str):
+        return self._do(actions.sell_aircraft, tail_number)
+
+    def break_lease(self, tail_number: str):
+        return self._do(actions.break_lease, tail_number)
+
+    def reconfigure_aircraft(self, tail_number: str, seats: dict):
+        return self._do(actions.reconfigure_aircraft, tail_number, seats)
+
+    def set_hub(self, iata: str, enabled: bool = True):
+        return self._do(actions.set_hub, iata, enabled)
 
     def hire_crew(self, crew_type: str, base_iata: str, headcount: int,
                   cost_per_hour: float, certs: tuple = ()):
-        with self.lock:
-            p = self._human()
-            try:
-                ctype = CrewType[crew_type.upper()]
-            except KeyError:
-                return False, f"unknown crew type {crew_type}"
-            if headcount <= 0:
-                return False, "headcount must be positive"
-            seq = len(p.crews) + len(p.cockpit_pool) + len(p.cabin_pool) + 1
-            spec = CrewSpec(spec_id=f"{ctype.name}-{seq}", display_name=f"{ctype.name} crew {seq}",
-                             crew_type=ctype, cost_per_member_hour=float(cost_per_hour),
-                             certifications=tuple(certs))
-            unit = CrewUnit(spec, headcount=int(headcount), owner_id=p.player_id, home_iata=base_iata)
-            if ctype == CrewType.COCKPIT:
-                p.cockpit_pool.append(unit)
-            elif ctype == CrewType.CABIN:
-                p.cabin_pool.append(unit)
-            else:
-                p.crews.append(unit)
-            return True, f"hired {headcount}x {ctype.name} at {base_iata}"
+        return self._do(actions.hire_crew, crew_type, base_iata, headcount,
+                        cost_per_hour, certs)
 
     # -- catalog (what's available to buy/fly) --------------------------
     def catalog(self) -> dict:
@@ -408,7 +389,22 @@ class GameSession:
                        "months_elapsed": l.months_elapsed, "term_months": l.term_months}
                       for l in p.leases],
             "log": list(p.log[-20:]),
+            "ai_profile": self._ai_profile(p),
         }
+
+    def _ai_profile(self, p) -> Optional[dict]:
+        """
+        Which strategy an AI rival is playing, and its recent moves. Surfaced
+        deliberately: an opponent whose style you can read is one you can plan
+        against, and it keeps the AI's decisions legible rather than magic.
+        """
+        if not p.is_ai:
+            return None
+        from airlinesim.ai import AICarrierSubsystem
+        for s in self.engine.subsystems:
+            if isinstance(s, AICarrierSubsystem):
+                return s.profile_of(p.player_id)
+        return None
 
     def _plane_snapshot(self, a) -> dict:
         return {

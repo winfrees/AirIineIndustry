@@ -283,10 +283,8 @@ class RouteDataProvider:
             connecting_share=_num(row.get("connecting_share"), -1.0))
 
     def great_circle_km(self, a: AirportRecord, b: AirportRecord) -> float:
-        la1, lo1, la2, lo2 = map(math.radians, (a.lat, a.lon, b.lat, b.lon))
-        h = (math.sin((la2 - la1) / 2) ** 2
-             + math.cos(la1) * math.cos(la2) * math.sin((lo2 - lo1) / 2) ** 2)
-        return 2 * 6371.0 * math.asin(math.sqrt(min(1.0, h)))
+        from airlinesim.route import haversine
+        return haversine(a.lat, a.lon, b.lat, b.lon)
 
     def _comparable(self, origin: str, dest: str):
         """
@@ -367,6 +365,15 @@ class RouteDataProvider:
         rec = self._airports.get(iata)
         if rec is None:
             return None
+        # Fee schedules are HEURISTIC, but scaled off the one thing the corpus
+        # does measure — how much traffic the airport actually handles. Busy
+        # airports charge more, which is what makes a secondary field (MDW,
+        # OAK, BUR) a genuine cost alternative to its primary (ORD, SFO, LAX)
+        # rather than a flavourless duplicate. The per-tier spreads are game
+        # balance: tier 1 is a remote stand and a bus, tier 3 is a good gate
+        # with a lounge and careful bag handling.
+        size = max(0.0, rec.out_pax_per_day)
+        gate_base = max(250.0, min(4200.0, size / 28.0))
         return AirportSpec(
             spec_id=iata, display_name=rec.name or iata, iata=iata,
             runway_length_m=rec.runway_m,
@@ -375,7 +382,13 @@ class RouteDataProvider:
             facility_max_class=PlaneClass.WIDEBODY if rec.hub_rank <= 40
             else PlaneClass.NARROWBODY,
             fuel_supply_per_day_l=rec.est_fuel_l_per_day,   # HEURISTIC
-            landing_fee=max(150.0, min(3000.0, rec.out_pax_per_day / 40.0)))
+            landing_fee=max(150.0, min(3000.0, rec.out_pax_per_day / 40.0)),
+            lat=rec.lat, lon=rec.lon,
+            # index 0 unused; index = RouteOp.service_tier (1..3)
+            gate_fee_by_tier=(0.0, gate_base * 0.55, gate_base, gate_base * 1.7),
+            amenities_fee_by_tier=(0.0, 0.0, 2.5, 9.0),     # HEURISTIC, per pax
+            baggage_fee_by_tier=(0.0, 1.5, 3.0, 5.5),       # HEURISTIC, per pax
+            hub_fee_per_day=max(4_000.0, min(90_000.0, size / 1.6)))
 
     def route_spec(self, origin: str, dest: str, *, business_frac=0.25,
                    leisure_frac=0.55, plane_class=None, spec_id=None):
