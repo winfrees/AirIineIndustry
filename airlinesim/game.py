@@ -91,7 +91,8 @@ def build_game_world(human_name: str = "You", ai_name: str = "SkyRival",
         # than only repricing. Routes opened later resolve through the same
         # corpus, so a mid-game route is sourced like a starting one.
         from airlinesim.databuilder import build_world_from_data
-        profiles = ai_profiles or {"LSE": "Low-Cost"}
+        profiles = ai_profiles or {"LSE": "Low-Cost", "CRW": "Legacy",
+                                   "RGN": "Regional"}
         w, engine, _report = build_world_from_data(
             hub=hub, n_destinations=n_destinations, verbose=False,
             ai_profiles=profiles)

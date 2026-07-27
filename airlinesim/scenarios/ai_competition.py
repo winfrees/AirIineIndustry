@@ -38,7 +38,7 @@ def main():
     print("AI COMPETITION — rivals that build networks, not just reprice")
     print("=" * 70)
 
-    world, engine = build({"LSE": "Low-Cost"})
+    world, engine = build({"LSE": "Low-Cost", "CRW": "Legacy", "RGN": "Regional"})
     ai_sub = next(s for s in engine.subsystems if isinstance(s, AICarrierSubsystem))
     humans = [p for p in engine.players if not p.is_ai]
     ais = [p for p in engine.players if p.is_ai]
@@ -117,17 +117,36 @@ def main():
           "; ".join(f"{p.name}: ${net_worth(world, p)/1e6:.1f}M" for p in ais))
 
     # --- archetype differentiation ---
-    # Archetype contrast needs the two styles side by side: same corpus, same
-    # hub, same starting position — only the playbook differs.
-    w2, e2 = build({"FIN": "Legacy", "LSE": "Low-Cost"})
-    ctx2 = {"market": MarketConditions()}
-    for _ in range(DAYS):
-        e2.tick(ctx2)
-    sub2 = next(s for s in e2.subsystems if isinstance(s, AICarrierSubsystem))
-    lowcost = next((p for p in e2.players
-                    if sub2.profile_of(p.player_id)["archetype"] == "Low-Cost"), None)
-    legacy = next((p for p in e2.players
-                   if sub2.profile_of(p.player_id)["archetype"] == "Legacy"), None)
+    # All three styles are in THIS world, competing over the same corpus from
+    # the same hub — differentiation has to survive contact with rivals, not
+    # just show up in isolation.
+    def by_style(name):
+        return next((p for p in ais
+                     if ai_sub.profile_of(p.player_id)["archetype"] == name), None)
+    lowcost, legacy, regional = by_style("Low-Cost"), by_style("Legacy"), by_style("Regional")
+
+    check("all three archetypes are running",
+          all(x is not None for x in (lowcost, legacy, regional)),
+          ", ".join(f"{p.name}={ai_sub.profile_of(p.player_id)['archetype']}" for p in ais))
+
+    # --- price discipline: a cost-plus floor must never outrun the ceiling ---
+    breaches = [(p.name, round(max((o.ticket_price for o in p.route_ops), default=0)))
+                for p in ais
+                if max((o.ticket_price for o in p.route_ops), default=0)
+                > ARCHETYPES[ai_sub.profile_of(p.player_id)["archetype"]].price_ceiling + 0.01]
+    check("no carrier prices above its ceiling", not breaches,
+          str(breaches) if breaches else
+          "; ".join(f"{p.name} max ${max((o.ticket_price for o in p.route_ops), default=0):.0f}"
+                    for p in ais))
+
+    # --- hubs are a strategy, not a fixed cost ---
+    if lowcost and legacy:
+        check("network carrier runs more hubs than the point-to-point one",
+              len(legacy.hub_iatas) > len(lowcost.hub_iatas),
+              f"Legacy {legacy.hub_iatas} vs Low-Cost {lowcost.hub_iatas}")
+    check("every AI carrier has somewhere to do maintenance",
+          all(p.hub_iatas for p in ais),
+          "; ".join(f"{p.name}: {p.hub_iatas}" for p in ais))
 
     if lowcost and legacy:
         lc_tier = (sum(o.service_tier for o in lowcost.route_ops)

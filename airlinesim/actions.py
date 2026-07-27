@@ -486,8 +486,20 @@ def set_hub(world, player, iata: str, enabled: bool = True):
         return True, f"{code} opened as a hub (${ap.hub_fee_per_day:,.0f}/day)"
     if code not in player.hub_iatas:
         return False, f"{code} is not a hub"
+    # Closing the last hub would leave the fleet with nowhere to be maintained
+    # while still flying, which quietly turns into "flying on risk" every time
+    # a check comes due. Refuse it rather than let the carrier discover that
+    # weeks later; closing a hub you still fly from is allowed, but you lose
+    # its preferential gates, which is the honest trade.
+    if len(player.hub_iatas) == 1 and player.fleet:
+        return False, (f"{code} is your only hub — with a fleet to maintain, "
+                       f"open another before closing this one")
     player.hub_iatas.remove(code)
-    return True, f"{code} closed as a hub"
+    based = sum(1 for a in player.fleet if a.location_iata == code)
+    msg = f"{code} closed as a hub"
+    if based:
+        msg += f"; {based} aircraft still there lose preferential gates"
+    return True, msg
 
 
 def hire_crew(world, player, crew_type: str, base_iata: str, headcount: int,

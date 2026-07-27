@@ -60,28 +60,113 @@ def _program(narrow_or_wide: PlaneClass, scale: float = 1.0) -> MaintenanceProgr
 
 
 FLEET_CATALOG = (
+    # The modern US mainline mix. Figures are industry-SHAPED game defaults
+    # from public manufacturer/operator data, not certified performance:
+    # list prices are order-of-magnitude list, not the discounts airlines
+    # actually pay, and burn/maintenance are cruise-average approximations.
+    #
+    # `scale` sizes the maintenance program off the A320 baseline (1.0).
+    # `type_rating` is what a pilot is actually qualified on, so a shared
+    # rating is a real fleet-planning advantage: the A320 family is one
+    # rating, 737NG/MAX one, 757/767 one.
     dict(spec_id="E175", display_name="E175", manufacturer="Embraer",
          plane_class=PlaneClass.REGIONAL if hasattr(PlaneClass, "REGIONAL")
          else PlaneClass.NARROWBODY,
          list_price=38_000_000, max_seats=76, max_range_km=3900,
          cruise_speed_kmh=797, fuel_burn_lph=1300, maint_cost_per_hour=700,
          takeoff_runway_m=1700, type_rating="E170",
-         reconfig_cost_per_slot=9_000, reconfig_days=10,
-         scale=0.55),
+         reconfig_cost_per_slot=9_000, reconfig_days=10, scale=0.55),
+    dict(spec_id="CRJ900", display_name="CRJ900", manufacturer="Bombardier",
+         plane_class=PlaneClass.REGIONAL if hasattr(PlaneClass, "REGIONAL")
+         else PlaneClass.NARROWBODY,
+         list_price=34_000_000, max_seats=90, max_range_km=2900,
+         cruise_speed_kmh=829, fuel_burn_lph=1450, maint_cost_per_hour=760,
+         takeoff_runway_m=1900, type_rating="CRJ",
+         reconfig_cost_per_slot=8_500, reconfig_days=9, scale=0.55),
+    dict(spec_id="A220", display_name="A220-300", manufacturer="Airbus",
+         plane_class=PlaneClass.NARROWBODY,
+         list_price=91_000_000, max_seats=145, max_range_km=6300,
+         cruise_speed_kmh=829, fuel_burn_lph=1900, maint_cost_per_hour=900,
+         takeoff_runway_m=1900, type_rating="A220",
+         reconfig_cost_per_slot=12_000, reconfig_days=12, scale=0.8),
+    dict(spec_id="A319", display_name="A319neo", manufacturer="Airbus",
+         plane_class=PlaneClass.NARROWBODY,
+         list_price=101_000_000, max_seats=160, max_range_km=6900,
+         cruise_speed_kmh=833, fuel_burn_lph=2200, maint_cost_per_hour=1000,
+         takeoff_runway_m=2000, type_rating="A320",
+         reconfig_cost_per_slot=13_000, reconfig_days=13, scale=0.9),
     dict(spec_id="A320", display_name="A320neo", manufacturer="Airbus",
          plane_class=PlaneClass.NARROWBODY,
          list_price=110_000_000, max_seats=180, max_range_km=6300,
          cruise_speed_kmh=833, fuel_burn_lph=2400, maint_cost_per_hour=1100,
          takeoff_runway_m=2100, type_rating="A320",
-         reconfig_cost_per_slot=14_000, reconfig_days=14,
-         scale=1.0),
+         reconfig_cost_per_slot=14_000, reconfig_days=14, scale=1.0),
+    dict(spec_id="A321", display_name="A321neo", manufacturer="Airbus",
+         plane_class=PlaneClass.NARROWBODY,
+         list_price=129_000_000, max_seats=220, max_range_km=7400,
+         cruise_speed_kmh=833, fuel_burn_lph=2750, maint_cost_per_hour=1250,
+         takeoff_runway_m=2300, type_rating="A320",
+         reconfig_cost_per_slot=16_000, reconfig_days=16, scale=1.15),
+    dict(spec_id="B738", display_name="737-800", manufacturer="Boeing",
+         plane_class=PlaneClass.NARROWBODY,
+         list_price=106_000_000, max_seats=189, max_range_km=5400,
+         cruise_speed_kmh=840, fuel_burn_lph=2600, maint_cost_per_hour=1150,
+         takeoff_runway_m=2300, type_rating="B737",
+         reconfig_cost_per_slot=14_000, reconfig_days=14, scale=1.0),
+    dict(spec_id="B38M", display_name="737 MAX 8", manufacturer="Boeing",
+         plane_class=PlaneClass.NARROWBODY,
+         list_price=122_000_000, max_seats=189, max_range_km=6570,
+         cruise_speed_kmh=839, fuel_burn_lph=2350, maint_cost_per_hour=1080,
+         takeoff_runway_m=2200, type_rating="B737",
+         reconfig_cost_per_slot=14_500, reconfig_days=14, scale=1.0),
+    dict(spec_id="B39M", display_name="737 MAX 9", manufacturer="Boeing",
+         plane_class=PlaneClass.NARROWBODY,
+         list_price=129_000_000, max_seats=220, max_range_km=6570,
+         cruise_speed_kmh=839, fuel_burn_lph=2500, maint_cost_per_hour=1180,
+         takeoff_runway_m=2400, type_rating="B737",
+         reconfig_cost_per_slot=15_500, reconfig_days=15, scale=1.1),
+    dict(spec_id="B752", display_name="757-200", manufacturer="Boeing",
+         plane_class=PlaneClass.NARROWBODY,
+         list_price=48_000_000, max_seats=200, max_range_km=7250,
+         cruise_speed_kmh=850, fuel_burn_lph=3400, maint_cost_per_hour=1600,
+         takeoff_runway_m=2100, type_rating="B757",
+         reconfig_cost_per_slot=13_000, reconfig_days=16, scale=1.3),
+    dict(spec_id="B763", display_name="767-300ER", manufacturer="Boeing",
+         plane_class=PlaneClass.WIDEBODY,
+         list_price=72_000_000, max_seats=260, max_range_km=11000,
+         cruise_speed_kmh=851, fuel_burn_lph=4400, maint_cost_per_hour=2100,
+         takeoff_runway_m=2600, type_rating="B757",
+         reconfig_cost_per_slot=20_000, reconfig_days=22, scale=1.9),
+    dict(spec_id="B788", display_name="787-8", manufacturer="Boeing",
+         plane_class=PlaneClass.WIDEBODY,
+         list_price=248_000_000, max_seats=248, max_range_km=13600,
+         cruise_speed_kmh=903, fuel_burn_lph=5000, maint_cost_per_hour=2400,
+         takeoff_runway_m=2600, type_rating="B787",
+         reconfig_cost_per_slot=24_000, reconfig_days=26, scale=2.2),
     dict(spec_id="B789", display_name="787-9", manufacturer="Boeing",
          plane_class=PlaneClass.WIDEBODY,
          list_price=290_000_000, max_seats=290, max_range_km=14000,
          cruise_speed_kmh=903, fuel_burn_lph=5600, maint_cost_per_hour=2600,
          takeoff_runway_m=2800, type_rating="B787",
-         reconfig_cost_per_slot=26_000, reconfig_days=28,
-         scale=2.4),
+         reconfig_cost_per_slot=26_000, reconfig_days=28, scale=2.4),
+    dict(spec_id="A339", display_name="A330-900", manufacturer="Airbus",
+         plane_class=PlaneClass.WIDEBODY,
+         list_price=296_000_000, max_seats=287, max_range_km=13300,
+         cruise_speed_kmh=871, fuel_burn_lph=5700, maint_cost_per_hour=2650,
+         takeoff_runway_m=2700, type_rating="A330",
+         reconfig_cost_per_slot=26_000, reconfig_days=28, scale=2.4),
+    dict(spec_id="A359", display_name="A350-900", manufacturer="Airbus",
+         plane_class=PlaneClass.WIDEBODY,
+         list_price=317_000_000, max_seats=315, max_range_km=15000,
+         cruise_speed_kmh=903, fuel_burn_lph=5800, maint_cost_per_hour=2700,
+         takeoff_runway_m=2700, type_rating="A350",
+         reconfig_cost_per_slot=28_000, reconfig_days=30, scale=2.6),
+    dict(spec_id="B77W", display_name="777-300ER", manufacturer="Boeing",
+         plane_class=PlaneClass.WIDEBODY,
+         list_price=375_000_000, max_seats=396, max_range_km=13650,
+         cruise_speed_kmh=896, fuel_burn_lph=7500, maint_cost_per_hour=3300,
+         takeoff_runway_m=3100, type_rating="B777",
+         reconfig_cost_per_slot=32_000, reconfig_days=34, scale=3.1),
 )
 
 
@@ -197,8 +282,15 @@ def build_world_from_data(hub: str = "ORD", n_destinations: int = 4,
     destinations = [iata for _, iata in candidates[:n_destinations]]
 
     # --- airports through the seam ---
+    # EVERY airport in the corpus is loaded, not just the ones the starting
+    # network touches. Route opening resolves endpoints against the repository,
+    # so loading only the starting few silently made "open any pair" mean "open
+    # one of four" — the corpus knows about BOS, but ORD->BOS came back
+    # "unknown airport BOS". Specs are small frozen dataclasses; 300 of them
+    # cost nothing next to being able to fly anywhere the data reaches.
     codes = [hub] + destinations
-    repo.load(AirportSpec, [{"iata": c} for c in codes],
+    all_codes = list(dict.fromkeys(codes + list(provider.airports)))
+    repo.load(AirportSpec, [{"iata": c} for c in all_codes],
               lambda row: provider.airport_spec(row["iata"]))
 
     # --- routes through the seam (both directions) ---
@@ -211,7 +303,10 @@ def build_world_from_data(hub: str = "ORD", n_destinations: int = 4,
     # or AI plan) resolves demand through this same provider, so a route added
     # mid-game is sourced exactly like one built here.
     world.route_data = provider
-    for c in codes:
+    # Gates and fuel exist at every airport that can be flown to, otherwise a
+    # route opened mid-game would draw against no capacity at all and bypass
+    # the contention the arbiter exists to resolve.
+    for c in all_codes:
         world.add_airport_resources(repo.get(AirportSpec, c), 0.82)
 
     # --- equipment selection per route, then demand markets ---
@@ -259,12 +354,23 @@ def build_world_from_data(hub: str = "ORD", n_destinations: int = 4,
     lease = FinancingTerms("LEASE", AcquisitionMethod.OPERATING_LEASE,
                            lease_rate_frac_per_year=0.11, lease_term_months=84)
 
-    for pid, name, method, terms, premium in (
-            ("FIN", "FinanceAir", AcquisitionMethod.FINANCE, loan, True),
-            ("LSE", "LeaseLine", AcquisitionMethod.OPERATING_LEASE, lease, False)):
+    roster = [("FIN", "FinanceAir", AcquisitionMethod.FINANCE, loan, True),
+              ("LSE", "LeaseLine", AcquisitionMethod.OPERATING_LEASE, lease, False)]
+    # Any archetype assigned to a carrier that isn't in the base roster gets a
+    # seat of its own, so a three-way Low-Cost / Legacy / Regional market is
+    # just a matter of naming three profiles. Extra carriers lease: a new
+    # entrant financing a whole fleet on day one isn't a realistic start.
+    for pid in (ai_profiles or {}):
+        if not any(pid == r[0] for r in roster):
+            roster.append((pid, f"{pid} Airways",
+                           AcquisitionMethod.OPERATING_LEASE, lease, False))
+    for pid, name, method, terms, premium in roster:
         engine.add_player(_carrier(world, bank, pid, name, method, terms,
                                    ops_plan, codes, premium, cash, provider,
                                    pricing.reference_price))
+    if ai_profiles:
+        for p in engine.players:
+            p.is_ai = p.player_id in ai_profiles
 
     report = {
         "hub": hub,
