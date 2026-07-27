@@ -335,16 +335,33 @@ class GameSession:
         with self.lock:
             repo = self.world.repo
             return {
+                # Everything a fleet decision turns on: mission fit (seats,
+                # range, runway need), commonality (type rating), and what a
+                # later change of mind costs (recabin price + downtime).
                 "aircraft": [{"spec_id": s.spec_id, "display_name": s.display_name,
+                              "manufacturer": s.manufacturer,
+                              "plane_class": s.plane_class.name,
                               "list_price": s.list_price, "max_seats": s.max_seats,
-                              "max_range_km": s.max_range_km}
-                             for s in repo.all(AircraftSpec)],
+                              "max_range_km": s.max_range_km,
+                              "takeoff_runway_m": s.takeoff_runway_m,
+                              "type_rating": s.type_rating,
+                              "reconfig_cost": s.reconfig_cost_per_slot
+                                               * cabin_slots_for(s.max_seats),
+                              "reconfig_days": s.reconfig_days}
+                             for s in sorted(repo.all(AircraftSpec),
+                                             key=lambda s: s.max_seats)],
                 "routes": [{"spec_id": s.spec_id, "display_name": s.display_name,
                            "origin": s.origin_iata, "dest": s.dest_iata,
                            "distance_km": s.distance_km}
                           for s in repo.all(RouteSpec)],
-                "airports": [{"iata": s.iata, "display_name": s.display_name}
-                            for s in repo.all(AirportSpec)],
+                # The full route-openable set — on a data world this is every
+                # corpus airport, which is exactly the point of the picker.
+                "airports": [{"iata": s.iata, "display_name": s.display_name,
+                              "runway_m": s.runway_length_m,
+                              "has_mx": s.has_maintenance_facility,
+                              "hub_fee_per_day": s.hub_fee_per_day}
+                            for s in sorted(repo.all(AirportSpec),
+                                            key=lambda s: s.iata)],
             }
 
     # -- snapshot projection (JSON-safe read model) ----------------------
@@ -364,13 +381,32 @@ class GameSession:
                 "game_over_reason": self.game_over_reason,
                 "human_player_id": self.human_player_id,
                 "players": [self._player_snapshot(p) for p in self.engine.players],
+                # Only airports the game is actually touching — on a data world
+                # 300 gate ledgers exist so any pair can be opened, but pushing
+                # all of them down the SSE stream every tick (and rendering a
+                # 300-row card) buries the ones that matter. The full set stays
+                # available through /api/catalog for the route picker.
                 "airports": {
                     iata: {
                         "gates_used": gl.used(), "gates_total": gl.total_gates,
                         "fuel_spot": w.fuel[iata].spot_price() if iata in w.fuel else None,
                     } for iata, gl in w.gates.items()
+                    if iata in self._active_iatas()
                 },
             }
+
+    def _active_iatas(self) -> set:
+        """Airports in play: route endpoints, hubs, and fleet locations."""
+        out = set()
+        for p in self.engine.players:
+            out.update(getattr(p, "hub_iatas", []))
+            for a in p.fleet:
+                if a.location_iata:
+                    out.add(a.location_iata)
+            for o in p.route_ops:
+                out.add(o.spec.origin_iata)
+                out.add(o.spec.dest_iata)
+        return out
 
     def _player_snapshot(self, p) -> dict:
         debt = sum(l.remaining for l in p.loans)
@@ -389,6 +425,7 @@ class GameSession:
             "leases": [{"lease_id": l.lease_id, "tail_number": l.tail_number,
                        "months_elapsed": l.months_elapsed, "term_months": l.term_months}
                       for l in p.leases],
+            "hubs": list(getattr(p, "hub_iatas", [])),
             "log": list(p.log[-20:]),
             "ai_profile": self._ai_profile(p),
         }
@@ -414,6 +451,10 @@ class GameSession:
             "location_iata": a.location_iata, "in_service": a.in_service,
             "grounded_until": a.grounded_until, "airframe_hours": a.airframe_hours,
             "retired": a.retired, "value": aircraft_value(a, self.world.sim_time),
+            "reconfiguring_until": getattr(a, "reconfiguring_until", 0.0),
+            # cabin as the player configured it; None = all-economy default
+            "cabin": ({c.name: n for c, n in a.layout.seats.items() if n > 0}
+                      if getattr(a, "layout", None) else None),
         }
 
     def _op_snapshot(self, o: RouteOp) -> dict:
@@ -427,6 +468,9 @@ class GameSession:
             "suitable": o.suitable, "suitability_reasons": list(o.suitability_reasons),
             "crew_block": o.last_crew_block,
             "has_cockpit": o.cockpit is not None, "has_cabin": o.cabin is not None,
+            "service_tier": getattr(o, "service_tier", 2),
+            "fees": getattr(o, "last_fees", 0.0),
+            "data_tier": getattr(o.spec, "data_tier", ""),
         }
 
     def _crew_snapshot(self, c: CrewUnit) -> dict:

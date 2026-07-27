@@ -75,6 +75,8 @@ constraint enforcement — not partial stubs.
     airlinesim run databuilt         # engine running on real BTS routes
     airlinesim run refresh_cx        # corpus-refresh logic (offline)
     airlinesim run explorer          # outcome-explorer + engine-determinism check
+    airlinesim gui                   # play it in a browser; defaults to --world data
+    airlinesim gui --world demo      # the two-airport sandbox instead
     airlinesim explore               # the outcome-explorer GUI (same server as `gui`)
     airlinesim refresh --check-only  # is the corpus stale? what needs re-export?
     airlinesim demo --data --hub ORD # data-driven demo instead of constants
@@ -243,6 +245,23 @@ model how incumbents respond to entry (a perfectly predictive AI would be
 unbeatable, and that error is the seam a player out-plans it through); it
 only considers routes from hubs and current aircraft locations, so it never
 opens a second base from scratch; and it never recabins after acquisition.
+
+The GUI plays the **data world by default** (`airlinesim gui`), because that
+is where the corpus, the 16-type fleet and the three AI archetypes actually
+live — the demo sandbox is still there behind `--world demo`. Every action in
+`actions.py` is reachable from it: route opening is a free-text origin/dest
+pair over a datalist of all 300 corpus airports (a 300-row `<select>` is
+unusable, and the point is that any pair is legal), cabins are chosen at
+acquisition, and Sell / Return / Recabin / Close / service tier / hubs are
+per-row controls. `Hub.world_kind` remembers which world the server was
+started with so **New Game** rebuilds *that* world rather than silently
+dropping back to the demo one.
+
+One deliberate asymmetry: `/api/catalog` serves all 300 airports (the route
+picker needs them), but `snapshot()["airports"]` is filtered to airports the
+game is actually touching — route endpoints, hubs and fleet locations. Pushing
+300 gate ledgers down the SSE stream every tick and rendering a 300-row card
+buries the handful that matter.
 
 A HUB costs `hub_fee_per_day` and buys two things: it is the only place its
 carrier can do maintenance (`MaintenanceEngine._find_facility`), and it gives

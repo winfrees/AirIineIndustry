@@ -210,7 +210,12 @@ class AICarrierSubsystem(Subsystem):
             m = CarrierMemory(archetype=arch)
             # Stagger the first reviews so competitors don't all restructure
             # on the same day — otherwise every AI opens routes in lockstep.
-            spread = (abs(hash(player.player_id)) % 5) * 24.0
+            # crc32, NOT hash(): Python string hashes are salted per process,
+            # which made scenario outcomes differ between runs of the same
+            # world. The engine is deliberately deterministic (the explorer
+            # depends on it) and the AI must not be the module that breaks it.
+            import zlib
+            spread = (zlib.crc32(player.player_id.encode()) % 5) * 24.0
             m.next_network_review = world.sim_time + spread
             m.next_fleet_review = world.sim_time + spread + 48.0
             self.memory[player.player_id] = m

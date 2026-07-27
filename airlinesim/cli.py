@@ -135,8 +135,9 @@ def main(argv=None):
     pg = sub.add_parser("gui", help="launch the browser-based game GUI")
     pg.add_argument("--port", type=int, default=8765, help="port to serve on")
     pg.add_argument("--no-browser", action="store_true", help="don't auto-open a browser tab")
-    pg.add_argument("--world", choices=("demo", "data"), default="demo",
-                     help="demo sandbox, or the BTS-corpus network with network-planning AI")
+    pg.add_argument("--world", choices=("demo", "data"), default="data",
+                     help="the BTS-corpus network with network-planning AI "
+                          "(default), or the two-airport demo sandbox")
     pg.add_argument("--hub", default="ORD", help="hub airport for --world data")
     pg.set_defaults(func=cmd_gui)
 

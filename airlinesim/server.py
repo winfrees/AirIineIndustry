@@ -33,6 +33,14 @@ COMMANDS = {
         a["spec_id"], a["tail_number"], a["method"], a.get("base_iata")),
     "open_route": lambda gs, a: gs.open_route(
         a["route_spec_id"], a["tail_number"], a["price"], a.get("freq", 1), a.get("seats")),
+    "sell_aircraft": lambda gs, a: gs.sell_aircraft(a["tail_number"]),
+    "break_lease": lambda gs, a: gs.break_lease(a["tail_number"]),
+    "reconfigure_aircraft": lambda gs, a: gs.reconfigure_aircraft(
+        a["tail_number"], a["seats"]),
+    "set_service_tier": lambda gs, a: gs.set_service_tier(
+        a["route_op_id"], a["tier"]),
+    "close_route": lambda gs, a: gs.close_route(a["route_op_id"]),
+    "set_hub": lambda gs, a: gs.set_hub(a["iata"], a.get("enabled", True)),
     "hire_crew": lambda gs, a: gs.hire_crew(
         a["crew_type"], a["base_iata"], a["headcount"], a["cost_per_hour"],
         tuple(a.get("certs", ()))),
@@ -76,10 +84,15 @@ class Hub:
     connected SSE client. Swapping sessions (new game / load) re-wires the
     callback and stops the old session's background thread."""
 
-    def __init__(self, session: GameSession):
+    def __init__(self, session: GameSession, world: str = "demo",
+                 hub_iata: str = "ORD"):
         self._lock = threading.Lock()
         self._clients: list = []
         self.session: GameSession = None
+        # what "New Game" should rebuild — the world this server was started
+        # with, not new_game()'s defaults
+        self.world_kind = world
+        self.hub_iata = hub_iata
         self._set_session(session)
         # The scenario tree is independent of the live game — it has its own
         # root world and is never ticked by the real-time loop. Built lazily so
@@ -112,6 +125,8 @@ class Hub:
         self.session.on_tick = self._broadcast
 
     def new_game(self, **kwargs):
+        kwargs.setdefault("world", self.world_kind)
+        kwargs.setdefault("hub", self.hub_iata)
         with self._lock:
             self._set_session(new_game(**kwargs))
 
@@ -359,7 +374,7 @@ def run_server(host: str = "0.0.0.0", port: int = 8765, session: GameSession = N
                world: str = "demo", hub_iata: str = "ORD"):
     """Build and return (httpd, hub); caller owns calling serve_forever()."""
     session = session or new_game(world=world, hub=hub_iata)
-    hub = Hub(session)
+    hub = Hub(session, world=world, hub_iata=hub_iata)
     httpd = ThreadingHTTPServer((host, port), make_handler(hub))
     httpd.daemon_threads = True
     return httpd, hub

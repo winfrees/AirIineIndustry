@@ -50,12 +50,24 @@
     <details>
       <summary>Open a new route</summary>
       <form id="formOpenRoute" class="form">
-        <select name="route_spec_id" id="routeSelect"></select>
+        <input name="origin" id="originInput" list="airportsDL" placeholder="from (IATA)"
+               autocomplete="off" required>
+        <span class="arrow">&rarr;</span>
+        <input name="dest" id="destInput" list="airportsDL" placeholder="to (IATA)"
+               autocomplete="off" required>
         <select name="tail_number" id="tailSelect"></select>
         <input name="price" type="number" min="1" step="1" placeholder="price $" required>
-        <input name="freq" type="number" min="0" step="1" value="1" placeholder="freq/day">
+        <input name="freq" type="number" min="0" step="1" value="2" placeholder="freq/day">
+        <select name="service_tier" title="service level">
+          <option value="1">Basic service</option>
+          <option value="2" selected>Standard service</option>
+          <option value="3">Premium service</option>
+        </select>
         <button class="btn" type="submit">Open route</button>
       </form>
+      <div class="metric">Type any airport code — every airport in the corpus is
+        a legal endpoint. Equipment is validated (range, runway) before the
+        route opens.</div>
     </details>
   </section>
 
@@ -72,9 +84,17 @@
           <option value="FINANCE">Finance</option>
           <option value="LEASE" selected>Lease</option>
         </select>
-        <select name="base_iata" id="baseSelect"></select>
+        <input name="base_iata" id="baseInput" list="airportsDL" placeholder="base (IATA)"
+               autocomplete="off">
+        <input name="economy" type="number" min="0" step="1" placeholder="econ seats">
+        <input name="premium" type="number" min="0" step="1" placeholder="prem seats">
+        <input name="business" type="number" min="0" step="1" placeholder="biz seats">
+        <input name="first" type="number" min="0" step="1" placeholder="first seats">
         <button class="btn" type="submit">Acquire</button>
       </form>
+      <div class="metric">Leave seat counts blank for all-economy. The cabin is
+        set at acquisition — changing it later costs money and grounds the
+        aircraft for weeks.</div>
     </details>
   </section>
 
@@ -90,12 +110,26 @@
           <option value="MAINTENANCE">Maintenance</option>
           <option value="GROUND">Ground</option>
         </select>
-        <select name="base_iata" id="hireBaseSelect"></select>
+        <input name="base_iata" id="hireBaseInput" list="airportsDL"
+               placeholder="base (IATA)" autocomplete="off" required>
         <input name="headcount" type="number" min="1" step="1" value="2">
         <input name="cost_per_hour" type="number" min="1" step="1" value="150" placeholder="$/hr">
         <button class="btn" type="submit">Hire</button>
       </form>
     </details>
+  </section>
+
+  <section class="card" id="hubsCard">
+    <h2>Hubs</h2>
+    <div id="hubs"></div>
+    <form id="formHub" class="form">
+      <input name="iata" id="hubInput" list="airportsDL" placeholder="airport (IATA)"
+             autocomplete="off" required>
+      <button class="btn" type="submit">Open hub</button>
+    </form>
+    <div class="metric">A hub costs daily overhead and buys preferential gates
+      there, plus it's the only place your aircraft can be maintained once you
+      have any hub at all.</div>
   </section>
 
   <section class="card" id="marketCard">
@@ -109,6 +143,7 @@
   </section>
 </main>
 
+<datalist id="airportsDL"></datalist>
 <script src="/app.js"></script>
 </body>
 </html>
