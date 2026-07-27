@@ -21,14 +21,14 @@ const els = {
   crew: document.getElementById("crew"),
   airports: document.getElementById("airports"),
   log: document.getElementById("log"),
-  routeSelect: document.getElementById("routeSelect"),
   tailSelect: document.getElementById("tailSelect"),
   specSelect: document.getElementById("specSelect"),
-  baseSelect: document.getElementById("baseSelect"),
-  hireBaseSelect: document.getElementById("hireBaseSelect"),
+  airportsDL: document.getElementById("airportsDL"),
+  hubs: document.getElementById("hubs"),
   formOpenRoute: document.getElementById("formOpenRoute"),
   formAcquire: document.getElementById("formAcquire"),
   formHire: document.getElementById("formHire"),
+  formHub: document.getElementById("formHub"),
 };
 
 let catalog = null;
@@ -87,12 +87,17 @@ function populateSelect(select, items, valueKey, labelFn) {
 
 async function loadCatalog() {
   catalog = await fetch("/api/catalog").then((r) => r.json());
-  populateSelect(els.routeSelect, catalog.routes, "spec_id",
-    (r) => `${r.origin} → ${r.dest} (${r.display_name})`);
+  // Everything a fleet decision turns on, in one line per type.
   populateSelect(els.specSelect, catalog.aircraft, "spec_id",
-    (a) => `${a.display_name} — ${money(a.list_price)}, ${a.max_seats}st`);
-  populateSelect(els.baseSelect, catalog.airports, "iata", (a) => `${a.iata} — ${a.display_name}`);
-  populateSelect(els.hireBaseSelect, catalog.airports, "iata", (a) => `${a.iata} — ${a.display_name}`);
+    (a) => `${a.display_name} — ${a.max_seats}st, ` +
+           `${(a.max_range_km / 1000).toFixed(1)}kkm, ` +
+           `rwy ${a.takeoff_runway_m.toFixed(0)}m, ${a.type_rating || a.manufacturer}, ` +
+           `${money(a.list_price)}`);
+  // One shared datalist backs every airport input (route endpoints, bases,
+  // hubs): type-ahead over the whole corpus instead of a 300-row dropdown.
+  els.airportsDL.innerHTML = catalog.airports.map((ap) =>
+    `<option value="${esc(ap.iata)}" label="${esc(ap.display_name)}` +
+    `${ap.has_mx ? " · MX" : ""}"></option>`).join("");
 }
 
 // -- rendering ---------------------------------------------------------
@@ -123,7 +128,8 @@ function render(snap) {
 
   renderPlayers(snap);
   renderIfIdle(els.routes, routesHtml(snap));
-  els.fleet.innerHTML = fleetHtml(snap);
+  renderIfIdle(els.fleet, fleetHtml(snap));
+  els.hubs.innerHTML = hubsHtml(snap);
   els.crew.innerHTML = crewHtml(snap);
   els.airports.innerHTML = airportsHtml(snap);
   els.log.innerHTML = logHtml(snap);
@@ -167,6 +173,14 @@ function renderPlayers(snap) {
   }).join("");
 }
 
+const TIER_LABEL = { 1: "Basic", 2: "Standard", 3: "Premium" };
+
+function cabinStr(cabin) {
+  if (!cabin) return "all-econ";
+  const short = { ECONOMY: "Y", PREMIUM: "W", BUSINESS: "J", FIRST: "F" };
+  return Object.entries(cabin).map(([c, n]) => `${n}${short[c] || c[0]}`).join(" ");
+}
+
 function routesHtml(snap) {
   const rows = [];
   for (const p of snap.players) {
@@ -175,9 +189,16 @@ function routesHtml(snap) {
       const warn = !o.suitable
         ? `<span class="reasons">${esc(o.suitability_reasons.join("; "))}</span>`
         : (o.crew_block ? `<span class="warn">${esc(o.crew_block)}</span>` : "");
+      const tierCell = isHuman
+        ? `<select data-op="${o.route_op_id}" data-field="tier">` +
+          [1, 2, 3].map((t) =>
+            `<option value="${t}" ${t === o.service_tier ? "selected" : ""}>` +
+            `${TIER_LABEL[t]}</option>`).join("") + `</select>`
+        : TIER_LABEL[o.service_tier] || o.service_tier;
       rows.push(`<tr>
         <td>${esc(p.name)}</td>
-        <td>${o.origin}→${o.dest}</td>
+        <td>${o.origin}→${o.dest}${o.data_tier && o.data_tier !== "exact"
+          ? ` <span class="metric" title="demand is a ${o.data_tier} estimate, not measured">~</span>` : ""}</td>
         <td>${esc(o.tail_number)}</td>
         <td>${isHuman
           ? `<input type="number" min="1" step="1" value="${o.ticket_price}" data-op="${o.route_op_id}" data-field="price">`
@@ -185,39 +206,54 @@ function routesHtml(snap) {
         <td>${isHuman
           ? `<input type="number" min="0" step="1" value="${o.daily_frequency}" data-op="${o.route_op_id}" data-field="freq">`
           : o.daily_frequency}</td>
+        <td>${tierCell}</td>
         <td>${(o.load_factor * 100).toFixed(0)}%</td>
         <td>${o.pax.toFixed(0)}</td>
         <td class="${o.profit >= 0 ? "good" : "bad"}">${money(o.profit)}</td>
+        <td>${isHuman
+          ? `<button class="btn small warn" data-op="${o.route_op_id}" data-act="close">Close</button>`
+          : ""}</td>
         <td>${warn}</td>
       </tr>`);
     }
   }
   return `<table><thead><tr>
-    <th>Carrier</th><th>Route</th><th>Tail</th><th>Price</th><th>Freq</th>
-    <th>LF</th><th>Pax</th><th>Profit</th><th></th>
-  </tr></thead><tbody>${rows.join("") || emptyRow(9)}</tbody></table>`;
+    <th>Carrier</th><th>Route</th><th>Tail</th><th>Price</th><th>Freq</th><th>Service</th>
+    <th>LF</th><th>Pax</th><th>Profit</th><th></th><th></th>
+  </tr></thead><tbody>${rows.join("") || emptyRow(11)}</tbody></table>`;
 }
 
 function fleetHtml(snap) {
   const rows = [];
   for (const p of snap.players) {
+    const isHuman = p.player_id === snap.human_player_id;
     for (const a of p.fleet) {
-      const status = a.retired ? "retired" : (a.in_service ? "in service" : "grounded");
+      const recabining = a.reconfiguring_until > snap.sim_time_hours;
+      const status = a.retired ? "retired"
+        : recabining ? "recabin"
+        : (a.in_service ? "in service" : "grounded");
+      const actions = isHuman && !a.retired
+        ? `<button class="btn small" data-tail="${esc(a.tail_number)}" data-act="${a.owned ? "sell" : "return"}">
+             ${a.owned ? "Sell" : "Return"}</button>
+           <button class="btn small" data-tail="${esc(a.tail_number)}" data-act="recabin">Recabin</button>`
+        : "";
       rows.push(`<tr>
         <td>${esc(p.name)}</td>
         <td>${esc(a.tail_number)}</td>
         <td>${esc(a.display_name)}</td>
         <td>${a.owned ? "owned" : "leased"}</td>
+        <td>${cabinStr(a.cabin)}</td>
         <td>${a.location_iata}</td>
-        <td class="${a.retired ? "bad" : (a.in_service ? "good" : "warn")}">${status}</td>
+        <td class="${a.retired ? "bad" : (a.in_service && !recabining ? "good" : "warn")}">${status}</td>
         <td>${a.airframe_hours.toFixed(0)}h</td>
         <td>${money(a.value)}</td>
+        <td>${actions}</td>
       </tr>`);
     }
   }
   return `<table><thead><tr>
-    <th>Carrier</th><th>Tail</th><th>Type</th><th>Own</th><th>Loc</th><th>Status</th><th>Hours</th><th>Value</th>
-  </tr></thead><tbody>${rows.join("") || emptyRow(8)}</tbody></table>`;
+    <th>Carrier</th><th>Tail</th><th>Type</th><th>Own</th><th>Cabin</th><th>Loc</th><th>Status</th><th>Hours</th><th>Value</th><th></th>
+  </tr></thead><tbody>${rows.join("") || emptyRow(10)}</tbody></table>`;
 }
 
 function crewGroupHtml(label, units) {
@@ -248,6 +284,22 @@ function airportsHtml(snap) {
   </tr>`).join("");
   return `<table><thead><tr><th>IATA</th><th>Gates</th><th>Fuel spot</th></tr></thead>
     <tbody>${rows || emptyRow(3)}</tbody></table>`;
+}
+
+function hubsHtml(snap) {
+  const human = snap.players.find((p) => p.player_id === snap.human_player_id);
+  if (!human) return "";
+  const fee = (iata) => {
+    const ap = (catalog?.airports || []).find((x) => x.iata === iata);
+    return ap ? ` ${money(ap.hub_fee_per_day)}/day` : "";
+  };
+  const chips = (human.hubs || []).map((h) =>
+    `<span class="hubChip">${esc(h)}<span class="metric">${fee(h)}</span>
+       <button class="btn small warn" data-hub="${esc(h)}" data-act="closehub"
+               title="close this hub">×</button></span>`).join(" ");
+  return chips || `<div class="metric">No hubs yet — without one your aircraft
+    can still use any maintenance field, but you get no preferential gates
+    anywhere.</div>`;
 }
 
 function logHtml(snap) {
@@ -312,28 +364,97 @@ els.routes.addEventListener("change", (e) => {
     sendCommand("set_price", { route_op_id: t.dataset.op, price: parseFloat(t.value) });
   } else if (t.dataset.field === "freq") {
     sendCommand("set_frequency", { route_op_id: t.dataset.op, freq: parseInt(t.value, 10) });
+  } else if (t.dataset.field === "tier") {
+    sendCommand("set_service_tier", { route_op_id: t.dataset.op, tier: parseInt(t.value, 10) });
+  }
+});
+
+// Route close + fleet lifecycle, via delegation so re-renders don't detach
+// anything. Recabin asks for the new layout in one line — crude but honest
+// about what it costs, since the confirm() states price and downtime.
+els.routes.addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-act='close']");
+  if (!b) return;
+  if (confirm("Close this route?")) {
+    sendCommand("close_route", { route_op_id: b.dataset.op });
+  }
+});
+
+els.fleet.addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-act]");
+  if (!b) return;
+  const tail = b.dataset.tail;
+  if (b.dataset.act === "sell") {
+    if (confirm(`Sell ${tail}? Its routes close and any loan is paid off from the proceeds.`)) {
+      sendCommand("sell_aircraft", { tail_number: tail });
+    }
+  } else if (b.dataset.act === "return") {
+    if (confirm(`Return ${tail} to the lessor early? You pay the termination penalty and its routes close.`)) {
+      sendCommand("break_lease", { tail_number: tail });
+    }
+  } else if (b.dataset.act === "recabin") {
+    const human = latest?.players.find((p) => p.player_id === latest.human_player_id);
+    const plane = human?.fleet.find((x) => x.tail_number === tail);
+    const spec = (catalog?.aircraft || []).find((s) => s.spec_id === plane?.spec_id);
+    const hint = spec ? `${money(spec.reconfig_cost)} and ${spec.reconfig_days} days on the ground` : "money and downtime";
+    const ans = prompt(
+      `New cabin for ${tail} as "economy,premium,business,first" seat counts.\n` +
+      `Costs ${hint}.`, "150,0,12,0");
+    if (ans == null) return;
+    const [economy, premium, business, first] = ans.split(",").map((x) => parseInt(x.trim() || "0", 10));
+    const seats = {};
+    if (economy > 0) seats.economy = economy;
+    if (premium > 0) seats.premium = premium;
+    if (business > 0) seats.business = business;
+    if (first > 0) seats.first = first;
+    sendCommand("reconfigure_aircraft", { tail_number: tail, seats });
+  }
+});
+
+els.formHub.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  sendCommand("set_hub", {
+    iata: String(f.get("iata") || "").trim().toUpperCase(), enabled: true,
+  }).then(() => e.target.reset());
+});
+
+els.hubs.addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-act='closehub']");
+  if (!b) return;
+  if (confirm(`Close the ${b.dataset.hub} hub? You lose its preferential gates and maintenance there.`)) {
+    sendCommand("set_hub", { iata: b.dataset.hub, enabled: false });
   }
 });
 
 els.formOpenRoute.addEventListener("submit", (e) => {
   e.preventDefault();
   const f = new FormData(e.target);
+  const origin = String(f.get("origin") || "").trim().toUpperCase();
+  const dest = String(f.get("dest") || "").trim().toUpperCase();
   sendCommand("open_route", {
-    route_spec_id: f.get("route_spec_id"),
+    route_spec_id: `${origin}-${dest}`,
     tail_number: f.get("tail_number"),
     price: parseFloat(f.get("price")),
     freq: parseInt(f.get("freq") || "1", 10),
+    service_tier: parseInt(f.get("service_tier") || "2", 10),
   });
 });
 
 els.formAcquire.addEventListener("submit", (e) => {
   e.preventDefault();
   const f = new FormData(e.target);
+  const seats = {};
+  for (const cls of ["economy", "premium", "business", "first"]) {
+    const n = parseInt(f.get(cls) || "0", 10);
+    if (n > 0) seats[cls] = n;
+  }
   sendCommand("acquire_aircraft", {
     spec_id: f.get("spec_id"),
     tail_number: f.get("tail_number"),
     method: f.get("method"),
-    base_iata: f.get("base_iata"),
+    base_iata: String(f.get("base_iata") || "").trim().toUpperCase() || null,
+    seats: Object.keys(seats).length ? seats : null,
   }).then(() => e.target.reset());
 });
 

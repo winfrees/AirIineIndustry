@@ -97,14 +97,16 @@ main {
 #fleetCard,
 #logCard { grid-column: 1 / -1; }
 
-/* 1x1 — the Crew / Airports pair, side by side. */
+/* 1x1 blocks flow two per row. */
 #crewCard,
+#hubsCard,
 #marketCard { grid-column: span 1; }
 
 /* Below two usable columns, every block becomes full width. */
 @media (max-width: 720px) {
   main { grid-template-columns: minmax(0, 1fr); }
   #crewCard,
+  #hubsCard,
   #marketCard { grid-column: 1 / -1; }
 }
 
@@ -185,6 +187,20 @@ details summary {
 }
 
 .reasons { color: var(--warn); font-size: 0.75rem; }
+
+.arrow { color: var(--muted); align-self: center; }
+
+.hubChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  background: #16344f;
+  border: 1px solid var(--card-border);
+  border-radius: 0.4rem;
+  padding: 0.2rem 0.35rem 0.2rem 0.55rem;
+  font-size: 0.85rem;
+  margin: 0 0.3rem 0.3rem 0;
+}
 
 .banner {
   position: sticky;
