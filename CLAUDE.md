@@ -205,6 +205,39 @@ demand code.
   duty limits then trim it further on most trunk ops — the data-implied frequency
   genuinely meets the duty envelope.
 
+## AI carriers and the action layer
+
+`actions.py` holds every decision an airline can make as a plain function over
+`(world, player, ...) -> (ok, message)`: open/close a route, acquire/sell/
+break-lease/recabin an aircraft, declare a hub, hire crew, set price,
+frequency and service tier. `GameSession`'s commands are thin lock-held
+wrappers over it and `ai.py` calls the identical functions, so an AI carrier
+faces the same equipment validation, the same `Bank.try_acquire()` credit
+gate, the same fees and the same teardown a player does. It cannot cheat by
+construction, and a rule change lands on everyone at once. Build-time route
+opening (`builder._open_us_route`) goes through it too, so there is no
+separate path that can drift.
+
+`ai.py`'s `AICarrierSubsystem` gives rivals network planning, fleet planning
+(equipment chosen on cost per seat-km over the mission it actually flies),
+cabin configuration at acquisition, service tiers, crew hiring and hub
+selection, in three archetypes (Low-Cost / Legacy / Regional) that are one
+policy engine with different weights. Enable per world with
+`build_world_from_data(ai_profiles={player_id: archetype})` or
+`new_game(world="data", ai_profiles=...)`; with no profiles nothing in ai.py
+runs. Honest limits: route evaluation is a STATIC forecast that does not
+model how incumbents respond to entry (a perfectly predictive AI would be
+unbeatable, and that error is the seam a player out-plans it through); it
+only considers routes from hubs and current aircraft locations, so it never
+opens a second base from scratch; and it never recabins after acquisition.
+
+Airport fee schedules (gate/amenities/baggage/hub) are HEURISTIC but scaled
+off measured traffic in the corpus, so a secondary field is a genuine cost
+alternative to its primary. Desirability is driven by service tier only:
+`AirportSpec.access_index` is the seam for real catchment data and stays 1.0
+because the committed corpus has none — the LGA-vs-JFK access story is NOT
+modeled, deliberately, rather than faked.
+
 ## Known limitations (accurate — don't "fix" silently)
 
 ### Engine

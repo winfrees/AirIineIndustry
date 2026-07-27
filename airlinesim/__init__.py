@@ -66,6 +66,10 @@ from airlinesim.finance_cabin import (
     DepreciationModel, DEFAULT_DEPRECIATION, aircraft_value,
 )
 
+from airlinesim import actions
+from airlinesim.ai import (
+    AICarrierSubsystem, Archetype, ARCHETYPES, LOW_COST, LEGACY, REGIONAL,
+)
 from airlinesim.builder import build_demo_world, run
 
 __all__ = ["build_demo_world", "run", "__version__"]

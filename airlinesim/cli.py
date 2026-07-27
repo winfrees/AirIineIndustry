@@ -29,6 +29,7 @@ SCENARIOS = {
     "routedata":   "airlinesim.scenarios.scenario_routedata",
     "databuilt":   "airlinesim.scenarios.scenario_databuilt",
     "refresh_cx":  "airlinesim.scenarios.scenario_refresh",
+    "ai_competition": "airlinesim.scenarios.ai_competition",
     "explorer":    "airlinesim.scenarios.scenario_explorer",
 }
 
@@ -69,7 +70,9 @@ def cmd_gui(args, landing: str = "/", what: str = "GUI"):
     # One server serves both front ends — the game at / and the outcome
     # explorer at /explore.html. `explore` differs only in where it points the
     # browser, so both screens are always reachable from either command.
-    httpd, hub = run_server(host="0.0.0.0", port=args.port)
+    httpd, hub = run_server(host="0.0.0.0", port=args.port,
+                            world=getattr(args, "world", "demo"),
+                            hub_iata=getattr(args, "hub", "ORD"))
     page = landing.lstrip("/")
     local = f"http://127.0.0.1:{args.port}/{page}"
     print(f"AirlineSim {what} serving at:\n  {local}\n"
@@ -132,6 +135,9 @@ def main(argv=None):
     pg = sub.add_parser("gui", help="launch the browser-based game GUI")
     pg.add_argument("--port", type=int, default=8765, help="port to serve on")
     pg.add_argument("--no-browser", action="store_true", help="don't auto-open a browser tab")
+    pg.add_argument("--world", choices=("demo", "data"), default="demo",
+                     help="demo sandbox, or the BTS-corpus network with network-planning AI")
+    pg.add_argument("--hub", default="ORD", help="hub airport for --world data")
     pg.set_defaults(func=cmd_gui)
 
     pe = sub.add_parser("explore",
@@ -139,6 +145,9 @@ def main(argv=None):
                              "run them, compare results)")
     pe.add_argument("--port", type=int, default=8765, help="port to serve on")
     pe.add_argument("--no-browser", action="store_true", help="don't auto-open a browser tab")
+    pe.add_argument("--world", choices=("demo", "data"), default="demo",
+                     help="demo sandbox, or the BTS-corpus network with network-planning AI")
+    pe.add_argument("--hub", default="ORD", help="hub airport for --world data")
     pe.set_defaults(func=lambda a: cmd_gui(a, "/explore.html", "Outcome Explorer"))
 
     args = parser.parse_args(argv)

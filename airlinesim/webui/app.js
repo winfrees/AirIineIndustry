@@ -139,6 +139,19 @@ function renderPlayers(snap) {
   els.players.innerHTML = snap.players.map((p) => {
     const isHuman = p.player_id === snap.human_player_id;
     const pax = p.route_ops.reduce((s, o) => s + o.pax, 0);
+    const ai = p.ai_profile;
+    // Show a rival's strategy and its latest moves: an opponent whose style
+    // you can read is one you can actually plan against.
+    const style = ai
+      ? `<div class="metric"><span class="tag">${esc(ai.archetype)}</span>
+           ${esc(ai.blurb)}</div>`
+      : "";
+    const moves = ai && ai.recent && ai.recent.length
+      ? `<details><summary>recent moves</summary>${
+          ai.recent.slice().reverse()
+            .map((m) => `<div class="logLine">${esc(m)}</div>`).join("")
+        }</details>`
+      : "";
     return `
       <div class="playerBlock">
         <div class="playerHead">
@@ -147,7 +160,9 @@ function renderPlayers(snap) {
         </div>
         <div class="metric">cash ${money(p.cash)} &middot; debt ${money(p.debt)} &middot;
           net worth <span class="${p.net_worth >= 0 ? "good" : "bad"}">${money(p.net_worth)}</span>
+          &middot; ${p.fleet.length} aircraft &middot; ${p.route_ops.length} routes
           &middot; ${pax.toFixed(0)} px/day</div>
+        ${style}${moves}
       </div>`;
   }).join("");
 }
