@@ -40,8 +40,8 @@ the run. Locally, on Windows:
 
 ```bash
 python -m build                                          # wheel + sdist
-python tools/build_windows_bundle.py --version 0.1.0 --wheel dist/airlinesim-0.1.0-py3-none-any.whl
-python tools/smoke_windows_bundle.py --bundle dist/AirlineSim-0.1.0-win-amd64
+python tools/build_windows_bundle.py --version 0.2.0 --wheel dist/airlinesim-0.2.0-py3-none-any.whl
+python tools/smoke_windows_bundle.py --bundle dist/AirlineSim-0.2.0-win-amd64
 ```
 
 Tagging `v<version>` (matching `pyproject.toml`) publishes a GitHub Release with
