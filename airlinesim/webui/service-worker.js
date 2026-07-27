@@ -8,12 +8,18 @@
 // serving the UI it had cached the very first time it was opened. The
 // network-first handler below is the structural fix — a bump alone would only
 // have papered over it until the next asset change.
-const CACHE = "airlinesim-shell-v2";
+const CACHE = "airlinesim-shell-v4";
 const SHELL = ["/", "/app.js", "/styles.css", "/manifest.json",
+               "/explore.html", "/explore.js", "/explore.css",
                "/icons/icon-192.png", "/icons/icon-512.png"];
 
 self.addEventListener("install", (evt) => {
-  evt.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)));
+  // cache: "reload" — seed from the server, never from the browser's HTTP
+  // cache. addAll's default fetch can be satisfied by a stale disk-cache
+  // entry, which would poison this cache with old assets at install time.
+  evt.waitUntil(caches.open(CACHE).then((c) =>
+    c.addAll(SHELL.map((u) => new Request(u, { cache: "reload" })))
+  ));
   self.skipWaiting();
 });
 
@@ -36,7 +42,10 @@ self.addEventListener("fetch", (evt) => {
   if (url.pathname.startsWith("/api/")) return; // never cache live API calls
   if (evt.request.method !== "GET") return;
   evt.respondWith(
-    fetch(evt.request)
+    // cache: "no-cache" — force revalidation with the server instead of
+    // letting the HTTP cache answer. Without it "network-first" can be served
+    // a stale disk-cache copy without the request ever leaving the browser.
+    fetch(evt.request, { cache: "no-cache" })
       .then((res) => {
         if (res && res.ok) {
           const copy = res.clone();

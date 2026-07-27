@@ -4,6 +4,7 @@
 
 const els = {
   day: document.getElementById("day"),
+  ver: document.getElementById("ver"),
   conn: document.getElementById("conn"),
   gameOver: document.getElementById("gameOver"),
   toast: document.getElementById("toast"),
@@ -107,6 +108,9 @@ function renderIfIdle(container, html) {
 function render(snap) {
   latest = snap;
   els.day.textContent = snap.day;
+  // Comes from the server per snapshot, so it names the build actually
+  // serving — not whatever build's HTML/JS the browser happens to have cached.
+  if (snap.engine_version) els.ver.textContent = "v" + snap.engine_version;
   els.btnPause.textContent = snap.paused ? "Resume" : "Pause";
   els.btnPause.classList.toggle("warn", !snap.paused);
 

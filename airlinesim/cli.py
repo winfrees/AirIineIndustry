@@ -6,11 +6,12 @@ Usage:
     python -m airlinesim.cli run <scenario>
     python -m airlinesim.cli demo [--days N]
     python -m airlinesim.cli gui [--port N] [--no-browser]
+    python -m airlinesim.cli explore [--port N] [--no-browser]
     python -m airlinesim.cli probe [--offline] [--year Y --month M]
     python -m airlinesim.cli refresh [--check-only]
 
 Scenarios: competitive, integration, crew, deadhead, roster, route, finance,
-           btsdata, routedata, databuilt, refresh_cx
+           btsdata, routedata, databuilt, refresh_cx, explorer
 """
 import argparse
 import importlib
@@ -28,6 +29,7 @@ SCENARIOS = {
     "routedata":   "airlinesim.scenarios.scenario_routedata",
     "databuilt":   "airlinesim.scenarios.scenario_databuilt",
     "refresh_cx":  "airlinesim.scenarios.scenario_refresh",
+    "explorer":    "airlinesim.scenarios.scenario_explorer",
 }
 
 
@@ -60,13 +62,18 @@ def cmd_demo(args):
     run(engine, days=args.days)
 
 
-def cmd_gui(args):
+def cmd_gui(args, landing: str = "/", what: str = "GUI"):
     import webbrowser
     from airlinesim.server import run_server, lan_url
 
+    # One server serves both front ends — the game at / and the outcome
+    # explorer at /explore.html. `explore` differs only in where it points the
+    # browser, so both screens are always reachable from either command.
     httpd, hub = run_server(host="0.0.0.0", port=args.port)
-    local = f"http://127.0.0.1:{args.port}"
-    print(f"AirlineSim GUI serving at:\n  {local}\n  {lan_url(args.port)}  (other devices on this network)")
+    page = landing.lstrip("/")
+    local = f"http://127.0.0.1:{args.port}/{page}"
+    print(f"AirlineSim {what} serving at:\n  {local}\n"
+          f"  {lan_url(args.port)}/{page}  (other devices on this network)")
     print("Press Ctrl+C to stop.")
     if not args.no_browser:
         webbrowser.open(local)
@@ -126,6 +133,13 @@ def main(argv=None):
     pg.add_argument("--port", type=int, default=8765, help="port to serve on")
     pg.add_argument("--no-browser", action="store_true", help="don't auto-open a browser tab")
     pg.set_defaults(func=cmd_gui)
+
+    pe = sub.add_parser("explore",
+                        help="launch the outcome explorer GUI (branch states, "
+                             "run them, compare results)")
+    pe.add_argument("--port", type=int, default=8765, help="port to serve on")
+    pe.add_argument("--no-browser", action="store_true", help="don't auto-open a browser tab")
+    pe.set_defaults(func=lambda a: cmd_gui(a, "/explore.html", "Outcome Explorer"))
 
     args = parser.parse_args(argv)
     if not getattr(args, "func", None):

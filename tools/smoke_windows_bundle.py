@@ -33,7 +33,8 @@ from pathlib import Path
 SCRATCH = Path(tempfile.mkdtemp(prefix="airlinesim-smoke-"))
 
 # Every scenario that self-checks and is safe offline.
-CHECKED_SCENARIOS = ["integration", "routedata", "btsdata", "databuilt", "refresh_cx"]
+CHECKED_SCENARIOS = ["integration", "routedata", "btsdata", "databuilt", "refresh_cx",
+                    "explorer"]
 # These only print a report; the bar is "runs without raising".
 SMOKE_SCENARIOS = ["competitive", "crew", "deadhead", "roster", "route", "finance"]
 
@@ -140,6 +141,18 @@ def check_gui(base_cmd: list[str], fails: Failures) -> None:
 
         status, body = get(f"{url}/manifest.json")
         fails.check(status == 200, "web UI static assets served")
+
+        # The explorer is a second front end on the same server. Its page and
+        # JS are separate files, so a missing package-data entry would break it
+        # while leaving the game GUI above perfectly healthy.
+        for asset in ("/explore.html", "/explore.js", "/explore.css"):
+            status, body = get(f"{url}{asset}")
+            fails.check(status == 200 and len(body) > 0, f"explorer asset {asset} served")
+
+        status, body = get(f"{url}/api/explore/tree")
+        tree = json.loads(body) if status == 200 else None
+        fails.check(isinstance(tree, dict) and tree.get("node_count", 0) >= 1,
+                    "/api/explore/tree served a rooted tree")
     finally:
         kill_tree(proc)
 

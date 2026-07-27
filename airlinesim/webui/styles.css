@@ -37,6 +37,7 @@ html, body {
 }
 
 .brand { font-weight: 700; letter-spacing: 0.02em; }
+.ver { color: var(--muted); font-size: 0.75rem; }
 #clock { color: var(--muted); font-variant-numeric: tabular-nums; }
 .spacer { flex: 1; }
 
