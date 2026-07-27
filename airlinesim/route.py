@@ -132,6 +132,21 @@ def cabin_demand_on(segments: tuple, cabin_name: str, sim_time_hours: float,
 # 2. STAGE-LENGTH ECONOMICS
 # ============================================================
 
+EARTH_RADIUS_KM = 6371.0
+
+
+def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """
+    Great-circle distance in km. Route distance is geometry, not data, so it
+    lives here with the other stage-length maths and is shared by the corpus
+    provider and by any-pair route opening.
+    """
+    la1, lo1, la2, lo2 = map(math.radians, (lat1, lon1, lat2, lon2))
+    h = (math.sin((la2 - la1) / 2) ** 2
+         + math.cos(la1) * math.cos(la2) * math.sin((lo2 - lo1) / 2) ** 2)
+    return 2 * EARTH_RADIUS_KM * math.asin(math.sqrt(min(1.0, h)))
+
+
 def block_hours(distance_km: float, cruise_speed_kmh: float) -> float:
     """Gate-to-gate time: cruise time plus a fixed taxi/climb/descent overhead."""
     cruise = distance_km / cruise_speed_kmh
@@ -227,3 +242,47 @@ def augmented_crew_required(route_spec, aircraft_spec) -> bool:
         return False
     bh = block_hours(route_spec.distance_km, aircraft_spec.cruise_speed_kmh)
     return bh > cr.augmented_crew_block_hours
+
+
+# ============================================================
+# 4. DESIRABILITY — non-price attractiveness
+# ============================================================
+#
+# What makes a passenger choose one carrier over another at the SAME fare.
+# The arbiter multiplies its price kernel by this, so it only decides
+# anything when capacity exceeds demand — if everyone sells out, share is
+# pure capacity and preference is irrelevant (which is correct).
+#
+# Two inputs, and it matters which is which:
+#
+#   SERVICE TIER is a real player decision. Tier 1 is a remote stand and a
+#   bus; tier 3 is a good gate, a lounge and careful bag handling. It costs
+#   more in gate/amenities/baggage fees, and passengers pay for it. This is
+#   measured against what the carrier actually spends, so it is honest.
+#
+#   ACCESS INDEX is how reachable an airport is for its catchment population
+#   — the thing that makes LaGuardia and Newark different propositions for
+#   the same New York traveler. Modelling it needs catchment/census data the
+#   committed BTS corpus does not carry, so it defaults to 1.0 (neutral) and
+#   currently contributes nothing. It is left as a live seam rather than
+#   faked: with real catchment data loaded onto AirportSpec.access_index this
+#   starts working with no other change.
+
+SERVICE_DESIRABILITY = {1: 0.90, 2: 1.00, 3: 1.12}
+ACCESS_REFERENCE = 1.0
+
+
+def service_desirability(service_tier: int = 2, origin_access: float = 1.0,
+                         dest_access: float = 1.0) -> float:
+    """
+    Non-price attractiveness of an offer. Normalized so standard service at
+    typical airports is 1.0, which keeps the arbiter's price kernel calibrated.
+
+    Both endpoints count: a traveler flying Chicago->New York cares which New
+    York airport they land at as much as which Chicago airport they leave
+    from. Combined as a geometric mean, so one excellent airport doesn't
+    fully rescue an awkward one.
+    """
+    access = ((max(1e-6, origin_access) / ACCESS_REFERENCE)
+              * (max(1e-6, dest_access) / ACCESS_REFERENCE)) ** 0.5
+    return access * SERVICE_DESIRABILITY.get(int(service_tier), 1.0)

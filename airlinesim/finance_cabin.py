@@ -168,6 +168,10 @@ class FinancingTerms:
     lease_rate_frac_per_year: float = 0.11   # annual rent as frac of list price
     lease_term_months: int = 84
     lease_return_condition_cost: float = 250_000  # end-of-lease handback cost
+    # Walking away early costs a penalty: the lesser of the rent still owed
+    # and this many months' rent. Breaking a nearly-expired lease is cheap;
+    # dumping a fresh one is not.
+    lease_break_penalty_months: int = 6
 
 
 @dataclass
@@ -219,6 +223,22 @@ class Lease:
     months_elapsed: float = 0.0
     tail_number: str = ""
     return_cost: float = 0.0
+
+    def monthly_rent(self) -> float:
+        return (self.list_price * self.annual_rate_frac) / 12.0
+
+    def months_remaining(self) -> float:
+        return max(0.0, self.term_months - self.months_elapsed)
+
+    def break_penalty(self, penalty_months: int = 6) -> float:
+        """
+        Cost of walking away now: the lesser of the rent still owed and
+        `penalty_months` of rent, plus the same return-condition cost a
+        normal handback incurs (the lessor still needs the aircraft made good).
+        """
+        rent = self.monthly_rent()
+        owed = rent * self.months_remaining()
+        return min(owed, rent * penalty_months) + self.return_cost
 
     def accrue_and_bill(self, dt_hours: float) -> float:
         dt_months = dt_hours / (24.0 * 30.4375)

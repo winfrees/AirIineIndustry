@@ -65,16 +65,22 @@ FLEET_CATALOG = (
          else PlaneClass.NARROWBODY,
          list_price=38_000_000, max_seats=76, max_range_km=3900,
          cruise_speed_kmh=797, fuel_burn_lph=1300, maint_cost_per_hour=700,
+         takeoff_runway_m=1700, type_rating="E170",
+         reconfig_cost_per_slot=9_000, reconfig_days=10,
          scale=0.55),
     dict(spec_id="A320", display_name="A320neo", manufacturer="Airbus",
          plane_class=PlaneClass.NARROWBODY,
          list_price=110_000_000, max_seats=180, max_range_km=6300,
          cruise_speed_kmh=833, fuel_burn_lph=2400, maint_cost_per_hour=1100,
+         takeoff_runway_m=2100, type_rating="A320",
+         reconfig_cost_per_slot=14_000, reconfig_days=14,
          scale=1.0),
     dict(spec_id="B789", display_name="787-9", manufacturer="Boeing",
          plane_class=PlaneClass.WIDEBODY,
          list_price=290_000_000, max_seats=290, max_range_km=14000,
          cruise_speed_kmh=903, fuel_burn_lph=5600, maint_cost_per_hour=2600,
+         takeoff_runway_m=2800, type_rating="B787",
+         reconfig_cost_per_slot=26_000, reconfig_days=28,
          scale=2.4),
 )
 
@@ -151,7 +157,7 @@ def _layout(spec: AircraftSpec, premium: bool) -> SeatLayout:
 # ------------------------------------------------------------
 
 def build_world_from_data(hub: str = "ORD", n_destinations: int = 4,
-                          provider=None, cash: float = 0.0,
+                          provider=None, cash: float = 0.0, ai_profiles=None,
                           verbose: bool = True):
     """
     Return (world, engine, report). Picks the busiest routes out of `hub` from
@@ -201,6 +207,10 @@ def build_world_from_data(hub: str = "ORD", n_destinations: int = 4,
               lambda row: provider.route_spec(row["o"], row["d"]))
 
     world = World(repo)
+    # The corpus travels with the world: opening a route later (player command
+    # or AI plan) resolves demand through this same provider, so a route added
+    # mid-game is sourced exactly like one built here.
+    world.route_data = provider
     for c in codes:
         world.add_airport_resources(repo.get(AirportSpec, c), 0.82)
 
@@ -224,11 +234,16 @@ def build_world_from_data(hub: str = "ORD", n_destinations: int = 4,
     maint = MaintenanceEngine(repo)
     engine = SimulationEngine(world)
     engine.dt = 24.0
-    for s in (RouteSuitabilitySubsystem(), DeadheadSubsystem(), RosterSubsystem(),
-              BankingSubsystem(), FinanceSubsystem(),
-              OperationsSubsystem(arbiter, pricing, maint),
-              CrewPositioningSubsystem(), MaintenanceSubsystem(maint),
-              CrewLegalitySubsystem(DEFAULT_DUTY_LIMITS)):
+    stages = [RouteSuitabilitySubsystem(), DeadheadSubsystem(), RosterSubsystem(),
+              BankingSubsystem(), FinanceSubsystem()]
+    if ai_profiles is not None:
+        # BEFORE Operations, so a decision takes effect on the tick it's made.
+        from airlinesim.ai import AICarrierSubsystem
+        stages.append(AICarrierSubsystem(profiles=ai_profiles))
+    stages += [OperationsSubsystem(arbiter, pricing, maint),
+               CrewPositioningSubsystem(), MaintenanceSubsystem(maint),
+               CrewLegalitySubsystem(DEFAULT_DUTY_LIMITS)]
+    for s in stages:
         engine.add_subsystem(s)
 
     # Auto-size starting cash to the down payments the chosen fleet actually
