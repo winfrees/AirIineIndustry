@@ -126,6 +126,7 @@ function render(snap) {
     els.gameOver.classList.add("hidden");
   }
 
+  renderStart(snap);
   renderPlayers(snap);
   renderIfIdle(els.routes, routesHtml(snap));
   renderIfIdle(els.fleet, fleetHtml(snap));
@@ -141,6 +142,39 @@ function render(snap) {
   }
 }
 
+// A player now starts with cash and nothing else, so the first screen has to
+// say what to do. Disappears as soon as they have a fleet and a route.
+function renderStart(snap) {
+  const el = document.getElementById("startHint");
+  if (!el) return;
+  const me = snap.players.find((p) => p.player_id === snap.human_player_id);
+  if (!me) return;
+  const steps = [];
+  if (!me.fleet.length) {
+    steps.push("<b>Lease an aircraft</b> — open <i>Fleet &rarr; Buy / finance / lease</i>. " +
+               "Leasing costs no capital up front, so it's the usual way to start.");
+  }
+  if (!me.hubs.length) {
+    steps.push("<b>Open a hub</b> — it's the only place your aircraft can be " +
+               "maintained, and it buys you preferential gates there.");
+  }
+  if (me.fleet.length && !me.route_ops.length) {
+    steps.push("<b>Open a route</b> — any pair of the " +
+               ((catalog && catalog.airports.length) || "300") +
+               " airports is legal, as long as your aircraft has the range and " +
+               "the runways are long enough.");
+  }
+  if (!steps.length) {
+    el.classList.add("hidden");
+    return;
+  }
+  el.classList.remove("hidden");
+  el.innerHTML = `<h2>Getting started</h2><ol>${
+    steps.map((s) => `<li>${s}</li>`).join("")}</ol>
+    <div class="metric">Your rivals each start from a single route and build
+      from there. The clock is paused until you press Resume.</div>`;
+}
+
 function renderPlayers(snap) {
   els.players.innerHTML = snap.players.map((p) => {
     const isHuman = p.player_id === snap.human_player_id;
@@ -148,9 +182,18 @@ function renderPlayers(snap) {
     const ai = p.ai_profile;
     // Show a rival's strategy and its latest moves: an opponent whose style
     // you can read is one you can actually plan against.
+    const STAGE = {
+      healthy: ["good", "healthy"], freeze: ["warn", "expansion frozen"],
+      cut: ["warn", "cutting routes"], shed: ["bad", "returning aircraft"],
+    };
+    const st = ai && STAGE[ai.stage];
     const style = ai
       ? `<div class="metric"><span class="tag">${esc(ai.archetype)}</span>
-           ${esc(ai.blurb)}</div>`
+           ${esc(ai.blurb)}</div>
+         <div class="metric">cash flow
+           <span class="${ai.cash_flow_per_day >= 0 ? "good" : "bad"}">${
+             money(ai.cash_flow_per_day)}/day</span>${
+           st ? ` &middot; <span class="${st[0]}">${st[1]}</span>` : ""}</div>`
       : "";
     const moves = ai && ai.recent && ai.recent.length
       ? `<details><summary>recent moves</summary>${

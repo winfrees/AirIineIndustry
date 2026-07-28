@@ -99,6 +99,37 @@ class Archetype:
     business_seat_frac: float = 0.0    # share of cabin slots given to business
     premium_seat_frac: float = 0.0
 
+    # --- airport character (see airport_fit) ---
+    # What kind of field this style flies from. The corpus has no fares, so
+    # "premium" is inferred from two MEASURED things: how much traffic an
+    # airport handles, and how long its runways are. Runway length is what
+    # separates JFK (4423m, widebody flagship) from LGA (2134m, big but
+    # short-haul only) — traffic rank alone actually ranks LGA above JFK.
+    min_runway_pref_m: float = 0.0     # below this, the field is a poor fit
+    prefers_primary: float = 0.0       # >0 favours big fields, <0 favours secondary
+    fit_weight: float = 1.0            # how much fit moves the route score
+
+    # --- financial discipline (see _cash_stage) ---
+    # These carriers answer to shareholders: growth that burns cash is not a
+    # strategy. Expansion freezes when operating cash flow turns negative and
+    # retrenchment escalates the longer it stays there.
+    min_operating_margin: float = 0.0      # required margin before expanding
+    cash_runway_days: float = 90.0         # never spend below this many days of burn
+    # A carrier building out from one route is SUPPOSED to burn cash: the fixed
+    # overhead (crew pools, maintenance staff, hub fee) is sized for a network
+    # it doesn't have yet. Judging a startup by the same rule as an established
+    # airline freezes the growth that would fix it, and the carrier sits at one
+    # route forever. Below this many routes it is in ramp-up and invests as
+    # long as it can afford to; at or above it, full shareholder discipline
+    # applies. A genuinely short cash runway still overrides, at any size.
+    min_viable_routes: int = 6
+    # Ramp-up is a grant of patience, not a permanent exemption. A carrier
+    # that has been under water this long without reaching viable scale has a
+    # failing strategy, not a young one, and discipline applies regardless of
+    # size. Without this a carrier that stalls below min_viable_routes stays
+    # in "healthy" forever and never retrenches while it bleeds.
+    ramp_up_grace_days: float = 240.0
+
     # --- hubs ---
     # A hub costs daily overhead and buys preferential gates plus the only
     # place this carrier can do maintenance. A network carrier wants several;
@@ -119,6 +150,11 @@ LOW_COST = Archetype(
     fleet_review_days=12, min_cash_buffer=18_000_000.0, max_fleet=24,
     acquisition_method="LEASE", plane_classes=(PlaneClass.NARROWBODY,),
     service_tier=1, business_seat_frac=0.0, premium_seat_frac=0.0,
+    # Secondary fields on purpose — the real LCC playbook (Southwest at MDW,
+    # DAL, HOU, BUR). Lower gate and landing fees are the whole cost
+    # advantage, and it keeps them out of head-to-head with the flag carriers.
+    min_runway_pref_m=1800.0, prefers_primary=-0.6, fit_weight=1.0,
+    min_operating_margin=0.04, cash_runway_days=75.0, min_viable_routes=8,
     max_hubs=1, hub_min_routes_each=99,
 )
 
@@ -130,11 +166,16 @@ LEGACY = Archetype(
     lf_add=0.88, lf_cut=0.48, max_freq_per_plane=5,
     network_review_days=9, candidates_per_review=12,
     min_stage_km=600.0, max_stage_km=12_000.0,
-    min_est_daily_profit=12_000.0, bad_days_before_close=28,
+    min_est_daily_profit=7_000.0, bad_days_before_close=28,
     fleet_review_days=18, min_cash_buffer=40_000_000.0, max_fleet=20,
     acquisition_method="LEASE",
     plane_classes=(PlaneClass.NARROWBODY, PlaneClass.WIDEBODY),
     service_tier=3, business_seat_frac=0.14, premium_seat_frac=0.10,
+    # Long-runway primary fields only: a premium product needs the airport
+    # that can take a widebody and that premium passengers actually use.
+    # This is what keeps a Legacy carrier off OAK->LGA and on SFO->JFK.
+    min_runway_pref_m=3000.0, prefers_primary=1.0, fit_weight=1.6,
+    min_operating_margin=0.08, cash_runway_days=120.0, min_viable_routes=6,
     max_hubs=3, hub_min_routes_each=4,
 )
 
@@ -151,11 +192,80 @@ REGIONAL = Archetype(
     acquisition_method="LEASE",
     plane_classes=(PlaneClass.REGIONAL, PlaneClass.NARROWBODY),
     service_tier=2, business_seat_frac=0.0, premium_seat_frac=0.06,
+    # Thin fields the big carriers skip; short runways are fine for the
+    # equipment it flies, which is the point of a regional.
+    min_runway_pref_m=1500.0, prefers_primary=-0.3, fit_weight=1.2,
+    min_operating_margin=0.05, cash_runway_days=60.0, min_viable_routes=5,
     max_hubs=2, hub_min_routes_each=6,
 )
 
 ARCHETYPES = {a.name: a for a in (LOW_COST, LEGACY, REGIONAL)}
 DEFAULT_ARCHETYPE = LOW_COST
+
+
+# ============================================================
+# AIRPORT CHARACTER — which fields suit which business model
+# ============================================================
+#
+# The committed corpus has no fares (demand_basis: censored), so an airport's
+# "premium-ness" cannot be read off what people paid. Two MEASURED fields
+# stand in, and between them they reproduce the distinction that matters:
+#
+#   TRAFFIC RANK  separates a metro's primary field from its secondary one —
+#                 ORD (4) vs MDW (29), SFO (11) vs OAK (47), LAX (5) vs BUR (56).
+#
+#   RUNWAY LENGTH separates fields that can host a widebody premium operation
+#                 from ones that physically cannot. This is the load-bearing
+#                 half: on traffic alone LGA (rank 16) outranks JFK (rank 19),
+#                 which would have a premium carrier basing at the one New York
+#                 airport that can't take a long-haul aircraft. LGA's 2134m
+#                 against JFK's 4423m is what actually tells them apart.
+#
+# Both are measurements, not opinions about prestige. What IS a judgement call
+# is the weighting below — game balance, tunable, and deliberately mild so a
+# genuinely lucrative market can still outweigh a mediocre airport fit.
+
+PRIMARY_RANK = 20        # at or above this rank, a field reads as primary
+SECONDARY_RANK = 40      # at or below, it reads as a secondary/reliever field
+
+
+def airport_fit(arch: "Archetype", ap) -> float:
+    """
+    How well one airport suits an archetype: 1.0 is neutral, above favours,
+    below discourages. Never zero — a poor fit makes a route less attractive,
+    it does not forbid it, because a rich enough market should still tempt a
+    carrier out of its comfort zone.
+    """
+    if ap is None:
+        return 1.0
+    fit = 1.0
+
+    # Runway: a premium operation needs a field that can take the aircraft it
+    # wants to fly. Short of the preference, the fit degrades in proportion.
+    if arch.min_runway_pref_m > 0 and ap.runway_length_m > 0:
+        if ap.runway_length_m < arch.min_runway_pref_m:
+            shortfall = 1.0 - (ap.runway_length_m / arch.min_runway_pref_m)
+            fit *= max(0.45, 1.0 - shortfall * arch.fit_weight)
+
+    # Size: primary fields cost more and carry more. Which way that cuts is
+    # the archetype's whole positioning — a network carrier wants the flagship
+    # hub, a low-cost carrier wants the cheap field next door.
+    rank = getattr(ap, "hub_rank", 0)
+    if arch.prefers_primary and rank:
+        if rank <= PRIMARY_RANK:
+            fit *= 1.0 + 0.20 * arch.prefers_primary
+        elif rank >= SECONDARY_RANK:
+            fit *= 1.0 - 0.20 * arch.prefers_primary
+    return max(0.3, fit)
+
+
+def route_fit(arch: "Archetype", origin, dest) -> float:
+    """
+    Fit of a whole city pair. Geometric mean, so a route is only as good as
+    both ends: a premium carrier gains nothing from a flagship origin if it
+    has to land somewhere its passengers won't accept.
+    """
+    return (airport_fit(arch, origin) * airport_fit(arch, dest)) ** 0.5
 
 
 # ============================================================
@@ -177,6 +287,11 @@ class CarrierMemory:
     next_network_review: float = 0.0
     next_fleet_review: float = 0.0
     recent: list = field(default_factory=list)       # human-readable move log
+    # --- financial state (see _update_cash_flow / _cash_stage) ---
+    cash_history: list = field(default_factory=list)  # (sim_time, cash) samples
+    cash_flow_per_day: float = 0.0    # smoothed operating cash flow
+    negative_days: float = 0.0        # how long cash flow has been under water
+    stage: str = "healthy"            # healthy | freeze | cut | shed
 
 
 # ============================================================
@@ -240,6 +355,8 @@ class AICarrierSubsystem(Subsystem):
 
             self._price_and_capacity(world, p, mem, arch, rivals)
             self._track_health(world, p, mem, arch, dt)
+            self._update_cash_flow(world, p, mem, dt)
+            mem.stage = self._cash_stage(p, mem, arch)
 
             if world.sim_time >= mem.next_network_review:
                 mem.next_network_review = world.sim_time + arch.network_review_days * 24.0
@@ -247,7 +364,25 @@ class AICarrierSubsystem(Subsystem):
                 self._align_product(world, p, mem, arch)
                 self._close_bad_routes(world, p, mem, arch)
                 self._staff_up(world, p, mem)
-                self._deploy_idle_aircraft(world, p, mem, arch)
+                # Below minimum efficient scale the answer to a cash problem
+                # is to REBUILD, not to cut: the fixed overhead (hub fee, MX
+                # staff) doesn't shrink with the network, so a sub-scale
+                # carrier that keeps cutting guarantees its own failure. One
+                # Regional rival retrenched to a single route and then sat
+                # there burning $89k/day forever, unable to open anything.
+                # Cutting is for carriers big enough for it to help.
+                sub_scale = len(p.route_ops) < arch.min_viable_routes
+                if mem.stage != "healthy" or mem.cash_flow_per_day < 0:
+                    # Overhead first, at any size: cheaper than cutting flying.
+                    # Keyed off cash flow rather than the stage label, because
+                    # the stage can flip back to healthy between reviews while
+                    # the carrier is still funding bases it can't justify.
+                    self._shed_spare_hubs(world, p, mem, arch)
+                if mem.stage == "healthy" or sub_scale:
+                    self._rebase_if_overpriced(world, p, mem, arch, sub_scale)
+                    self._deploy_idle_aircraft(world, p, mem, arch)
+                else:
+                    self._retrench(world, p, mem, arch)
 
             if world.sim_time >= mem.next_fleet_review:
                 mem.next_fleet_review = world.sim_time + arch.fleet_review_days * 24.0
@@ -277,7 +412,11 @@ class AICarrierSubsystem(Subsystem):
         """
         if op.last_pax >= AICarrierSubsystem.MIN_PAX_FOR_UNIT_COST \
                 and op.last_variable_cost > 0:
-            return (op.last_variable_cost + getattr(op, "last_fees", 0.0)) / op.last_pax
+            # last_variable_cost ALREADY includes airport fees (see
+            # OperationsSubsystem). Adding last_fees again double-counts them,
+            # inflates the cost-plus floor, and prices the route out of its own
+            # market.
+            return op.last_variable_cost / op.last_pax
         return 0.0
 
     def _price_and_capacity(self, world, p, mem, arch, rivals):
@@ -333,6 +472,129 @@ class AICarrierSubsystem(Subsystem):
                 actions.set_frequency(world, p, actions.op_id(op), new_freq)
 
     # ------------------------------------------------------------------
+    # FINANCIAL DISCIPLINE
+    # ------------------------------------------------------------------
+    #
+    # RouteOp.last_profit is a CONTRIBUTION MARGIN: revenue minus that flight's
+    # fuel, crew and airport fees. It deliberately excludes everything that
+    # doesn't vary with the flight — lease rent, loan service, ground and
+    # maintenance payroll, hub overhead, the checks themselves. A carrier can
+    # therefore show every route "profitable" while the company burns cash,
+    # which is exactly how real airlines fly themselves into bankruptcy on a
+    # growth story.
+    #
+    # These rivals are meant to read as publicly traded companies, so the
+    # signal they actually manage to is OPERATING CASH FLOW — the change in
+    # the ledger over time, which by construction includes every cost the
+    # engine charges. Growth is conditional on it.
+
+    CASH_WINDOW_DAYS = 30.0        # smoothing window for the cash-flow read
+    STAGE_CUT_DAYS = 21.0          # under water this long -> start cutting
+    STAGE_SHED_DAYS = 45.0         # still under water -> give metal back
+
+    def _update_cash_flow(self, world, p, mem, dt):
+        """
+        Track operating cash flow from the ledger itself. Sampled rather than
+        accumulated so it needs no hooks in the engine's accounting: whatever
+        the engine charges, it shows up here.
+        """
+        now = world.sim_time
+        mem.cash_history.append((now, p.ledger.cash))
+        cutoff = now - self.CASH_WINDOW_DAYS * 24.0
+        while len(mem.cash_history) > 2 and mem.cash_history[0][0] < cutoff:
+            mem.cash_history.pop(0)
+        if len(mem.cash_history) < 2:
+            return
+        (t0, c0), (t1, c1) = mem.cash_history[0], mem.cash_history[-1]
+        days = (t1 - t0) / 24.0
+        if days <= 0:
+            return
+        mem.cash_flow_per_day = (c1 - c0) / days
+        if mem.cash_flow_per_day < 0:
+            mem.negative_days += dt / 24.0
+        else:
+            mem.negative_days = 0.0
+
+    def _cash_stage(self, p, mem, arch) -> str:
+        """
+        How much trouble this carrier is in, and therefore how hard it should
+        pull back. Staged rather than binary: a company doesn't hand back
+        aircraft the first month it dips, but it also doesn't keep expanding
+        into a hole.
+        """
+        if mem.cash_flow_per_day >= 0:
+            return "healthy"
+        # Days of cash left at the current burn. This is the number that turns
+        # a soft problem into an urgent one regardless of how long it's run.
+        burn = -mem.cash_flow_per_day
+        runway = p.ledger.cash / burn if burn > 0 else 1e9
+
+        # A short runway is an emergency at any size — that is the one signal
+        # that overrides everything, including a build-out.
+        if runway < arch.cash_runway_days * 0.5:
+            return "shed"
+
+        # RAMP-UP. Below minimum viable scale the overhead is sized for a
+        # network that doesn't exist yet, so negative cash flow is expected and
+        # is not evidence of a bad strategy. Keep investing while it's
+        # affordable; the runway check above is what stops this being reckless,
+        # and the grace period stops it being indefinite.
+        if (len(p.route_ops) < arch.min_viable_routes
+                and mem.negative_days < arch.ramp_up_grace_days):
+            return "healthy"
+
+        if mem.negative_days >= self.STAGE_SHED_DAYS:
+            return "shed"
+        if runway < arch.cash_runway_days or mem.negative_days >= self.STAGE_CUT_DAYS:
+            return "cut"
+        return "freeze"
+
+    def _retrench(self, world, p, mem, arch):
+        """
+        Staged pull-back. `cut` closes the worst route and trims frequency on
+        thin ones; `shed` also hands back a leased aircraft. Both run on the
+        network review cadence, so a carrier reacts over weeks, not instantly.
+        """
+        if mem.stage == "cut" or mem.stage == "shed":
+            # Close the single worst contributor rather than everything at
+            # once — a carrier that dumps its whole network in one review
+            # collapses instead of recovering.
+            ops = [o for o in p.route_ops]
+            if len(ops) > 1:
+                # last_profit is revenue minus fuel, crew AND fees — netting
+                # fees again would understate every route by its fee bill and
+                # close routes that are actually contributing.
+                worst = min(ops, key=lambda o: o.last_profit)
+                net = worst.last_profit
+                if net < 0:
+                    ok, msg = actions.close_route(world, p, actions.op_id(worst))
+                    if ok:
+                        self._note(p, mem, f"{msg} — cash flow "
+                                           f"${mem.cash_flow_per_day:,.0f}/day")
+            # Trim frequency on anything running under its load-factor floor:
+            # cheaper than closing, and reversible when demand returns.
+            for op in p.route_ops:
+                if op.last_load_factor < arch.lf_cut and op.daily_frequency > 1:
+                    actions.set_frequency(world, p, actions.op_id(op),
+                                          op.daily_frequency - 1)
+
+        if mem.stage == "shed":
+            idle = self._idle_tails(p, mem)
+            # prefer genuinely idle metal; otherwise the least-used tail
+            target = idle[0] if idle else None
+            if target is None and len(p.fleet) > 1:
+                flown = {}
+                for op in p.route_ops:
+                    flown[op.plane.tail_number] = flown.get(
+                        op.plane.tail_number, 0.0) + op.last_pax
+                target = min(p.fleet, key=lambda a: flown.get(a.tail_number, 0.0))
+            if target is not None and len(p.fleet) > 1:
+                fn = actions.break_lease if not target.owned else actions.sell_aircraft
+                ok, msg = fn(world, p, target.tail_number)
+                if ok:
+                    self._note(p, mem, f"{msg} — cash preservation")
+
+    # ------------------------------------------------------------------
     # HEALTH TRACKING (per tick, feeds the review cycles)
     # ------------------------------------------------------------------
     def _track_health(self, world, p, mem, arch, dt):
@@ -340,7 +602,7 @@ class AICarrierSubsystem(Subsystem):
         flying = set()
         for op in p.route_ops:
             oid = actions.op_id(op)
-            net = op.last_profit - getattr(op, "last_fees", 0.0)
+            net = op.last_profit          # already net of fees
             if op.last_eff_freq > 0 or op.last_pax > 0:
                 flying.add(op.plane.tail_number)
             if net < arch.close_below_daily_profit:
@@ -396,6 +658,61 @@ class AICarrierSubsystem(Subsystem):
             self._note(p, mem, f"{msg} — second base for "
                                f"{len(p.route_ops)} routes")
 
+    def _shed_spare_hubs(self, world, p, mem, arch):
+        """
+        Give back hub overhead the network no longer justifies. Unlike closing
+        routes this cuts fixed cost WITHOUT cutting earning capacity, so it is
+        the right move at any size — a carrier funding two bases for a network
+        that fits in one is simply paying twice for the same maintenance reach.
+        """
+        while (len(p.hub_iatas) > 1
+               and len(p.route_ops) < arch.hub_min_routes_each * len(p.hub_iatas)):
+            traffic = {h: 0 for h in p.hub_iatas}
+            for op in p.route_ops:
+                for h in (op.spec.origin_iata, op.spec.dest_iata):
+                    if h in traffic:
+                        traffic[h] += 1
+            spare = min(traffic, key=lambda h: traffic[h])
+            ok, msg = actions.set_hub(world, p, spare, False)
+            if not ok:
+                break
+            self._note(p, mem, f"{msg} — overhead no longer justified")
+
+    def _rebase_if_overpriced(self, world, p, mem, arch, sub_scale: bool):
+        """
+        Move to a cheaper base when the hub bill is out of proportion to the
+        flying it supports. A thin-market carrier that inherits a flagship hub
+        pays a mainline overhead on a regional network — Regional starting at
+        ORD ($53.8k/day) could not cover it on a handful of routes, and no
+        amount of route tuning fixes a base that expensive.
+        """
+        if not (sub_scale and mem.stage != "healthy") or len(p.hub_iatas) != 1:
+            return
+        current = actions.airport(world, p.hub_iatas[0])
+        if current is None or current.hub_fee_per_day <= 0:
+            return
+        # only worth moving if the hub alone is eating the contribution
+        contribution = sum(o.last_profit for o in p.route_ops)
+        if current.hub_fee_per_day < contribution * 0.5:
+            return
+        served = {o.spec.origin_iata for o in p.route_ops} | \
+                 {o.spec.dest_iata for o in p.route_ops}
+        best, best_fee = None, current.hub_fee_per_day
+        for iata in served:
+            ap = actions.airport(world, iata)
+            if ap is None or not ap.has_maintenance_facility:
+                continue
+            if ap.hub_fee_per_day < best_fee * 0.6:
+                best, best_fee = iata, ap.hub_fee_per_day
+        if best is None:
+            return
+        ok, _ = actions.set_hub(world, p, best, True)
+        if not ok:
+            return
+        closed, msg = actions.set_hub(world, p, current.iata, False)
+        self._note(p, mem, f"moved base {current.iata} -> {best} "
+                           f"(${current.hub_fee_per_day:,.0f} -> ${best_fee:,.0f}/day)")
+
     def _best_new_hub(self, world, p):
         """
         The station this carrier already flies to most, excluding current
@@ -442,11 +759,24 @@ class AICarrierSubsystem(Subsystem):
                    if op.last_crew_block or op.cockpit is None or op.cabin is None]
         if not blocked:
             return
+        # Cap total crew against the network it has to fly. Without a ceiling,
+        # a route that stays blocked for a reason hiring can't fix (a
+        # type-rating mismatch, say) makes this hire every single review
+        # forever — one carrier reached 50 cockpit crews for 3 routes and paid
+        # payroll on all of them. CREW_DEPTH is the same rest-rotation factor
+        # databuilder sizes its starting pools with.
+        from airlinesim.databuilder import CREW_DEPTH
+        ceiling = max(2, int(round(len(p.route_ops) * CREW_DEPTH))) + 2
+        if len(p.cockpit_pool) >= ceiling:
+            return
         base = p.hub_iatas[0] if p.hub_iatas else (
             p.fleet[0].location_iata if p.fleet else "")
         if not base:
             return
-        ratings = tuple({a.spec.type_rating for a in p.fleet if a.spec.type_rating})
+        # Certify on type RATINGS, which is what crew_is_type_rated matches —
+        # and include spec ids so a type with no rating authored still works.
+        ratings = tuple({a.spec.type_rating for a in p.fleet if a.spec.type_rating}
+                        | {a.spec.spec_id for a in p.fleet})
         # one crew set per blocked route, capped so a bad tick can't trigger
         # a hiring spree the carrier can't pay for
         for _ in range(min(len(blocked), 2)):
@@ -473,6 +803,8 @@ class AICarrierSubsystem(Subsystem):
 
     def _deploy_idle_aircraft(self, world, p, mem, arch):
         """Find the best unserved market each idle aircraft can profitably fly."""
+        if mem.stage != "healthy":
+            return                           # not expanding while burning cash
         idle = self._idle_tails(p, mem)
         if not idle:
             return
@@ -594,6 +926,11 @@ class AICarrierSubsystem(Subsystem):
         desir = service_desirability(arch.service_tier, origin.access_index,
                                      dest.access_index)
         share = desir / (1.0 + incumbents)
+        # How well this city pair suits the business model. Applied to the
+        # SHARE rather than as a hard filter: a premium carrier can still be
+        # tempted into a secondary field by a big enough market, it just needs
+        # the market to be worth the mismatch.
+        share *= route_fit(arch, origin, dest)
         pax = min(seats * 0.75, demand * share)
         if pax <= 0:
             return None
@@ -672,13 +1009,39 @@ class AICarrierSubsystem(Subsystem):
             return                           # deploy what's already owned first
         if p.ledger.cash < arch.min_cash_buffer:
             return
-        net = sum(op.last_profit - getattr(op, "last_fees", 0.0) for op in p.route_ops)
-        if p.route_ops and net <= 0:
-            return                           # not earning; don't add cost
+        # Shareholder discipline: no fleet growth unless the company is
+        # actually generating cash. Contribution margin alone is not enough —
+        # that's the number that lets a carrier "grow" into insolvency.
+        if mem.stage != "healthy":
+            return
+        ramping = len(p.route_ops) < arch.min_viable_routes
+        revenue = sum(op.last_revenue for op in p.route_ops)
+        net = sum(op.last_profit for op in p.route_ops)   # already net of fees
+        if not ramping:
+            # Established carrier: the routes must be earning before the fleet
+            # grows. During ramp-up this is skipped, because a half-built
+            # network legitimately hasn't covered its fixed costs yet.
+            if p.route_ops and net <= 0:
+                return
+            if revenue > 0 and (net / revenue) < arch.min_operating_margin:
+                return
+        # Keep enough cash to survive the archetype's runway at current burn.
+        if mem.cash_flow_per_day < 0 and \
+                p.ledger.cash < -mem.cash_flow_per_day * arch.cash_runway_days:
+            return
 
         spec = self._pick_aircraft(world, p, arch)
         if spec is None:
             return
+
+        # A ROUTE CASE MUST JUSTIFY THE METAL. Acquiring first and looking for
+        # flying afterwards is how this burned $48k/day in lease
+        # early-termination fees: buy a plane, fail to find a route that
+        # clears the bar, let it sit idle, hand it back at a penalty, repeat.
+        # Check the aircraft has somewhere profitable to go BEFORE committing.
+        if not self._has_case_for(world, p, mem, arch, spec):
+            return
+
         mem.tail_seq += 1
         tail = f"{p.player_id}-{mem.tail_seq:03d}"
         base = p.hub_iatas[0] if p.hub_iatas else (
@@ -703,6 +1066,27 @@ class AICarrierSubsystem(Subsystem):
     OWNERSHIP_RATE_PER_YEAR = 0.11
     ANNUAL_BLOCK_HOURS = 3_000.0
     ASSUMED_FUEL_PRICE = 0.9
+
+    class _Prospect:
+        """Stand-in aircraft for evaluating a route before it is bought."""
+        __slots__ = ("spec",)
+
+        def __init__(self, spec):
+            self.spec = spec
+
+    def _has_case_for(self, world, p, mem, arch, spec) -> bool:
+        """
+        Is there an unserved route this aircraft type could fly profitably?
+        Evaluated against a scratch copy of the tried-set so a candidate
+        rejected for a hypothetical purchase isn't permanently blacklisted
+        for the real fleet.
+        """
+        saved = set(mem.tried)
+        try:
+            return self._best_candidate(world, p, mem, arch,
+                                        self._Prospect(spec)) is not None
+        finally:
+            mem.tried = saved
 
     def _pick_aircraft(self, world, p, arch):
         """
@@ -750,9 +1134,12 @@ class AICarrierSubsystem(Subsystem):
         if mem is None:
             name = self.profiles.get(player_id, self.default_archetype)
             arch = ARCHETYPES.get(name, DEFAULT_ARCHETYPE)
-            return {"archetype": arch.name, "blurb": arch.blurb, "recent": []}
+            return {"archetype": arch.name, "blurb": arch.blurb, "recent": [],
+                    "stage": "healthy", "cash_flow_per_day": 0.0}
         return {"archetype": mem.archetype.name, "blurb": mem.archetype.blurb,
-                "recent": list(mem.recent[-6:])}
+                "recent": list(mem.recent[-6:]),
+                "stage": mem.stage,
+                "cash_flow_per_day": round(mem.cash_flow_per_day, 2)}
 
 
 def market_key_for(world, origin, dest) -> str:

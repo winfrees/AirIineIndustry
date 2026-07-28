@@ -92,10 +92,15 @@ main {
 
 /* 1x2 — full width. These hold the wide tables and the multi-control forms,
    which need the whole row to lay out without wrapping. */
+#startHint,
 #playersCard,
 #routesCard,
 #fleetCard,
 #logCard { grid-column: 1 / -1; }
+
+#startHint { border-color: var(--accent); }
+#startHint ol { margin: 0.2rem 0 0.5rem; padding-left: 1.2rem; }
+#startHint li { margin-bottom: 0.35rem; font-size: 0.88rem; }
 
 /* 1x1 blocks flow two per row. */
 #crewCard,
