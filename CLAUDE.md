@@ -220,6 +220,40 @@ construction, and a rule change lands on everyone at once. Build-time route
 opening (`builder._open_us_route`) goes through it too, so there is no
 separate path that can drift.
 
+**Start conditions.** On a data world with `ai_profiles` set, the human begins
+with cash and nothing else — no fleet, no routes — so the opening decisions
+are which aircraft to lease, where to base, and where to fly. Each AI begins
+with exactly ONE route, chosen by `route_fit` so it suits that archetype, and
+builds a network from it (`build_world_from_data(human_routes=, ai_routes=)`).
+
+**Airport character** (`ai.airport_fit`) is inferred from two MEASURED corpus
+fields, because the committed corpus has no fares to read premium-ness off:
+traffic rank separates a metro's primary field from its reliever (ORD 4 vs
+MDW 29), and RUNWAY LENGTH separates fields that can host a widebody premium
+operation from ones that can't. The runway half is load-bearing — on traffic
+alone LGA (rank 16) outranks JFK (rank 19), which would base a premium
+carrier at the one New York airport that can't take a long-haul aircraft.
+The result is that Legacy flies SFO->JFK and Low-Cost flies the cheaper
+secondary fields, as a consequence of measurements rather than a prestige
+table. Fit scales a candidate's expected share, so it is a preference, not a
+prohibition: a big enough market still tempts a carrier out of its niche.
+
+**Financial discipline.** `RouteOp.last_profit` is a CONTRIBUTION MARGIN
+(revenue less that flight's fuel, crew and fees) and excludes lease rent,
+loan service, payroll and hub overhead — a carrier can show every route
+"profitable" while the company burns cash. So the AI manages to OPERATING
+CASH FLOW, sampled off the ledger itself (`_update_cash_flow`), which by
+construction includes every cost the engine charges. Stages: `healthy` ->
+`freeze` (stop expanding) -> `cut` (close the worst route, trim frequency)
+-> `shed` (hand back metal). Two rules keep that from becoming a death
+spiral, and both were needed: a carrier below `min_viable_routes` is in
+RAMP-UP and keeps investing (its overhead is sized for a network it doesn't
+have yet) subject to `ramp_up_grace_days`; and a sub-scale carrier REBUILDS
+rather than cuts, because you cannot cost-cut below minimum efficient scale.
+Overhead sheds before capacity does — spare hubs go first, and a distressed
+carrier will rebase to a cheaper field (`_rebase_if_overpriced`), which is
+what lets a Regional rival stuck at ORD move to AUS/DEN and recover.
+
 `ai.py`'s `AICarrierSubsystem` gives rivals network planning, fleet planning
 (equipment chosen on cost per seat-km over the mission it actually flies),
 cabin configuration at acquisition, service tiers, crew hiring and hub

@@ -121,6 +121,10 @@ class AirportSpec(SpecBase):
     lat: float = 0.0
     lon: float = 0.0
     metro_id: str = ""
+    # Traffic rank among all airports in the corpus (1 = busiest). 0 = unknown,
+    # which keeps hand-authored specs valid. Measured, and the cheapest signal
+    # for "is this a metro's primary field or its reliever?".
+    hub_rank: int = 0
     # How easily this airport's catchment population can reach it, relative to
     # a typical airport (1.0 = typical). This is the seam for real catchment /
     # census data: with it, the LGA-vs-JFK-vs-EWR choice becomes real. The

@@ -136,12 +136,25 @@ def is_legal_for_flight(crew, now: float, added_flight_hours: float,
 
 
 def crew_is_type_rated(crew, aircraft_spec) -> bool:
-    """Generalized type-rating: crew certs must include the aircraft type/mfr.
-    Empty certs = universal (e.g. ground staff not type-restricted)."""
+    """
+    Generalized type-rating: crew certs must include the aircraft's TYPE
+    RATING, its specific type, or its manufacturer. Empty certs = universal
+    (e.g. ground staff not type-restricted).
+
+    The type_rating match is what makes fleet commonality mean anything: an
+    A320-family rating covers the A319/A320/A321, a 737 rating covers the NG
+    and the MAX. Without it a carrier that hires "A320-rated" pilots and then
+    buys an A321 finds its aircraft permanently unrosterable — the routes
+    report "no legal crew available", the carrier hires more crew that also
+    can't fly it, and it bleeds payroll for a fleet it can't staff.
+    """
     certs = crew.spec.certifications
     if not certs:
         return True
-    return (aircraft_spec.spec_id in certs or aircraft_spec.manufacturer in certs)
+    rating = getattr(aircraft_spec, "type_rating", "")
+    return (aircraft_spec.spec_id in certs
+            or (rating and rating in certs)
+            or aircraft_spec.manufacturer in certs)
 
 
 # ============================================================

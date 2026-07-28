@@ -25,6 +25,8 @@ report rather than hidden.
 """
 from __future__ import annotations
 
+from typing import Optional
+
 from airlinesim.engine import (
     SpecRepository, AircraftSpec, AirportSpec, CrewSpec, RouteSpec,
     MaintenanceProgram, CheckDefinition, CheckTier, PlaneClass, CrewType,
@@ -243,7 +245,8 @@ def _layout(spec: AircraftSpec, premium: bool) -> SeatLayout:
 
 def build_world_from_data(hub: str = "ORD", n_destinations: int = 4,
                           provider=None, cash: float = 0.0, ai_profiles=None,
-                          verbose: bool = True):
+                          verbose: bool = True, human_routes: Optional[int] = None,
+                          ai_routes: Optional[int] = None):
     """
     Return (world, engine, report). Picks the busiest routes out of `hub` from
     the corpus, builds both directions of each, and stands up two competing
@@ -364,9 +367,36 @@ def build_world_from_data(hub: str = "ORD", n_destinations: int = 4,
         if not any(pid == r[0] for r in roster):
             roster.append((pid, f"{pid} Airways",
                            AcquisitionMethod.OPERATING_LEASE, lease, False))
+    # How much of the planned network each carrier actually starts with.
+    # Defaults only kick in once AI profiles are configured, so every existing
+    # caller (scenarios, run_from_data) keeps the full seeded network.
+    if ai_profiles:
+        h_routes = 0 if human_routes is None else human_routes
+        a_routes = 1 if ai_routes is None else ai_routes
+    else:
+        h_routes = len(ops_plan) if human_routes is None else human_routes
+        a_routes = len(ops_plan) if ai_routes is None else ai_routes
+
+    from airlinesim.ai import ARCHETYPES, route_fit
     for pid, name, method, terms, premium in roster:
+        is_ai = bool(ai_profiles) and pid in ai_profiles
+        n = a_routes if is_ai else h_routes
+        if is_ai and n:
+            # Seed the AI with the planned route that best suits its business
+            # model, not just the biggest one — a premium carrier should open
+            # from a long-runway primary field, a low-cost one from a cheaper
+            # secondary field. Same fit function its own planner uses later.
+            arch = ARCHETYPES.get(ai_profiles[pid])
+            plan = sorted(
+                ops_plan,
+                key=lambda pair: -(
+                    route_fit(arch, repo.get(AirportSpec, pair[0].origin_iata),
+                              repo.get(AirportSpec, pair[0].dest_iata))
+                    * pair[0].base_demand_per_day)) if arch else list(ops_plan)
+        else:
+            plan = list(ops_plan)
         engine.add_player(_carrier(world, bank, pid, name, method, terms,
-                                   ops_plan, codes, premium, cash, provider,
+                                   plan[:n], codes, premium, cash, provider,
                                    pricing.reference_price))
     if ai_profiles:
         for p in engine.players:
@@ -470,7 +500,13 @@ def _carrier(world, bank, pid, name, method, terms, ops_plan, bases,
     ops_at = {}
     for rs, _ac, _pl in acquired:
         ops_at[rs.origin_iata] = ops_at.get(rs.origin_iata, 0) + 1
-    for base in bases:
+    # Staff only the stations this carrier actually flies from. Staffing every
+    # base in the world regardless of network size meant a one-route startup
+    # paid for crews at five airports — enough fixed overhead to make it
+    # permanently cash-flow negative, which then tripped the financial
+    # discipline and froze the growth that would have fixed it.
+    staffed = [b for b in bases if ops_at.get(b)] or list(bases)[:1]
+    for base in staffed:
         depth = max(2, int(round(ops_at.get(base, 0) * CREW_DEPTH)))
         for i in range(depth):
             p.cockpit_pool.append(CrewUnit(

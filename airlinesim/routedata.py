@@ -383,7 +383,7 @@ class RouteDataProvider:
             else PlaneClass.NARROWBODY,
             fuel_supply_per_day_l=rec.est_fuel_l_per_day,   # HEURISTIC
             landing_fee=max(150.0, min(3000.0, rec.out_pax_per_day / 40.0)),
-            lat=rec.lat, lon=rec.lon,
+            lat=rec.lat, lon=rec.lon, hub_rank=rec.hub_rank,
             # index 0 unused; index = RouteOp.service_tier (1..3)
             gate_fee_by_tier=(0.0, gate_base * 0.55, gate_base, gate_base * 1.7),
             amenities_fee_by_tier=(0.0, 0.0, 2.5, 9.0),     # HEURISTIC, per pax
