@@ -39,11 +39,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
-from airlinesim import actions
+from airlinesim import actions, gamelog
 from airlinesim.engine import (
     AircraftSpec, AirportSpec, PlaneClass, Subsystem, World, market_key,
 )
 from airlinesim.finance_cabin import CabinClass, aircraft_value
+
+_log = gamelog.get("ai")
 
 
 # ============================================================
@@ -316,6 +318,7 @@ class AICarrierSubsystem(Subsystem):
         self.enabled = enabled
         self.memory: dict = {}      # player_id -> CarrierMemory
         self._players: list = []    # set each tick; read by route evaluation
+        self._now: float = 0.0      # set each tick; only used to stamp the log
 
     # -- memory ------------------------------------------------------------
     def _mem(self, player, world) -> CarrierMemory:
@@ -342,12 +345,20 @@ class AICarrierSubsystem(Subsystem):
         player.log.append(f"  [AI:{mem.archetype.name}] {msg}")
         mem.recent.append(msg)
         del mem.recent[:-12]
+        # Every AI decision, durably. `mem.recent` keeps 12 for the GUI; the
+        # log keeps the whole run, which is what a "why did the Regional go
+        # broke on day 400?" post-mortem needs. Volume is bounded by review
+        # cadence (network/fleet reviews are days apart), not by the tick.
+        _log.info("day %d %s [%s] %s (cash flow $%.0f/day, stage %s)",
+                  int(self._now // 24), player.player_id, mem.archetype.name,
+                  msg, mem.cash_flow_per_day, mem.stage)
 
     # -- tick --------------------------------------------------------------
     def tick(self, world: World, players: list, dt: float, ctx: dict):
         if not self.enabled:
             return
         self._players = players
+        self._now = world.sim_time
         rivals = self._rival_prices(players)
         for p in players:
             if not p.is_ai:

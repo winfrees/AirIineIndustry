@@ -32,6 +32,15 @@ from enum import Enum, auto
 from typing import Callable, Optional, Type, TypeVar, Iterable
 import math
 
+from airlinesim import gamelog
+
+# The engine logs STRUCTURAL events only — the handful of places it takes
+# something away from a player on its own initiative (lease expiry today).
+# Per-tick accounting stays in `Player.log`, where a GUI can read it and a
+# day-long session doesn't turn it into gigabytes. With no handler attached
+# (a scenario, the explorer) every call here is a no-op.
+_log = gamelog.get("engine")
+
 
 # ============================================================
 # SPEC LAYER (condensed from prior drafts — the import seam)
@@ -1370,6 +1379,16 @@ class BankingSubsystem(Subsystem):
                                    f"lease {lease.lease_id} return condition", p.log)
                     p.log.append(f"  lease {lease.lease_id} EXPIRED ({lease.tail_number}) — "
                                  f"aircraft returned to lessor")
+                    # This is the one place the engine takes an aircraft AND
+                    # its routes away from a player without the player asking,
+                    # so it gets a durable record: "where did my fleet go?" is
+                    # otherwise only answerable from the in-memory log.
+                    dropped = [o.spec.spec_id for o in p.route_ops
+                               if o.plane.tail_number == lease.tail_number]
+                    _log.info("day %d %s: lease %s expired, %s returned to "
+                              "lessor%s", int(world.sim_time // 24), p.player_id,
+                              lease.lease_id, lease.tail_number,
+                              f", closing {dropped}" if dropped else "")
                     # remove the leased aircraft from the fleet (lessor reclaims it)
                     p.fleet = [a for a in p.fleet if a.tail_number != lease.tail_number]
                     p.route_ops = [o for o in p.route_ops if o.plane.tail_number != lease.tail_number]

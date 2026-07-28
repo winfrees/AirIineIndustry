@@ -5,7 +5,7 @@ Usage:
     python -m airlinesim.cli list
     python -m airlinesim.cli run <scenario>
     python -m airlinesim.cli demo [--days N]
-    python -m airlinesim.cli gui [--port N] [--no-browser]
+    python -m airlinesim.cli gui [--port N] [--no-browser] [--log-file PATH]
     python -m airlinesim.cli explore [--port N] [--no-browser]
     python -m airlinesim.cli probe [--offline] [--year Y --month M]
     python -m airlinesim.cli refresh [--check-only]
@@ -31,6 +31,7 @@ SCENARIOS = {
     "databuilt":   "airlinesim.scenarios.scenario_databuilt",
     "refresh_cx":  "airlinesim.scenarios.scenario_refresh",
     "ai_competition": "airlinesim.scenarios.ai_competition",
+    "session":     "airlinesim.scenarios.scenario_session",
     "explorer":    "airlinesim.scenarios.scenario_explorer",
 }
 
@@ -64,9 +65,23 @@ def cmd_demo(args):
     run(engine, days=args.days)
 
 
+def _setup_logging(args):
+    """Turn on file logging for the commands that run a live session."""
+    from airlinesim import gamelog
+    if getattr(args, "no_log", False):
+        return
+    gamelog.configure(path=getattr(args, "log_file", None),
+                      level=getattr(args, "log_level", "INFO"),
+                      max_bytes=int(getattr(args, "log_max_mb", 8) * 1024 * 1024),
+                      backups=getattr(args, "log_backups", 5))
+    print(gamelog.describe())
+
+
 def cmd_gui(args, landing: str = "/", what: str = "GUI"):
     import webbrowser
     from airlinesim.server import run_server, lan_url
+
+    _setup_logging(args)
 
     # One server serves both front ends — the game at / and the outcome
     # explorer at /explore.html. `explore` differs only in where it points the
@@ -151,6 +166,23 @@ def main(argv=None):
                      help="demo sandbox, or the BTS-corpus network with network-planning AI")
     pe.add_argument("--hub", default="ORD", help="hub airport for --world data")
     pe.set_defaults(func=lambda a: cmd_gui(a, "/explore.html", "Outcome Explorer"))
+
+    # Logging flags on every command that runs a live session. Defaults are
+    # sized for a 24-hour play session — see gamelog's module docstring.
+    for p in (pg, pe):
+        p.add_argument("--log-file", default=None,
+                       help="where to write the debug log "
+                            "(default: ~/.airlinesim/logs/airlinesim.log)")
+        p.add_argument("--log-level", default="INFO",
+                       choices=("DEBUG", "INFO", "WARNING", "ERROR"),
+                       help="log verbosity (default: INFO)")
+        p.add_argument("--log-max-mb", type=float, default=4.0,
+                       help="max size of one log file in MB (default: 4)")
+        p.add_argument("--log-backups", type=int, default=5,
+                       help="rotated files kept alongside the live one "
+                            "(default: 5, so 6 files / 24 MB total)")
+        p.add_argument("--no-log", action="store_true",
+                       help="disable file logging entirely")
 
     args = parser.parse_args(argv)
     if not getattr(args, "func", None):

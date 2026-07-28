@@ -20,6 +20,7 @@ constraint enforcement — not partial stubs.
                         #       SimulationEngine tick loop
       explorer.py       # outcome-space exploration: fork a state, branch it,
                         #   run N cycles, test a derivation, repeat
+      gamelog.py        # rotating file log for a live session (debug aid)
       crew.py           # duty/rest limits, rostering, positioning, deadheading
       route.py          # market segments, stage economics, equipment/crew suitability
       finance_cabin.py  # cabin classes + seat layout; financing/banking; depreciation
@@ -78,6 +79,7 @@ constraint enforcement — not partial stubs.
     airlinesim run refresh_cx        # corpus-refresh logic (offline)
     airlinesim run explorer          # outcome-explorer + engine-determinism check
     airlinesim run cabin             # cabin geometry, seat fitting, per-cabin fares
+    airlinesim run session           # real-time clock guard + log rotation
     airlinesim gui                   # play it in a browser; defaults to --world data
     airlinesim gui --world demo      # the two-airport sandbox instead
     airlinesim explore               # the outcome-explorer GUI (same server as `gui`)
@@ -100,6 +102,47 @@ to be **installed** and runs every subprocess in a temp directory, deliberately:
 from the repo root imports the checkout and the install is never tested — which
 is how `btsdata/fixtures/*.csv` shipped missing from the wheel. Any new non-`.py`
 file under `airlinesim/` needs a matching `[tool.setuptools.package-data]` entry.
+
+## The real-time clock, and why it refuses to catch up
+
+`GameSession._loop` converts real seconds into sim-days. That conversion has
+to be guarded, because the wall clock is not monotone with *attention*: if the
+machine sleeps, the process is frozen and the gap is real time nobody played.
+
+Replaying it was a real bug. Three hours with the lid shut is ~5,400 sim-days
+at the default 0.5 days/s — about fifteen years, delivered to the engine in one
+55-second locked burst. Everything downstream was CORRECT: 84-month leases
+expired on schedule, and `BankingSubsystem` did what it should, handing the
+metal back and closing the routes those tails flew. The player simply wasn't
+there to re-lease. AI carriers looked immune only because they re-acquire on
+their own review cycle. **The lease teardown is not the bug and must not be
+softened** — the clock is.
+
+So: a gap over `SUSPEND_GAP_S` (5 s, ~25 poll intervals) is DISCARDED, the
+session pauses itself, and `clock_notice` says how much was skipped — cleared
+by `resume()`, so the banner survives a page reload. Smaller gaps are still
+clamped by `MAX_CATCHUP_S` and `MAX_TICKS_PER_WAKE`, because the session lock
+is held for the whole catch-up burst and an unbounded one freezes the command
+API and the SSE stream with it. A raise inside the loop now pauses and logs
+instead of killing the thread, which used to leave a frozen-but-healthy GUI
+with no error anywhere. `airlinesim run session` pins all of this.
+
+## Session logging
+
+`gamelog.py` is a `RotatingFileHandler` on the `airlinesim` logger, defaulting
+to `~/.airlinesim/logs/airlinesim.log` at 4 MB x 6 files. Off unless a caller
+configures it, so scenarios and the explorer are unaffected; `airlinesim gui`
+turns it on and prints the path (`--log-file/--log-level/--log-max-mb/
+--log-backups/--no-log`).
+
+It logs DECISIONS and EVENTS, never ticks: human commands with their outcome
+(including refusals), AI moves through `ai._note`, lease expiry in
+`engine.py` — the one place the engine takes assets away unasked — clock
+anomalies, and swallowed exceptions. Measured volume is ~8.2 KB per 1,000
+sim-days with three AI carriers (2,000 days -> 16,411 bytes, 104 lines), so a
+24-hour session at default speed is ~0.4 MB and the 24 MB cap is roughly
+sixty days of continuous play. If you add logging to a per-tick path, that
+arithmetic stops holding — summarise instead.
 
 ## Outcome explorer (second GUI)
 
