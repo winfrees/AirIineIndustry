@@ -91,6 +91,16 @@ airlinesim run integration       # run a named scenario
   depreciation feeding the balance sheet.
 - **Competition.** A `ResourceArbiter` resolves contention over finite gates,
   fuel, and passenger demand between carriers each tick.
+- **Weather and disruption.** A deterministic, geographic weather model —
+  climate derived from each airport's real coordinates, with fronts,
+  convection, snow, ice, fog, hurricanes, wildfire smoke and volcanic ash as
+  systems that move across the map. It cuts airport capacity, cancels and
+  delays flights, eats into crew duty limits so the *next* rotation is the one
+  that fails, strands passengers into rebookings and hotel bills, and keeps a
+  per-airport reliability record so an exposed hub costs you over a season.
+- **Hourly clock.** The engine's tick length is a resolution knob and the
+  simulation is independent of it: a month of flying comes out the same
+  stepped in 24-hour, 6-hour or 1-hour slices.
 
 ## Architecture
 
@@ -120,6 +130,7 @@ competitor is adding a `Player`, not rewriting allocation logic.
 | `route`       | market structure + equipment/crew suitability validation   |
 | `finance`     | buy vs finance vs lease, with depreciation                  |
 | `cabin`       | cabin geometry, seat fitting, and per-cabin fares            |
+| `weather`     | clock resolution, geographic weather, and the disruption chain |
 | `btsdata`     | BTS ingest pipeline against committed fixtures (offline)    |
 | `routedata`   | the three-tier historic/comparable route lookup             |
 | `databuilt`   | the engine running on real BTS route data                   |
@@ -189,6 +200,14 @@ simplifications:
   industry-shaped, not certified.
 - Crew positioning deadheads direct-to-base only; multi-hop routing and ferry
   (positioning) flights are not yet implemented.
+- Weather is a deterministic model whose climate comes from each airport's real
+  coordinates, but every frequency, size and impact figure in it is a
+  climate-*shaped* heuristic — no weather record is committed to this repo.
+  `docs/weather-design.md` sets out how NOAA Climate Normals and BTS On-Time
+  Performance would replace them. The disruption chain has real gaps too: a
+  cancelled flight leaves its aircraft in the right place anyway, rebooking
+  only searches the same market in the same tick, and nobody pre-cancels ahead
+  of a forecast.
 - The bundled AI adjusts price/frequency but does not yet use route suitability
   to right-size equipment, and prices only the economy base fare — the premium
   cabins it installs sell at the default class multiple.

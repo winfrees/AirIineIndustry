@@ -11,7 +11,8 @@ Usage:
     python -m airlinesim.cli refresh [--check-only]
 
 Scenarios: competitive, integration, crew, deadhead, roster, route, finance,
-           cabin, btsdata, routedata, databuilt, refresh_cx, explorer
+           cabin, weather, btsdata, routedata, databuilt, refresh_cx,
+           explorer
 """
 import argparse
 import importlib
@@ -26,6 +27,7 @@ SCENARIOS = {
     "route":       "airlinesim.scenarios.scenario_route",
     "finance":     "airlinesim.scenarios.scenario_finance_cabin",
     "cabin":       "airlinesim.scenarios.scenario_cabin",
+    "weather":     "airlinesim.scenarios.scenario_weather",
     "btsdata":     "airlinesim.scenarios.scenario_btsdata",
     "routedata":   "airlinesim.scenarios.scenario_routedata",
     "databuilt":   "airlinesim.scenarios.scenario_databuilt",

@@ -10,6 +10,9 @@ const els = {
   toast: document.getElementById("toast"),
   btnPause: document.getElementById("btnPause"),
   btnAdvance: document.getElementById("btnAdvance"),
+  btnAdvanceH: document.getElementById("btnAdvanceH"),
+  hour: document.getElementById("hour"),
+  tickHours: document.getElementById("tickHours"),
   btnSave: document.getElementById("btnSave"),
   btnLoad: document.getElementById("btnLoad"),
   btnNew: document.getElementById("btnNew"),
@@ -233,6 +236,18 @@ function renderIfIdle(container, html) {
 function render(snap) {
   latest = snap;
   els.day.textContent = snap.day;
+  if (snap.hour != null) {
+    els.hour.textContent = String(snap.hour).padStart(2, "0") + ":00";
+  }
+  // The controls reflect the SERVER's clock, not whatever the sliders were
+  // left at: a loaded save or a second browser tab has to show the truth.
+  if (snap.speed != null && document.activeElement !== els.speedRange) {
+    els.speedRange.value = snap.speed;
+    els.speedVal.textContent = String(Math.round(snap.speed));
+  }
+  if (snap.tick_hours != null && document.activeElement !== els.tickHours) {
+    els.tickHours.value = String(snap.tick_hours);
+  }
   // Comes from the server per snapshot, so it names the build actually
   // serving — not whatever build's HTML/JS the browser happens to have cached.
   if (snap.engine_version) els.ver.textContent = "v" + snap.engine_version;
@@ -531,7 +546,11 @@ function connect() {
 els.btnPause.addEventListener("click", () => {
   sendControl(latest && !latest.paused ? "pause" : "resume");
 });
-els.btnAdvance.addEventListener("click", () => sendControl("advance", { days: 1 }));
+els.btnAdvance.addEventListener("click", () => sendControl("advance", { hours: 24 }));
+els.btnAdvanceH.addEventListener("click", () => sendControl("advance", { hours: 6 }));
+els.tickHours.addEventListener("change", () => {
+  sendControl("resolution", { value: parseFloat(els.tickHours.value) });
+});
 els.speedRange.addEventListener("input", () => {
   els.speedVal.textContent = els.speedRange.value;
 });
