@@ -153,6 +153,29 @@
       have any hub at all.</div>
   </section>
 
+  <section class="card" id="allianceCard">
+    <h2>Alliances &amp; Consolidation</h2>
+    <div id="alliance"></div>
+    <details>
+      <summary>Form an alliance</summary>
+      <form id="formAlliance" class="form">
+        <input name="name" placeholder="alliance name" required>
+        <select name="kind" title="how deep the cooperation runs">
+          <option value="INTERLINE">Interline — bags through only</option>
+          <option value="CODESHARE" selected>Codeshare — sell each other's seats</option>
+          <option value="JOINT_VENTURE">Joint venture — pooled revenue</option>
+        </select>
+        <select name="partner" id="alliancePartner"></select>
+        <button class="btn" type="submit">Form</button>
+      </form>
+      <div class="metric">A partner's onward flights feed your routes; a
+        stranger's don't. Deeper tiers feed better and cost more in dues. You
+        can coordinate a hub afterwards, which stops members competing there —
+        a real restraint, so it costs you the routes you give up.</div>
+    </details>
+    <div id="mergers"></div>
+  </section>
+
   <section class="card" id="marketCard">
     <h2>Airports</h2>
     <div id="airports"></div>

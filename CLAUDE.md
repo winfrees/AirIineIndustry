@@ -384,6 +384,19 @@ Design, limits and the historic-data question: `docs/consolidation-design.md`.
 - **There is no regulator**, and that is the biggest gap: real horizontal
   mergers get blocked or conditioned on divestitures, here they only get
   expensive.
+- **AI carriers consolidate among THEMSELVES and never buy the human out.**
+  Losing your airline to a takeover you were never asked about is an
+  unanswerable loss, not a difficulty — the human is always the initiator. A
+  bid/accept flow is the natural extension. `scenario_alliance` drives the
+  AI's own review against a flush AI and a desperate human to prove it holds.
+- **The GUI path is the feature.** It shipped once with the actions written,
+  the AI using them, and NOTHING reachable by a player: `attach_alliances()`
+  was never called in the game path, so the subsystem wasn't attached, feed
+  did nothing, and the actions would have failed on an empty player roster.
+  `scenario_alliance`'s wiring section now asserts the whole chain —
+  subsystem attached, `GameSession` method present, `server.COMMANDS` entry
+  present — for every one of them. **A feature only the scenario can reach is
+  not delivered.**
 
 ## Cabins: geometry, fitting and per-cabin fares
 

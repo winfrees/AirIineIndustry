@@ -1007,6 +1007,14 @@ class AICarrierSubsystem(Subsystem):
         for other in self._players:
             if other.player_id == p.player_id:
                 continue
+            # AI carriers consolidate among THEMSELVES and never buy the human
+            # out. Losing your airline to a takeover you were never asked
+            # about — and could not refuse — is an unanswerable loss, not a
+            # difficulty. The human is always the initiator against an AI.
+            # A bid/accept flow (the AI offers, the player decides) is the
+            # natural extension and is noted in docs/consolidation-design.md.
+            if not other.is_ai:
+                continue
             if not other.fleet and not other.route_ops:
                 continue
             other_mem = self.memory.get(other.player_id)

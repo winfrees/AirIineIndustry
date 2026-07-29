@@ -50,6 +50,15 @@ COMMANDS = {
         a["route_op_id"], a["tier"]),
     "close_route": lambda gs, a: gs.close_route(a["route_op_id"]),
     "set_hub": lambda gs, a: gs.set_hub(a["iata"], a.get("enabled", True)),
+    # --- alliances and consolidation ---
+    "form_alliance": lambda gs, a: gs.form_alliance(
+        a.get("name", "Alliance"), a.get("kind", "CODESHARE"), a.get("partners")),
+    "join_alliance": lambda gs, a: gs.join_alliance(a["alliance_id"]),
+    "leave_alliance": lambda gs, a: gs.leave_alliance(),
+    "set_no_compete_hub": lambda gs, a: gs.set_no_compete_hub(
+        a["iata"], a.get("enabled", True)),
+    "acquire_carrier": lambda gs, a: gs.acquire_carrier(
+        a["target_id"], a.get("force", False)),
     "hire_crew": lambda gs, a: gs.hire_crew(
         a["crew_type"], a["base_iata"], a["headcount"], a["cost_per_hour"],
         tuple(a.get("certs", ()))),
@@ -226,6 +235,8 @@ def make_handler(hub: Hub):
                 self._send_json(hub.session.snapshot())
             elif path == "/api/catalog":
                 self._send_json(hub.session.catalog())
+            elif path == "/api/mergers":
+                self._send_json(hub.session.merger_candidates())
             elif path == "/api/cabin":
                 self._send_json(self._cabin_fit(urlparse(self.path).query))
             elif path == "/api/events":

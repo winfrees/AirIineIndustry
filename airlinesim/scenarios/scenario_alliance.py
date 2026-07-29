@@ -261,6 +261,113 @@ def check_execution():
           not ok2 and d.fleet, msg2)
 
 
+# ------------------------------------------------------------------
+# 6 — reachable from a played game
+# ------------------------------------------------------------------
+def check_wiring():
+    """
+    The features have to be reachable by a HUMAN, not just from Python.
+
+    They shipped once without this: the actions existed, the AI used them, and
+    attach_alliances() was never called in the game path — so in an actual
+    played game the subsystem wasn't attached, feed did nothing, and the
+    alliance actions would have failed on an empty player roster.
+    """
+    print("\n=== REACHABLE FROM A PLAYED GAME ===")
+    from airlinesim.alliance import AllianceSubsystem
+    from airlinesim.game import new_game
+    from airlinesim.server import COMMANDS
+
+    gs = new_game(world="demo", weather=False)
+    try:
+        check("a played game attaches the alliance subsystem",
+              any(isinstance(s, AllianceSubsystem) for s in gs.engine.subsystems))
+        gs.advance_hours(24)
+
+        for name in ("form_alliance", "join_alliance", "leave_alliance",
+                     "set_no_compete_hub", "acquire_carrier"):
+            check(f"GameSession exposes {name}()", callable(getattr(gs, name, None)))
+            check(f"the HTTP command table forwards {name}", name in COMMANDS)
+
+        cands = gs.merger_candidates()
+        check("merger_candidates() costs every rival for the human",
+              "candidates" in cands and len(cands["candidates"]) >= 1,
+              f"{len(cands.get('candidates', []))} candidate(s), "
+              f"cash ${cands.get('cash', 0):,.0f}")
+        first = cands["candidates"][0]
+        check("a candidate carries a rationale, a price and a reason",
+              first["rationale"] and first["total_outlay"] > 0 and first["reason"],
+              f"{first['name']}: {first['rationale']} "
+              f"${first['total_outlay']:,.0f} — {first['reason'][:60]}")
+
+        rival = first["player_id"]
+        ok, msg = gs.form_alliance("Skyway", "CODESHARE", [rival])
+        check("a human can form an alliance through the session API", ok, msg)
+        ok2, _ = gs.set_no_compete_hub("HUB", True)
+        check("a human can coordinate a hub", ok2)
+        ok3, _ = gs.leave_alliance()
+        check("a human can leave", ok3)
+
+        # An AI must never buy the human out: losing the airline to a
+        # takeover you were never asked about is an unanswerable loss, not a
+        # difficulty. Tested by driving the AI's own review against a human
+        # who would otherwise be an irresistible target.
+        _check_ai_never_buys_the_human()
+
+        # And if the human ever DOES lose everything, they are told.
+        gs2 = new_game(world="demo", weather=False)
+        try:
+            # Fly first, so the session has SEEN the airline hold assets —
+            # "lost everything" is only meaningful against having had
+            # something, which is what stops a data world (which starts empty)
+            # from being declared over on day one.
+            gs2.advance_hours(24)
+            human = gs2._human()
+            human.fleet, human.route_ops = [], []
+            human.loans, human.leases = [], []      # isolate from bankruptcy
+            human.ledger.cash = 5_000_000.0
+            gs2.advance_hours(24)
+            check("losing every asset ends the game with a reason, not silence",
+                  gs2.game_over and "airline is gone" in gs2.game_over_reason,
+                  gs2.game_over_reason)
+        finally:
+            gs2.stop()
+
+        # ...but a data-world game legitimately STARTS with no fleet and no
+        # routes, so that test must not fire on day one.
+        gs3 = new_game(world="data", n_destinations=3, weather=False)
+        try:
+            gs3.advance_hours(48)
+            check("a game that starts with nothing is not instantly over",
+                  not gs3.game_over,
+                  f"human holds {len(gs3._human().fleet)} aircraft, "
+                  f"{len(gs3._human().route_ops)} routes, "
+                  f"${gs3._human().ledger.cash:,.0f}")
+        finally:
+            gs3.stop()
+    finally:
+        gs.stop()
+
+
+def _check_ai_never_buys_the_human():
+    from airlinesim.ai import AICarrierSubsystem
+    w, e, a, b = _world()
+    _run(e, 5)
+    ai_sub = AICarrierSubsystem(profiles={a.player_id: "Legacy"})
+    ai_sub._players = list(e.players)
+    a.is_ai, b.is_ai = True, False          # b is the human
+    a.ledger.cash = 50_000_000_000.0        # could buy anyone
+    b.ledger.cash = 1.0                     # and b is desperate
+    mem = ai_sub._mem(a, w)
+    mem.stage = "healthy"
+    mem.cash_flow_per_day = 5_000_000.0
+    fleet_before, routes_before = len(b.fleet), len(b.route_ops)
+    ai_sub._merger_review(w, a, mem, mem.archetype)
+    check("an AI with unlimited cash still won't acquire the human",
+          len(b.fleet) == fleet_before and len(b.route_ops) == routes_before,
+          f"human kept {len(b.fleet)} aircraft and {len(b.route_ops)} routes")
+
+
 def main():
     print("ALLIANCES AND CONSOLIDATION CHECK")
     print("=" * 70)
@@ -268,6 +375,7 @@ def main():
     check_alliance()
     check_valuation()
     check_execution()
+    check_wiring()
     passed = sum(1 for _, ok in CHECKS if ok)
     print("\n" + "=" * 70)
     print(f"{passed}/{len(CHECKS)} checks passed — "

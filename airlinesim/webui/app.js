@@ -32,6 +32,10 @@ const els = {
   formAcquire: document.getElementById("formAcquire"),
   formHire: document.getElementById("formHire"),
   formHub: document.getElementById("formHub"),
+  alliance: document.getElementById("alliance"),
+  mergers: document.getElementById("mergers"),
+  formAlliance: document.getElementById("formAlliance"),
+  alliancePartner: document.getElementById("alliancePartner"),
   acqPreset: document.getElementById("acqPreset"),
   acqCabin: document.getElementById("acqCabin"),
   recabinDlg: document.getElementById("recabinDlg"),
@@ -110,6 +114,134 @@ async function loadCatalog() {
     `<option value="${esc(ap.iata)}" label="${esc(ap.display_name)}` +
     `${ap.has_mx ? " · MX" : ""}"></option>`).join("");
 }
+
+// -- alliances and M&A -----------------------------------------------------
+// Both live behind GET /api/mergers, which is read-only and returns a fully
+// costed case per rival — rationale, price, synergies, payback, and the reason
+// a bid would be refused. Rejected candidates come back WITH their reason
+// rather than filtered out, because "why can't I buy them?" is the question
+// this panel exists to answer.
+let mergerData = null;
+
+async function refreshMergers() {
+  mergerData = await fetch("/api/mergers").then((r) => r.json()).catch(() => null);
+  renderAlliance();
+}
+
+const RATIONALE_HINT = {
+  HORIZONTAL: "overlapping networks — duplicate legs consolidate",
+  COMPLEMENTARY: "networks barely overlap — each becomes the other's feed",
+  SURVIVAL: "neither carrier can compete alone",
+  NONE: "no overlap and no new stations",
+};
+
+function renderAlliance() {
+  if (!mergerData) return;
+  const al = mergerData.alliance;
+  const partners = (al?.partners || []).map((id) => {
+    const p = latest?.players.find((x) => x.player_id === id);
+    return p ? p.name : id;
+  });
+  els.alliance.innerHTML = al
+    ? `<div class="metric"><span class="tag">${esc(al.kind)}</span>
+         <b>${esc(al.name)}</b> with ${partners.map(esc).join(", ") || "nobody"}
+         &middot; partner feed x${al.feed_efficiency}
+         &middot; dues ${money(al.dues_per_day)}/day</div>
+       <div class="metric">coordinated hubs:
+         ${al.no_compete_hubs.length ? al.no_compete_hubs.map(esc).join(", ") : "none"}
+         <input id="ncHub" placeholder="IATA" size="4" autocomplete="off">
+         <button class="btn small" data-act="addhub">Coordinate</button>
+         <button class="btn small warn" data-act="leave">Leave alliance</button></div>`
+    : `<div class="metric">Not in an alliance. Only your own onward flights
+         feed your connecting traffic.</div>`;
+
+  // The partner picker only offers carriers not already in an alliance.
+  const taken = new Set((mergerData.alliances || []).flatMap((a) => a.members));
+  const free = (mergerData.candidates || []).filter((c) => !taken.has(c.player_id));
+  els.alliancePartner.innerHTML = free.length
+    ? free.map((c) => `<option value="${esc(c.player_id)}">${esc(c.name)}</option>`).join("")
+    : `<option value="">no unallied carrier</option>`;
+
+  const pos = mergerData.cannot_compete_alone
+    ? `<div class="warn">You hold ${(mergerData.my_share * 100).toFixed(0)}% of
+         departures against a leader on ${(mergerData.leader_share * 100).toFixed(0)}% —
+         by the survival test you cannot compete alone.</div>`
+    : "";
+
+  const rows = (mergerData.candidates || []).map((c) => {
+    const pay = c.payback_years == null ? "never" : `${c.payback_years}y`;
+    const act = c.approved
+      ? `<button class="btn small" data-act="acquire" data-target="${esc(c.player_id)}">Acquire</button>`
+      : `<button class="btn small warn" data-act="force" data-target="${esc(c.player_id)}"
+                 title="the valuation says no — buy anyway">Override</button>`;
+    return `<tr>
+      <td>${esc(c.name)}</td>
+      <td>${c.fleet}/${c.routes}</td>
+      <td>${money(c.enterprise_value)}</td>
+      <td>${money(c.total_outlay)}</td>
+      <td>${money(c.annual_synergy)}/yr</td>
+      <td>${pay}</td>
+      <td><span class="tag" title="${esc(RATIONALE_HINT[c.rationale] || "")}">${esc(c.rationale)}</span></td>
+      <td class="${c.approved ? "good" : "warn"}">${esc(c.reason)}</td>
+      <td>${act}</td>
+    </tr>`;
+  }).join("");
+
+  els.mergers.innerHTML = `${pos}
+    <table><thead><tr>
+      <th>Carrier</th><th>Fleet/Routes</th><th>Value</th><th>Cost</th>
+      <th>Synergy</th><th>Payback</th><th>Rationale</th><th>Verdict</th><th></th>
+    </tr></thead><tbody>${rows || emptyRow(9)}</tbody></table>
+    <div class="metric">Cost is the price plus integration. You hold
+      ${money(mergerData.cash)}. A merger transfers fleet, routes, crews, hubs
+      <b>and debt</b>, and consolidates duplicated legs.</div>`;
+}
+
+els.alliance.addEventListener("click", async (e) => {
+  const b = e.target.closest("button[data-act]");
+  if (!b) return;
+  if (b.dataset.act === "leave") {
+    if (confirm("Leave the alliance? Your partners' onward flights stop feeding your routes.")) {
+      await sendCommand("leave_alliance", {});
+      refreshMergers();
+    }
+  } else if (b.dataset.act === "addhub") {
+    const iata = String(document.getElementById("ncHub").value || "").trim().toUpperCase();
+    if (!iata) return;
+    await sendCommand("set_no_compete_hub", { iata, enabled: true });
+    refreshMergers();
+  }
+});
+
+els.mergers.addEventListener("click", async (e) => {
+  const b = e.target.closest("button[data-act]");
+  if (!b) return;
+  const c = (mergerData?.candidates || []).find((x) => x.player_id === b.dataset.target);
+  if (!c) return;
+  const force = b.dataset.act === "force";
+  const warn = force
+    ? `\n\nThe valuation REJECTS this deal: ${c.reason}.\nBuy anyway?`
+    : "";
+  if (!confirm(`Acquire ${c.name} for ${money(c.total_outlay)}?\n\n` +
+               `${c.rationale} — ${c.reason}\n` +
+               `Synergy ${money(c.annual_synergy)}/yr, payback ` +
+               `${c.payback_years == null ? "never" : c.payback_years + "y"}.\n` +
+               `You take on ${money(c.debt)} of their debt.${warn}`)) return;
+  await sendCommand("acquire_carrier", { target_id: c.player_id, force });
+  refreshMergers();
+});
+
+els.formAlliance.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  const partner = String(f.get("partner") || "");
+  await sendCommand("form_alliance", {
+    name: f.get("name"), kind: f.get("kind"),
+    partners: partner ? [partner] : [],
+  });
+  e.target.reset();
+  refreshMergers();
+});
 
 // -- cabin planner ---------------------------------------------------------
 // Every seat-count field on the page is driven from here, and every number it
@@ -747,5 +879,9 @@ if ("serviceWorker" in navigator) {
   acquirePlanner.setSpec(els.specSelect.value);
   const state = await fetch("/api/state").then((r) => r.json());
   render(state);
+  // Valuations move as the sim runs, but not fast enough to justify a fetch
+  // per tick — the SSE snapshot stays lean and this polls beside it.
+  refreshMergers();
+  setInterval(refreshMergers, 15000);
   connect();
 })();
