@@ -28,6 +28,14 @@ def _a320(repo):
         spec_id="A320", display_name="A320neo", manufacturer="Airbus",
         plane_class=PlaneClass.NARROWBODY, list_price=110_000_000, max_seats=180,
         max_range_km=6300, cruise_speed_kmh=833, fuel_burn_lph=2400,
+        # published economy seats per row — the one measured input to cabin
+        # geometry. Without it the demo world's cabins are still fitted, just
+        # off an estimate (and flagged as one in the UI).
+        cabin_abreast=6,
+        # A recabin in the sandbox is a real decision too: without a cost and
+        # a downtime the "choose well at acquisition" trade-off is free here
+        # and expensive on the data world, for no reason a player can see.
+        reconfig_cost_per_slot=14_000, reconfig_days=14,
         maint_program=MaintenanceProgram(checks=(
             CheckDefinition(CheckTier.A, 750, 90, 10, 60, 8000, PlaneClass.NARROWBODY),
             CheckDefinition(CheckTier.C, 6000, 730, 240, 6000, 350000, PlaneClass.NARROWBODY),

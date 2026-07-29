@@ -29,10 +29,19 @@ COMMANDS = {
     "set_price": lambda gs, a: gs.set_price(a["route_op_id"], a["price"]),
     "set_frequency": lambda gs, a: gs.set_frequency(a["route_op_id"], a["freq"]),
     "set_layout": lambda gs, a: gs.set_layout(a["route_op_id"], a["seats"]),
+    "set_cabin_price": lambda gs, a: gs.set_cabin_price(
+        a["route_op_id"], a["cabin"], a.get("price")),
+    # Every field the acquisition form sends has to be forwarded here: `seats`
+    # used to be dropped on the floor, so a player could type a cabin at
+    # acquisition, get "acquired", and receive an all-economy aircraft. The
+    # only sign was the fleet row — the seat counts were never rejected, they
+    # simply never left this function.
     "acquire_aircraft": lambda gs, a: gs.acquire_aircraft(
-        a["spec_id"], a["tail_number"], a["method"], a.get("base_iata")),
+        a["spec_id"], a["tail_number"], a["method"], a.get("base_iata"),
+        a.get("seats")),
     "open_route": lambda gs, a: gs.open_route(
-        a["route_spec_id"], a["tail_number"], a["price"], a.get("freq", 1), a.get("seats")),
+        a["route_spec_id"], a["tail_number"], a["price"], a.get("freq", 1),
+        a.get("seats"), a.get("service_tier", 2)),
     "sell_aircraft": lambda gs, a: gs.sell_aircraft(a["tail_number"]),
     "break_lease": lambda gs, a: gs.break_lease(a["tail_number"]),
     "reconfigure_aircraft": lambda gs, a: gs.reconfigure_aircraft(
@@ -217,6 +226,8 @@ def make_handler(hub: Hub):
                 self._send_json(hub.session.snapshot())
             elif path == "/api/catalog":
                 self._send_json(hub.session.catalog())
+            elif path == "/api/cabin":
+                self._send_json(self._cabin_fit(urlparse(self.path).query))
             elif path == "/api/events":
                 self._serve_sse()
             elif path == "/api/explore/tree":
@@ -229,6 +240,21 @@ def make_handler(hub: Hub):
                 self._explore(lambda: hub.tree.node_detail(node_id))
             else:
                 self._serve_static(path)
+
+        def _cabin_fit(self, query: str) -> dict:
+            """
+            GET /api/cabin?spec_id=A320&business=16 — what that cabin becomes
+            on that airframe, plus the per-cabin maxima the seat fields clamp
+            to. Read-only, and it goes through the same fitter the acquisition
+            command does, so the preview can't disagree with the outcome.
+            """
+            qs = parse_qs(query)
+            spec_id = (qs.get("spec_id") or [""])[0]
+            if not spec_id:
+                return {"error": "spec_id is required"}
+            seats = {k: v[0] for k, v in qs.items()
+                     if k not in ("spec_id",) and v and v[0] != ""}
+            return hub.session.cabin_fit(spec_id, seats)
 
         def _serve_sse(self):
             self.send_response(200)

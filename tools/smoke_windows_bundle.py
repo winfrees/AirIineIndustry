@@ -34,7 +34,7 @@ SCRATCH = Path(tempfile.mkdtemp(prefix="airlinesim-smoke-"))
 
 # Every scenario that self-checks and is safe offline.
 CHECKED_SCENARIOS = ["integration", "routedata", "btsdata", "databuilt", "refresh_cx",
-                    "explorer"]
+                    "explorer", "cabin"]
 # These only print a report; the bar is "runs without raising".
 SMOKE_SCENARIOS = ["competitive", "crew", "deadhead", "roster", "route", "finance"]
 

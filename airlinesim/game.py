@@ -31,8 +31,9 @@ from airlinesim.engine import (
     Airplane, MarketConditions, OperationsSubsystem, AIStrategySubsystem,
     CrewType,
 )
+from airlinesim.cabin import CABIN_ORDER, fit_report, geometry_for, presets_for
 from airlinesim.finance_cabin import (
-    CabinClass, SeatLayout, DEFAULT_SEAT_CLASSES, cabin_slots_for,
+    DEFAULT_SEAT_CLASSES, cabin_slots_for,
     AcquisitionMethod, FinancingTerms, Bank, aircraft_value,
 )
 from airlinesim import actions
@@ -263,8 +264,8 @@ class GameSession:
     def _plane_is_busy(self, plane) -> str:
         return actions.plane_is_busy(self.world, plane)
 
-    def _build_layout(self, seats: dict, max_seats: int):
-        return actions.build_layout(seats, max_seats)
+    def _build_layout(self, seats: dict, aircraft_spec):
+        return actions.build_layout(seats, aircraft_spec)
 
     def _resolve_route(self, route_spec_id: str):
         return actions.resolve_route(self.world, route_spec_id)
@@ -296,6 +297,9 @@ class GameSession:
 
     def set_layout(self, route_op_id: str, seats: dict):
         return self._do(actions.set_layout, route_op_id, seats)
+
+    def set_cabin_price(self, route_op_id: str, cabin: str, price):
+        return self._do(actions.set_cabin_price, route_op_id, cabin, price)
 
     def set_service_tier(self, route_op_id: str, tier: int):
         return self._do(actions.set_service_tier, route_op_id, tier)
@@ -347,7 +351,13 @@ class GameSession:
                               "type_rating": s.type_rating,
                               "reconfig_cost": s.reconfig_cost_per_slot
                                                * cabin_slots_for(s.max_seats),
-                              "reconfig_days": s.reconfig_days}
+                              "reconfig_days": s.reconfig_days,
+                              # what physically fits: cabin length, seats per
+                              # row per class, and ready-made cabin plans. The
+                              # UI reads these instead of re-deriving geometry
+                              # in the browser.
+                              "cabin": geometry_for(s).describe(),
+                              "cabin_presets": presets_for(s)}
                              for s in sorted(repo.all(AircraftSpec),
                                              key=lambda s: s.max_seats)],
                 "routes": [{"spec_id": s.spec_id, "display_name": s.display_name,
@@ -363,6 +373,25 @@ class GameSession:
                             for s in sorted(repo.all(AirportSpec),
                                             key=lambda s: s.iata)],
             }
+
+    def cabin_fit(self, spec_id: str, seats: Optional[dict] = None) -> dict:
+        """
+        "If I asked for this cabin, what would I get, and what else fits?"
+
+        The acquisition and recabin screens call this as the player types, so
+        the numbers they see come from the SAME fitter that installs the
+        cabin — the browser never gets its own copy of the geometry to drift
+        from. Read-only: nothing is committed here.
+        """
+        with self.lock:
+            try:
+                spec = self.world.repo.get(AircraftSpec, spec_id)
+            except KeyError:
+                return {"error": f"unknown aircraft spec {spec_id}"}
+        try:
+            return fit_report(spec, seats or {})
+        except ValueError as e:
+            return {"error": str(e)}
 
     # -- snapshot projection (JSON-safe read model) ----------------------
     def snapshot(self) -> dict:
@@ -471,7 +500,35 @@ class GameSession:
             "service_tier": getattr(o, "service_tier", 2),
             "fees": getattr(o, "last_fees", 0.0),
             "data_tier": getattr(o.spec, "data_tier", ""),
+            # Per-cabin economics for the cabins the ASSIGNED aircraft has:
+            # the fare being charged, whether that fare is the route's own or
+            # the base-fare default, and how that cabin actually sold. This is
+            # what makes pricing a decision per cabin rather than one number
+            # for the whole aeroplane.
+            "cabins": self._cabin_snapshot(o),
         }
+
+    def _cabin_snapshot(self, o: RouteOp) -> list:
+        layout = o.effective_layout()
+        overrides = getattr(o, "cabin_prices", None) or {}
+        out = []
+        for cc in CABIN_ORDER:
+            seats = layout.seats_of(cc)
+            if seats <= 0:
+                continue
+            pax = o.last_class_pax.get(cc.name, 0.0)
+            offered = (getattr(o, "last_class_seats", None) or {}).get(cc.name, 0.0)
+            out.append({
+                "cabin": cc.name,
+                "seats": seats,
+                "fare": o.fare_for(cc),
+                "priced": cc in overrides,
+                "default_fare": o.ticket_price * DEFAULT_SEAT_CLASSES[cc].price_multiplier,
+                "pax": pax,
+                "revenue": (getattr(o, "last_class_revenue", None) or {}).get(cc.name, 0.0),
+                "load_factor": (pax / offered) if offered > 1e-6 else 0.0,
+            })
+        return out
 
     def _crew_snapshot(self, c: CrewUnit) -> dict:
         return {

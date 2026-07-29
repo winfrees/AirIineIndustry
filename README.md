@@ -77,7 +77,12 @@ airlinesim run integration       # run a named scenario
 - **Structured route demand.** Business / leisure / connecting traveler segments,
   each with its own elasticity, seasonality, and day-of-week profile.
 - **Cabin-class revenue.** Seat layouts trade total seats against revenue per
-  seat; each class fills from its own demand pool at its own price elasticity.
+  seat; each class fills from its own demand pool at its own price elasticity,
+  and each route prices every cabin its aircraft carries.
+- **Cabin geometry.** A configuration is fitted to the airframe it goes into:
+  seats snap to installable rows at that class's pitch and seats-across, so a
+  lie-flat business seat costs ~2.2 economy seats on a narrowbody and ~4.2 on
+  a widebody — and an over-large request comes back trimmed with the reason.
 - **Crew as a real constraint.** Duty/rest limits (FAR Part 117-shaped),
   type-ratings, a pool-based roster, out-of-base positioning, and deadheading
   on revenue seats.
@@ -114,6 +119,7 @@ competitor is adding a `Player`, not rewriting allocation logic.
 | `deadhead`    | crews repositioning home on revenue seats                   |
 | `route`       | market structure + equipment/crew suitability validation   |
 | `finance`     | buy vs finance vs lease, with depreciation                  |
+| `cabin`       | cabin geometry, seat fitting, and per-cabin fares            |
 | `btsdata`     | BTS ingest pipeline against committed fixtures (offline)    |
 | `routedata`   | the three-tier historic/comparable route lookup             |
 | `databuilt`   | the engine running on real BTS route data                   |
@@ -174,11 +180,18 @@ simplifications:
   data and trivially swappable.
 - Route demand *is* wired through to cabin revenue — each segment is its own
   priced, capacity-bound pool — but the segment-to-cabin split fractions are a
-  single global default rather than per-route.
+  single global default. A per-route tilt is implemented and sits neutral,
+  because nothing in the corpus measures how premium a market is;
+  `docs/cabin-demand-design.md` sets out the options for measuring it.
+- Cabin geometry is calibrated to each type's seat count, not to fuselage
+  drawings: seats-across is the published figure, but cabin length is derived
+  so that an all-economy layout comes to exactly `max_seats`. Pitch tables are
+  industry-shaped, not certified.
 - Crew positioning deadheads direct-to-base only; multi-hop routing and ferry
   (positioning) flights are not yet implemented.
 - The bundled AI adjusts price/frequency but does not yet use route suitability
-  to right-size equipment.
+  to right-size equipment, and prices only the economy base fare — the premium
+  cabins it installs sell at the default class multiple.
 - On the historic data specifically: the shipped corpus is built from T-100
   **Market**, which carries no seat counts, so demand equals passengers *flown*
   and is understated on full routes. Capacity, load factor and a measured seat

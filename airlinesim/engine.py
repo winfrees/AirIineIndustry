@@ -106,6 +106,14 @@ class AircraftSpec(SpecBase):
     # Cabin reconfiguration: cost per cabin slot, and how long the tail is down.
     reconfig_cost_per_slot: float = 0.0
     reconfig_days: float = 0.0
+    # --- cabin geometry (airlinesim.cabin) ---
+    # Published economy seats per row for the type (6 on a 737, 9 on a 787).
+    # 0 = unpublished, which makes cabin.py band an estimate off plane_class
+    # and max_seats and flag it as estimated. Usable seating length in metres
+    # is likewise optional: left at 0 it is DERIVED from max_seats at economy
+    # pitch, so an all-economy cabin holds exactly max_seats by construction.
+    cabin_abreast: int = 0
+    cabin_length_m: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -131,6 +139,14 @@ class AirportSpec(SpecBase):
     # committed BTS corpus carries no catchment data, so it stays 1.0 there and
     # only service tier moves desirability — see docs and route.py.
     access_index: float = 1.0
+    # Median household income of this airport's catchment, relative to the
+    # national median (1.0 = typical, 0 = unknown). The companion seam to
+    # access_index and, like it, EMPTY in the committed corpus: BTS carries no
+    # income data, so filling this needs a census join that hasn't been built.
+    # It is the input a per-route premium propensity would be derived from —
+    # docs/cabin-demand-design.md lays out the options. Nothing reads it yet;
+    # it is declared so the field, the plan and the caveat travel together.
+    catchment_income_index: float = 0.0
     # --- fee schedule; tier-indexed tuples, index = RouteOp.service_tier ---
     # Empty tuple = no such fee at this airport (keeps legacy specs free).
     gate_fee_by_tier: tuple = ()         # per departure turn
@@ -173,6 +189,12 @@ class RouteSpec(SpecBase):
     market_id: str = ""
     # market structure (route.py) — tuple of SegmentDemand; None -> flat fallback
     segments: tuple = ()
+    # How premium this market is relative to the global cabin-split default:
+    # 1.0 = the default split, >1 tilts demand toward the front of the
+    # aircraft, <1 toward the back. Left at 1.0 everywhere in the shipped
+    # corpus — no committed dataset measures it. See route.cabin_split_for()
+    # and docs/cabin-demand-design.md.
+    premium_propensity: float = 1.0
     # equipment + crew requirements (route.py)
     equipment_req: object = None      # EquipmentRequirements
     crew_req: object = None           # CrewRequirements
@@ -291,6 +313,14 @@ class RouteOp:
     daily_frequency: int = 1
     owner_id: str = ""
     layout: object = None               # SeatLayout (None -> treated all-economy)
+    # Per-cabin fares for THIS route: {CabinClass: price}. A cabin with no
+    # entry falls back to ticket_price * that class's price_multiplier, which
+    # is the behavior every route had before per-cabin pricing existed — so
+    # an op that sets nothing here is unchanged, and setting one cabin's fare
+    # doesn't disturb the others. Priced per route (not per fleet) because
+    # what a business seat is worth is a property of the MARKET, and the
+    # cabins worth pricing are the ones the assigned airframe actually has.
+    cabin_prices: dict = field(default_factory=dict)
     # market feedback (written by OperationsSubsystem, read by AIStrategySubsystem)
     last_load_factor: float = 0.0
     last_pax: float = 0.0
@@ -298,6 +328,8 @@ class RouteOp:
     last_variable_cost: float = 0.0    # fuel + flight crew last tick (the marginal cost)
     last_profit: float = 0.0           # revenue - variable cost last tick
     last_class_pax: dict = field(default_factory=dict)  # per-class carriage
+    last_class_seats: dict = field(default_factory=dict)  # per-class seats offered
+    last_class_revenue: dict = field(default_factory=dict)  # per-class ticket revenue
     prev_profit: float = 0.0           # profit the tick before (for hill-climbing)
     prev_price: float = 0.0            # price that produced prev_profit
     price_dir: int = -1                # current search direction (+1 up, -1 down)
@@ -312,6 +344,29 @@ class RouteOp:
     # fees charged and the desirability passengers assign to this op.
     service_tier: int = 2
     last_fees: float = 0.0             # airport fees paid last tick
+
+    def effective_layout(self):
+        """The cabin this op sells: its own override, else the airframe's."""
+        return self.layout or self.plane.effective_layout()
+
+    def fare_for(self, cabin) -> float:
+        """
+        What this op charges for one seat in `cabin`.
+
+        A per-cabin price set on the route wins; otherwise the fare is the
+        economy base fare scaled by the class's multiplier — the original
+        behavior, kept as the default so a route nobody has priced by cabin
+        behaves exactly as it did. Non-positive overrides are ignored rather
+        than sold at zero.
+        """
+        from airlinesim.finance_cabin import DEFAULT_SEAT_CLASSES
+        # getattr, not attribute access: a game saved before per-cabin pricing
+        # unpickles without the field at all, and every such route should
+        # simply keep behaving the way it did.
+        override = (getattr(self, "cabin_prices", None) or {}).get(cabin, 0.0)
+        if override and override > 0:
+            return float(override)
+        return self.ticket_price * DEFAULT_SEAT_CLASSES[cabin].price_multiplier
 
 
 @dataclass
@@ -412,6 +467,12 @@ class DemandMarket:
     # sustain higher fares before demand falls off. 0 -> use the global
     # PricingModel.reference_price (legacy behavior).
     reference_price: float = 0.0
+    # How much more (or less) of this market's demand seeks a premium cabin
+    # than the global default split. 1.0 = the default, and every route in the
+    # shipped corpus is 1.0 — the committed data carries nothing that measures
+    # premium propensity. See route.cabin_split_for() and
+    # docs/cabin-demand-design.md for what would drive it.
+    premium_propensity: float = 1.0
 
 
 # What a hub buys at its own airport, on top of being the only place its
@@ -450,9 +511,10 @@ class World:
 
     def add_demand_market(self, rs: RouteSpec):
         key = market_key(rs)
-        self.demand[key] = DemandMarket(key, rs.base_demand_per_day,
-                                        rs.seasonality_amplitude,
-                                        segments=getattr(rs, "segments", ()))
+        self.demand[key] = DemandMarket(
+            key, rs.base_demand_per_day, rs.seasonality_amplitude,
+            segments=getattr(rs, "segments", ()),
+            premium_propensity=getattr(rs, "premium_propensity", 1.0))
 
     def reset_daily_markets(self):
         for fm in self.fuel.values():
@@ -609,8 +671,9 @@ class ResourceArbiter:
                 total_demand = self.pricing.route_demand(dm, self.world.sim_time, price_ratio)
             else:
                 from airlinesim.route import cabin_demand_on
-                total_demand = cabin_demand_on(dm.segments, sub_key,
-                                               self.world.sim_time, price_ratio)
+                total_demand = cabin_demand_on(
+                    dm.segments, sub_key, self.world.sim_time, price_ratio,
+                    getattr(dm, "premium_propensity", 1.0))
 
             out += self._split_pool(group, total_demand)
         return out
@@ -964,7 +1027,10 @@ class OperationsSubsystem(Subsystem):
                         if seats_cfg <= 0:
                             continue
                         seat_capacity = seats_cfg * op.daily_frequency * day_frac
-                        fare = op.ticket_price * DEFAULT_SEAT_CLASSES[cabin].price_multiplier
+                        # the fare this cabin is actually offered at — the
+                        # route's own per-cabin price where one is set, else
+                        # the base fare times the class multiplier
+                        fare = op.fare_for(cabin)
                         claims.append(Claim(p.player_id, ResourceKind.DEMAND, mkey,
                                             amount=seat_capacity, priority=fare,
                                             payload=(op, cabin), sub_key=cabin_name,
@@ -1081,9 +1147,10 @@ class OperationsSubsystem(Subsystem):
                             crew_flew.add(id(crew))
 
                 layout = op.layout or op.plane.effective_layout()
-                base_fare = op.ticket_price
                 revenue = 0.0
                 class_pax = {}
+                class_seats = {}
+                class_revenue = {}
                 total_seats_offered = 0.0
                 # deadheading crew occupy economy seats, removing them from sale
                 dh_seats = getattr(op, "deadhead_seats", 0)
@@ -1107,17 +1174,20 @@ class OperationsSubsystem(Subsystem):
                         total_seats_offered += seat_capacity
                         granted = alloc_by_op_class.get((id(op), cc.name), 0.0)
                         seated = min(seat_capacity, granted * freq_ratio)
-                        fare = base_fare * cspec.price_multiplier
+                        fare = op.fare_for(cc)
                         revenue += seated * fare
                         class_pax[cc.name] = seated
+                        class_seats[cc.name] = seat_capacity
+                        class_revenue[cc.name] = seated * fare
                 else:
                     # --- LEGACY FLAT-POOL REVENUE (no segments configured) ---
                     # Each class draws from its demand_share of the carrier's
                     # won demand, THEN scales that by its own price response.
                     # Business is inelastic (raising fares barely dents
                     # demand); economy is elastic (the same % hike sheds far
-                    # more). Class fare = base_fare * mult, measured against a
-                    # class reference (route reference * mult).
+                    # more). Class fare is the op's per-cabin price (or the
+                    # base fare times the class multiplier), measured against
+                    # a class reference (route reference * mult).
                     pax = alloc_by_op_demand.get(id(op), 0.0)
                     # carriage is bounded by the seats the OPERABLE flights provide
                     pax *= freq_ratio
@@ -1131,7 +1201,11 @@ class OperationsSubsystem(Subsystem):
                         if cc == CabinClass.ECONOMY and dh_seats > 0:
                             seat_capacity = max(0.0, seat_capacity - dh_seats)
                         total_seats_offered += seat_capacity
-                        fare = base_fare * cspec.price_multiplier
+                        fare = op.fare_for(cc)
+                        # The reference a fare is measured against stays the
+                        # class's multiple of the route reference, so pricing
+                        # a cabin ABOVE the class norm sheds demand exactly as
+                        # raising the base fare by the same ratio would.
                         class_ref = route_ref * cspec.price_multiplier
                         # per-class price response: (fare/ref)^elasticity. elasticity<0,
                         # so fare above ref -> factor<1 (demand falls). Inelastic classes
@@ -1142,8 +1216,12 @@ class OperationsSubsystem(Subsystem):
                         seated = min(seat_capacity, class_demand)
                         revenue += seated * fare
                         class_pax[cc.name] = seated
+                        class_seats[cc.name] = seat_capacity
+                        class_revenue[cc.name] = seated * fare
 
                 op.last_class_pax = class_pax
+                op.last_class_seats = class_seats
+                op.last_class_revenue = class_revenue
                 actual_pax = sum(class_pax.values())
                 op.last_pax = actual_pax
 
