@@ -48,10 +48,12 @@ log = gamelog.get("session")
 # how finely the world is simulated, DEFAULT_SPEED_H_PER_S is how fast it goes.
 DEFAULT_TICK_HOURS = 1.0
 DEFAULT_SPEED_H_PER_S = 24.0
-# The weather seed makes a game's storms reproducible: the same seed gives the
-# same season, which is what lets the explorer compare two branches that faced
-# identical weather and differ only by the decisions taken.
-DEFAULT_WEATHER_SEED = 20260729
+# None means "draw a fresh seed", so every new game gets its own season and
+# weather is a genuine risk rather than a schedule to be learned. Pass an
+# explicit seed to replay a particular season. Either way the seed and the
+# generator state pickle with the world, so a save — and an explorer fork —
+# reproduces the weather it would have had.
+DEFAULT_WEATHER_SEED = None
 
 # The old speed slider ran 0.1-5.0 sim-DAYS per real second. A stored speed
 # inside that range is read as a legacy day-rate and converted to hours on
@@ -186,7 +188,7 @@ def new_game(human_name: str = "You", ai_name: str = "SkyRival",
              n_destinations: int = 5,
              tick_hours: float = DEFAULT_TICK_HOURS,
              weather: bool = True,
-             weather_seed: int = DEFAULT_WEATHER_SEED) -> "GameSession":
+             weather_seed=DEFAULT_WEATHER_SEED) -> "GameSession":
     """
     Build a ready-to-play game.
 
@@ -216,9 +218,9 @@ def new_game(human_name: str = "You", ai_name: str = "SkyRival",
         # but ON for a played game: the whole point of an hourly clock is that
         # a storm can arrive during the afternoon and cost you the evening.
         from airlinesim.disruption import attach_weather
-        attach_weather(w, engine, seed=weather_seed)
+        model = attach_weather(w, engine, seed=weather_seed)
         log.info("weather attached (seed=%d) over %d airports",
-                 weather_seed, len(w.weather.climates))
+                 model.seed, len(model.climates))
     return GameSession(w, engine, human_player_id=human_id)
 
 

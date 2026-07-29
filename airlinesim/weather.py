@@ -27,23 +27,30 @@ THE THREE LAYERS
                 give a ceiling/visibility category, a wind, and a runway
                 condition. Those are what operations reads.
 
-DETERMINISM (load-bearing — do not break)
------------------------------------------
-``engine.py`` contains no ``random`` call, and ``explorer.py`` depends on
-that: a forked state re-run with the same edits must give a byte-identical
-result, which is what makes a tree of branches a map rather than noise.
+PROBABILISTIC, AND STILL REPRODUCIBLE
+------------------------------------
+Weather is a **stochastic process**: each tick, ``WeatherModel.advance()``
+retires dead systems and rolls for new ones against season- and
+geography-dependent probabilities. A player cannot know next week's storms,
+and two playthroughs of the same opening diverge — weather is a risk to be
+hedged, not a timetable to be read.
 
-So weather is **deterministic**: every system that will ever exist is a pure
-function of ``(world_seed, time_slot, basin)`` via ``_h01()``. Re-running the
-same hours produces the same storms; forking and replaying reproduces them
-exactly; two processes agree.
+That does NOT cost the explorer its determinism, because the requirement
+there is *reproducibility on fork*, not predictability. The draws come from
+``WeatherModel.rng`` (a ``random.Random``) and the live systems live on the
+model; both pickle with the world. Forking a node copies the generator state,
+so re-running a branch replays the identical season and two branches differ
+only by the decisions taken — which is exactly what `scenario_explorer`'s
+"identical branches produce identical outcomes" check asserts.
 
-``_h01()`` uses **blake2b, not Python's ``hash()``**. ``hash()`` on a string
-is salted per process by PYTHONHASHSEED, so a weather model built on it would
-generate a different climate in every process — including between the
-explorer's parent and child runs, which is precisely the determinism the tree
-rests on. If you ever "optimize" this to ``hash()``, `airlinesim run weather`
-turns red, and that is the alarm working.
+The engine itself still contains no ``random`` call. Randomness lives here,
+in state the world owns and carries.
+
+Note for anyone tempted to reintroduce a hash-based shortcut here: Python's
+``hash()`` on a string is salted per process by PYTHONHASHSEED, so weather
+derived from it would differ between the explorer's parent and child runs.
+Anything that must be stable across processes belongs in ``self.rng`` or in
+``hashlib``, never in ``hash()``.
 
 WHAT IS MEASURED, DERIVED AND HEURISTIC
 ---------------------------------------
@@ -69,35 +76,13 @@ on the heuristic climatology until it is filled. See
 
 from __future__ import annotations
 
-import hashlib
 import math
+import random
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Optional
 
 from airlinesim.route import haversine
-
-
-# ============================================================
-# DETERMINISTIC NOISE
-# ============================================================
-
-def _h01(*parts) -> float:
-    """
-    A stable pseudo-random number in [0,1) from any tuple of values.
-
-    blake2b, NOT hash(): string hashing is salted per process, and a weather
-    model that changes between processes would break explorer determinism and
-    make a save unreproducible. This is stable across runs, machines and
-    Python versions.
-    """
-    raw = "|".join(str(p) for p in parts).encode("utf-8")
-    digest = hashlib.blake2b(raw, digest_size=8).digest()
-    return int.from_bytes(digest, "big") / 18_446_744_073_709_551_616.0
-
-
-def _h_range(lo: float, hi: float, *parts) -> float:
-    return lo + (hi - lo) * _h01(*parts)
 
 
 # ============================================================
@@ -339,7 +324,11 @@ class WeatherSystem:
     bearing_deg: float
     speed_kmh: float
     radius_km: float
-    peak_intensity: float       # 0..1
+    peak_intensity: float       # 0..1 for a natural system; may exceed 1 if forced
+    # A STAGED event (WeatherModel.inject) rather than one the process rolled.
+    # Forced systems answer to geography but not to the calendar — see
+    # WeatherModel._susceptibility.
+    forced: bool = False
 
     def age(self, now: float) -> float:
         return now - self.born_at
@@ -479,22 +468,44 @@ class AirportWeather:
 
 class WeatherModel:
     """
-    The live weather field. Deterministic in ``seed`` and the clock: calling
-    ``at()`` for the same airport and the same hour always gives the same
-    answer, no matter how many times the world is forked and replayed.
+    The live weather field: a STOCHASTIC PROCESS the world carries forward.
 
-    Systems are not stored as they spawn — they are DERIVED from the clock on
-    demand and cached per slot, so a pickled world carries no weather state
-    that could drift from the seed. That also means the explorer's forks share
-    one weather history, which is what makes two branches comparable: they
-    face the same storms and differ only by the decisions taken.
+    Every tick, ``advance()`` retires the systems that have died and rolls for
+    new ones against a probability that depends on the basin, the season and
+    the kind. Weather is therefore genuinely uncertain — a player cannot
+    predict next week's storms, and two games played from the same opening
+    diverge, which is the point of it being a risk rather than a schedule.
+
+    REPRODUCIBILITY, WHICH IS NOT THE SAME AS PREDICTABILITY
+    -------------------------------------------------------
+    The draws come from ``self.rng``, a ``random.Random`` owned by the model,
+    and the live systems are stored on it. Both pickle with the world. So:
+
+      - a SAVE reloads into the same weather future it would have had;
+      - a FORK (explorer, GameSession.save/load) carries the generator state
+        with it, so re-running a branch replays the identical season and two
+        branches differ only by the decisions taken — which is exactly what
+        `scenario_explorer`'s determinism check asserts;
+      - a NEW GAME with no seed gets a fresh one, so the next playthrough is a
+        different season.
+
+    An earlier version made weather a pure function of ``(seed, clock)``, with
+    nothing stored. That is reproducible too, but it is not probabilistic: the
+    entire future was fixed before the game began, and asking about hour 5,000
+    was a lookup rather than a simulation. This is a process instead, and the
+    RNG state is what makes it replayable.
+
     """
 
-    def __init__(self, seed: int = 20260729, climates: Optional[dict] = None):
-        self.seed = int(seed)
+    def __init__(self, seed: Optional[int] = None, climates: Optional[dict] = None,
+                 enabled: bool = True):
+        self.seed = int(seed) if seed is not None else random.randrange(1 << 62)
         self.climates: dict = dict(climates or {})
-        self._slot_cache: dict = {}      # slot index -> tuple[WeatherSystem]
-        self._cache_lo = 0
+        self.rng = random.Random(self.seed)
+        self.systems: list = []          # live systems, carried forward
+        self.enabled = bool(enabled)
+        self._seq = 0
+        self._spawned_through = 0.0      # sim time the process has been rolled to
 
     # -- setup ---------------------------------------------------------
     def add_airport(self, iata: str, lat: float, lon: float):
@@ -502,49 +513,126 @@ class WeatherModel:
             self.climates[iata] = climate_for(iata, lat, lon)
 
     @classmethod
-    def for_world(cls, world, seed: int = 20260729) -> "WeatherModel":
+    def for_world(cls, world, seed: Optional[int] = None,
+                  enabled: bool = True) -> "WeatherModel":
         """Build a model covering every airport in a world's repository."""
         from airlinesim.engine import AirportSpec
-        m = cls(seed=seed)
+        m = cls(seed=seed, enabled=enabled)
         for spec in world.repo.all(AirportSpec):
             if spec.lat or spec.lon:
                 m.add_airport(spec.iata, spec.lat, spec.lon)
         return m
 
-    # -- system generation ---------------------------------------------
-    def _slot_systems(self, slot: int) -> tuple:
-        """Every system born in one 6-hour slot. Pure function of (seed, slot)."""
-        cached = self._slot_cache.get(slot)
-        if cached is not None:
-            return cached
-        born_at = slot * SPAWN_SLOT_H
-        day_of_year = (born_at / 24.0) % 365.0
-        out = []
+    # -- the process ---------------------------------------------------
+    def advance(self, now: float, dt: float):
+        """
+        Carry the weather forward by one tick: retire what has died, roll for
+        what is born. Called by WeatherSubsystem before anything reads the sky.
+
+        Spawn probability is scaled by ``dt / SPAWN_SLOT_H`` so the process is
+        RESOLUTION-INDEPENDENT: an hourly game and a six-hourly one see the
+        same amount of weather per simulated week. Getting this wrong is the
+        same class of bug as the gate claim — a per-slot budget spent per tick.
+        """
+        if not self.enabled:
+            return
+        # Retire the dead. Systems only ever age, so this is the whole GC.
+        if self.systems:
+            self.systems = [s for s in self.systems if s.alive(now)]
+
+        # Roll the interval that has actually elapsed. Guarding on
+        # _spawned_through means a caller that ticks the model twice for one
+        # hour cannot double the weather.
+        if now < self._spawned_through:
+            return
+        span = min(max(dt, 0.0), max(0.0, now - self._spawned_through) + dt)
+        self._spawned_through = now + dt
+        if span <= 0:
+            return
+
+        day_of_year = (now / 24.0) % 365.0
+        scale = span / SPAWN_SLOT_H
+        # A tick longer than one spawn slot gets MULTIPLE draws, not one draw
+        # at a scaled-up probability. Folding the scale into a single Bernoulli
+        # saturates: at a 24-hour tick the common kinds ran p > 1 and spawned
+        # exactly one system where four were due, so coarse resolution quietly
+        # produced less weather than fine resolution.
+        whole, frac = divmod(scale, 1.0)
+        weights = [1.0] * int(whole) + ([frac] if frac > 1e-9 else [])
         for basin, la_lo, la_hi, lo_lo, lo_hi in BASINS:
             for kind, base_p in BASE_SPAWN.items():
-                p = base_p * self._seasonal_gate(kind, basin, day_of_year, la_lo, la_hi, lo_lo)
-                if p <= 0:
+                p_slot = base_p * self._seasonal_gate(kind, basin, day_of_year,
+                                                      la_lo, la_hi, lo_lo)
+                if p_slot <= 0.0:
                     continue
-                if _h01(self.seed, "spawn", slot, basin, kind.name) >= p:
-                    continue
-                prof = KIND_PROFILE[kind]
-                sid = f"{kind.name[:3]}{slot}{basin[:2]}"
-                lat0 = _h_range(la_lo, la_hi, self.seed, "lat", slot, basin, kind.name)
-                lon0 = _h_range(lo_lo, lo_hi, self.seed, "lon", slot, basin, kind.name)
-                out.append(WeatherSystem(
-                    system_id=sid, kind=kind, born_at=born_at,
-                    life_h=prof.life_h * _h_range(0.6, 1.5, self.seed, "life", slot, basin, kind.name),
-                    lat0=lat0, lon0=lon0,
-                    bearing_deg=prof.bearing_deg
-                    + _h_range(-25, 25, self.seed, "brg", slot, basin, kind.name),
-                    speed_kmh=prof.speed_kmh
-                    * _h_range(0.7, 1.35, self.seed, "spd", slot, basin, kind.name),
-                    radius_km=prof.radius_km
-                    * _h_range(0.65, 1.4, self.seed, "rad", slot, basin, kind.name),
-                    peak_intensity=_h_range(0.35, 1.0, self.seed, "int", slot, basin, kind.name)))
-        systems = tuple(out)
-        self._slot_cache[slot] = systems
-        return systems
+                for w in weights:
+                    if self.rng.random() >= p_slot * w:
+                        continue
+                    # Born somewhere inside the tick rather than all at its
+                    # start, so systems aren't synchronised to the clock.
+                    born = now + self.rng.random() * span
+                    self.systems.append(self._spawn(kind, born, la_lo, la_hi,
+                                                    lo_lo, lo_hi, basin))
+
+    def _spawn(self, kind: WeatherKind, born_at: float, la_lo, la_hi,
+               lo_lo, lo_hi, basin: str) -> WeatherSystem:
+        prof = KIND_PROFILE[kind]
+        r = self.rng
+        self._seq += 1
+        return WeatherSystem(
+            system_id=f"{kind.name[:3]}{self._seq}{basin[:2]}", kind=kind,
+            born_at=born_at, life_h=prof.life_h * r.uniform(0.6, 1.5),
+            lat0=r.uniform(la_lo, la_hi), lon0=r.uniform(lo_lo, lo_hi),
+            bearing_deg=prof.bearing_deg + r.uniform(-25, 25),
+            speed_kmh=prof.speed_kmh * r.uniform(0.7, 1.35),
+            radius_km=prof.radius_km * r.uniform(0.65, 1.4),
+            peak_intensity=r.uniform(0.35, 1.0))
+
+    def inject(self, kind, iata: str, now: float, intensity: float = 0.9,
+               life_h: Optional[float] = None) -> Optional[WeatherSystem]:
+        """
+        Put a named event over a named airport, right now.
+
+        This is the explorer's "what if a blizzard hits my hub in week three?"
+        — a deliberate, reproducible event rather than one waited for. The
+        system is centred on the airport and stationary-ish, so it is the
+        chosen airport that takes it.
+        """
+        if isinstance(kind, str):
+            try:
+                kind = WeatherKind[kind.strip().upper()]
+            except KeyError:
+                return None
+        climate = self.climates.get(iata)
+        if climate is None or kind is WeatherKind.CLEAR:
+            return None
+        # `intensity` is what should be DELIVERED at this airport, so the
+        # system is sized to overcome the local susceptibility gate. Without
+        # this, staging a blizzard in April looked like a broken knob: the
+        # system existed, the seasonal gate multiplied it to nothing, and the
+        # branch came back byte-identical to its sibling.
+        sus = self._geo_susceptibility(climate, kind)
+        if sus < 0.02:
+            # Geographically impossible, not merely unlikely — a hurricane at
+            # Chicago. Refused rather than staged as a no-op the caller would
+            # have to diagnose from an unchanged number.
+            return None
+        prof = KIND_PROFILE[kind]
+        self._seq += 1
+        s = WeatherSystem(
+            system_id=f"INJ{self._seq}{kind.name[:3]}", kind=kind, born_at=now,
+            life_h=float(life_h if life_h is not None else prof.life_h),
+            lat0=climate.lat, lon0=climate.lon,
+            bearing_deg=prof.bearing_deg,
+            # Slow enough that the target airport is the one that wears it,
+            # rather than an event that has moved on before it bites.
+            speed_kmh=prof.speed_kmh * 0.25,
+            radius_km=prof.radius_km,
+            # May exceed 1.0: it is a pre-susceptibility figure, and `at()`
+            # clamps the delivered effect.
+            peak_intensity=max(0.05, float(intensity)) / sus, forced=True)
+        self.systems.append(s)
+        return s
 
     def _seasonal_gate(self, kind, basin, day_of_year, la_lo, la_hi, lo_lo) -> float:
         """
@@ -582,24 +670,14 @@ class WeatherModel:
 
     def active(self, now: float) -> list:
         """
-        Every system alive at `now`. Looks back far enough to catch the
-        longest-lived kind (a hurricane runs for days) and no further.
+        Every system alive at `now`. A read, not a generator: the process is
+        advanced by ``advance()``, so asking about the sky never changes it.
+        Disabled weather reports a clear sky rather than an empty model, which
+        is what lets the explorer switch it off mid-branch.
         """
-        longest = max(p.life_h for p in KIND_PROFILE.values()) * 1.5
-        first = int((now - longest) // SPAWN_SLOT_H)
-        last = int(now // SPAWN_SLOT_H)
-        out = []
-        for slot in range(first, last + 1):
-            for s in self._slot_systems(slot):
-                if s.alive(now):
-                    out.append(s)
-        # Slots older than the window can never matter again; dropping them
-        # keeps a long game from growing an unbounded cache.
-        if first - 40 > self._cache_lo:
-            self._cache_lo = first - 40
-            for k in [k for k in self._slot_cache if k < self._cache_lo]:
-                self._slot_cache.pop(k, None)
-        return out
+        if not self.enabled:
+            return []
+        return [s for s in self.systems if s.alive(now)]
 
     # -- what an airport sees ------------------------------------------
     def at(self, iata: str, now: float, systems: Optional[list] = None) -> AirportWeather:
@@ -610,7 +688,7 @@ class WeatherModel:
         stops the basin model producing one.
         """
         climate = self.climates.get(iata)
-        if climate is None:
+        if climate is None or not self.enabled:
             return AirportWeather(iata, WeatherKind.CLEAR, 0.0, 1.0, 0.0, False)
         systems = self.active(now) if systems is None else systems
         day_of_year = (now / 24.0) % 365.0
@@ -623,7 +701,11 @@ class WeatherModel:
             eff = s.effect_at(climate.lat, climate.lon, now)
             if eff <= 0.02:
                 continue
-            eff *= self._susceptibility(climate, s.kind, day_of_year)
+            # Clamped: an INJECTED system carries a pre-susceptibility peak
+            # that can exceed 1.0 so the requested intensity survives the gate,
+            # and nothing downstream should ever see an effect above full.
+            eff = min(1.0, eff * self._susceptibility(climate, s.kind, day_of_year,
+                                                      s.forced))
             if eff <= 0.02:
                 continue
             prof = KIND_PROFILE[s.kind]
@@ -652,13 +734,87 @@ class WeatherModel:
                               capacity_factor=max(0.0, min(1.0, capacity)),
                               delay_h=delay, closed=closed, systems=tuple(blamed))
 
+    def over(self, iata: str, now: float, dt: float,
+             samples: Optional[int] = None) -> AirportWeather:
+        """
+        The sky over an airport ACROSS a whole tick, not at its first instant.
+
+        A thunderstorm lives about six hours. Sampled once per 24-hour tick it
+        is usually invisible — born and dead between two looks — so a coarse
+        run saw almost no weather while a fine one saw plenty, and the
+        explorer's weather knob looked inert. Averaging capacity and delay over
+        the tick makes a six-hour storm inside a 24-hour day cost about a
+        quarter of that day's capacity, which is both the honest answer and
+        the one that doesn't depend on resolution.
+
+        `closed` is sticky: if the field was shut for any part of the window it
+        counts as a closure, because the flights in that window didn't operate.
+        """
+        n = samples if samples is not None else max(1, min(6, int(round(dt))))
+        if n <= 1:
+            return self.at(iata, now)
+        # Systems alive anywhere in the window, gathered once. Each sample then
+        # evaluates them at its own instant, so movement is still honoured.
+        window = [s for s in self.systems
+                  if s.born_at <= now + dt and s.born_at + s.life_h >= now] \
+            if self.enabled else []
+        cap = delay = 0.0
+        worst_kind, worst_i, closed = WeatherKind.CLEAR, 0.0, False
+        blamed: set = set()
+        for i in range(n):
+            t = now + dt * (i + 0.5) / n
+            w = self.at(iata, t, window)
+            cap += w.capacity_factor
+            delay += w.delay_h
+            closed = closed or w.closed
+            if w.intensity > worst_i:
+                worst_kind, worst_i = w.kind, w.intensity
+            blamed.update(w.systems)
+        return AirportWeather(iata=iata, kind=worst_kind, intensity=worst_i,
+                              capacity_factor=cap / n, delay_h=delay / n,
+                              closed=closed, systems=tuple(sorted(blamed)))
+
+    def _geo_susceptibility(self, climate: Climate, kind: WeatherKind) -> float:
+        """
+        Whether this airport's GEOGRAPHY can produce this kind at all, with no
+        seasonal term. Chicago scores high for blizzards in July — it is the
+        right place, in the wrong month — while Miami scores zero in any month.
+
+        Staged events use this, so "blizzard at my hub in week three" works
+        whatever week three happens to be, while "hurricane at Chicago" is
+        still refused as the impossibility it is.
+        """
+        if kind is WeatherKind.THUNDERSTORM:
+            return climate.convective
+        if kind is WeatherKind.RAIN:
+            return 0.55 + 0.45 * climate.fog_prone
+        if kind is WeatherKind.FOG:
+            return climate.fog_prone
+        if kind in (WeatherKind.SNOW, WeatherKind.BLIZZARD):
+            return climate.winter_severity
+        if kind is WeatherKind.ICING:
+            return climate.icing_belt
+        if kind is WeatherKind.HURRICANE:
+            return climate.hurricane_exposure
+        if kind is WeatherKind.WILDFIRE_SMOKE:
+            return climate.wildfire_exposure
+        if kind is WeatherKind.VOLCANIC_ASH:
+            return max(climate.ash_exposure, 0.6)
+        return 0.0
+
     def _susceptibility(self, climate: Climate, kind: WeatherKind,
-                        day_of_year: float) -> float:
+                        day_of_year: float, forced: bool = False) -> float:
         """
         How much this KIND of weather can affect THIS airport. The gate that
         keeps geography honest: a blizzard system passing over Florida does
         nothing, because Florida's winter severity is zero.
+
+        A FORCED system skips the seasonal half — it was staged deliberately,
+        and refusing to simulate it because of the month would make the
+        explorer's event picker useless for nine months of the year.
         """
+        if forced:
+            return self._geo_susceptibility(climate, kind)
         if kind is WeatherKind.THUNDERSTORM:
             return climate.convective
         if kind is WeatherKind.RAIN:

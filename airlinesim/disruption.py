@@ -173,6 +173,22 @@ class WeatherSubsystem(Subsystem):
 
     def tick(self, world, players, dt: float, ctx: dict):
         now = world.sim_time
+        # Carry the stochastic process forward BEFORE anything reads the sky,
+        # so this tick's flying faces this tick's weather.
+        self.model.advance(now, dt)
+        if not self.model.enabled:
+            # Switched off mid-game (the explorer can do this at any node):
+            # clear the annotations so ops go back to flying a clear sky
+            # instead of being frozen at whatever the last storm left behind.
+            for p in players:
+                for op in p.route_ops:
+                    op.weather_capacity = 1.0
+                    op.weather_delay_h = 0.0
+                    op.weather_kind = ""
+                    op.weather_text = ""
+            ctx["weather_systems"] = []
+            ctx["weather_at"] = {}
+            return
         systems = self.model.active(now)
         ctx["weather_systems"] = systems
         # One lookup per airport per tick, shared by every op that touches it:
@@ -183,7 +199,10 @@ class WeatherSubsystem(Subsystem):
         def sky(iata):
             w = seen.get(iata)
             if w is None:
-                w = self.model.at(iata, now, systems)
+                # Averaged ACROSS the tick, not sampled at its first instant —
+                # otherwise a storm shorter than the tick is invisible and the
+                # amount of weather a game sees depends on its resolution.
+                w = self.model.over(iata, now, dt)
                 seen[iata] = w
             return w
 
@@ -402,8 +421,9 @@ class DisruptionSubsystem(Subsystem):
 # WIRING
 # ============================================================
 
-def attach_weather(world, engine, seed: int = 20260729,
-                   costs: DisruptionCosts = DEFAULT_COSTS) -> WeatherModel:
+def attach_weather(world, engine, seed=None,
+                   costs: DisruptionCosts = DEFAULT_COSTS,
+                   enabled: bool = True) -> WeatherModel:
     """
     Give a world weather. Builds the model over its airports and slots both
     subsystems into the pipeline at the two points that matter:
@@ -417,8 +437,13 @@ def attach_weather(world, engine, seed: int = 20260729,
     Opt-in on purpose: a world without it runs exactly as it did, which is
     what keeps the existing scenarios comparable and lets the weather
     scenario A/B the same world with and without a sky.
+
+    `seed=None` draws a fresh one, so each new game gets its own season.
+    Pass a seed to replay a specific one. `enabled=False` attaches the
+    machinery dormant, which is how the explorer can switch weather on at a
+    node partway down a branch.
     """
-    model = WeatherModel.for_world(world, seed=seed)
+    model = WeatherModel.for_world(world, seed=seed, enabled=enabled)
     world.weather = model
     engine.subsystems.insert(0, WeatherSubsystem(model, costs))
     engine.subsystems.append(DisruptionSubsystem(costs))

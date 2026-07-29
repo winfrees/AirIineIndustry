@@ -91,13 +91,16 @@ airlinesim run integration       # run a named scenario
   depreciation feeding the balance sheet.
 - **Competition.** A `ResourceArbiter` resolves contention over finite gates,
   fuel, and passenger demand between carriers each tick.
-- **Weather and disruption.** A deterministic, geographic weather model —
+- **Weather and disruption.** A probabilistic, geographic weather model —
   climate derived from each airport's real coordinates, with fronts,
   convection, snow, ice, fog, hurricanes, wildfire smoke and volcanic ash as
   systems that move across the map. It cuts airport capacity, cancels and
   delays flights, eats into crew duty limits so the *next* rotation is the one
   that fails, strands passengers into rebookings and hotel bills, and keeps a
   per-airport reliability record so an exposed hub costs you over a season.
+  Each new game draws its own season; the outcome explorer can switch weather
+  off or on at any node and stage named events — a blizzard at your hub in
+  week three — to compare against a sibling branch that didn't get one.
 - **Hourly clock.** The engine's tick length is a resolution knob and the
   simulation is independent of it: a month of flying comes out the same
   stepped in 24-hour, 6-hour or 1-hour slices.
@@ -200,7 +203,7 @@ simplifications:
   industry-shaped, not certified.
 - Crew positioning deadheads direct-to-base only; multi-hop routing and ferry
   (positioning) flights are not yet implemented.
-- Weather is a deterministic model whose climate comes from each airport's real
+- Weather is a probabilistic model whose climate comes from each airport's real
   coordinates, but every frequency, size and impact figure in it is a
   climate-*shaped* heuristic — no weather record is committed to this repo.
   `docs/weather-design.md` sets out how NOAA Climate Normals and BTS On-Time

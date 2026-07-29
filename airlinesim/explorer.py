@@ -50,6 +50,9 @@ from airlinesim.game import build_game_world, route_op_id
 # the explorer reports both so a changed dt can't silently redefine the unit.
 MAX_NODES = 400          # ~12 MB of state blobs for the demo world
 MAX_CYCLES_PER_EDGE = 3650   # ten sim years in one hop; beyond that, chain edges
+# The season a branch gets when it switches weather on from a clear world.
+# Fixed on purpose — see _apply_weather.
+EXPLORER_WEATHER_SEED = 20260729
 
 
 # ============================================================
@@ -156,6 +159,65 @@ def _apply_demand_scale(world, engine, m: Mutation):
                                 for s in dm.segments)
 
 
+def _apply_weather(world, engine, m: Mutation):
+    """
+    Turn weather on or off from this node forward (0 = off, 1 = on).
+
+    In the played game weather is a stochastic process nobody controls. In the
+    explorer it is a variable, and the first question anyone asks of a variable
+    is "what would this branch look like without it?" — so this is the switch
+    that answers it, applicable at ANY node rather than only at the root.
+
+    Attaching a model to a world that has none is deliberately supported: a
+    tree rooted on a clear world can still branch into a weathered one, so
+    "what does a storm cost me from here?" is one edge away.
+    """
+    from airlinesim.disruption import attach_weather
+    on = float(m.value) >= 0.5
+    model = getattr(world, "weather", None)
+    if model is None:
+        if not on:
+            return                       # already off; nothing to do
+        # FIXED seed, not a fresh one. A played game draws its season at
+        # random, but two sibling branches that both switch weather on have to
+        # face the SAME season or the comparison between them is noise rather
+        # than a result. Branches forked after a model already exists inherit
+        # its generator state through the pickle, so they agree automatically.
+        attach_weather(world, engine, seed=EXPLORER_WEATHER_SEED)
+        return
+    model.enabled = on
+
+
+def _apply_weather_event(world, engine, m: Mutation, kind_name: str):
+    """
+    Put one named event over one airport, right now, at a chosen intensity.
+
+    This is the explorer's real weather question: not "does weather matter on
+    average" but "what does a blizzard at my hub in week three do to me?" —
+    a specific, repeatable event on a branch, against a sibling branch that
+    didn't get one.
+    """
+    model = getattr(world, "weather", None)
+    if model is None:
+        raise ValueError("this world has no weather model — "
+                         "add a 'weather' mutation first")
+    intensity = float(m.value)
+    if not 0.0 <= intensity <= 1.0:
+        raise ValueError("event intensity must be between 0 and 1")
+    targets = (list(model.climates) if m.target in ("", "*") else [m.target])
+    unknown = [t for t in targets if t not in model.climates]
+    if unknown and m.target not in ("", "*"):
+        raise ValueError(f"'{m.target}' has no weather data — it needs "
+                         f"coordinates in the airport corpus")
+    hit = [t for t in targets
+           if model.inject(kind_name, t, world.sim_time, intensity) is not None]
+    if not hit:
+        # inject() refuses a pairing the geography cannot support, which is a
+        # real answer ("Chicago does not get hurricanes"), not a failure.
+        raise ValueError(f"{kind_name.lower().replace('_', ' ')} cannot occur at "
+                         f"'{m.target or '*'}' — that climate does not produce it")
+
+
 # kind -> (applier, needs_ctx, human label, unit hint, target kind)
 # `target kind` tells the GUI which picker to show: route ops, players,
 # airports, demand markets, or nothing at all.
@@ -166,7 +228,25 @@ MUTATION_KINDS: dict[str, tuple] = {
     "cash":         (_apply_cash, False, "Cash balance", "$", "player"),
     "fuel_price":   (_apply_fuel_price, False, "Fuel price ×", "×", "airport"),
     "demand_scale": (_apply_demand_scale, False, "Route demand ×", "×", "route"),
+    "weather":      (_apply_weather, False, "Weather on/off", "0|1", "none"),
 }
+
+# One knob per weather event, generated from the WeatherKind enum so the two
+# can't drift: adding a kind to the model adds it to the explorer's picker.
+# CLEAR is not an event you can stage.
+def _register_weather_events() -> None:
+    from airlinesim.weather import WeatherKind
+    for kind in WeatherKind:
+        if kind is WeatherKind.CLEAR:
+            continue
+        name = kind.name
+        label = name.replace("_", " ").title()
+        MUTATION_KINDS[f"weather_{name.lower()}"] = (
+            (lambda world, engine, m, _k=name: _apply_weather_event(world, engine, m, _k)),
+            False, f"Event: {label}", "intensity", "airport")
+
+
+_register_weather_events()
 
 
 def _find_ops(engine, target: str) -> list:

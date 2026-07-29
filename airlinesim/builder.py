@@ -89,11 +89,21 @@ def build_demo_world():
     """Return (world, engine) for a ready-to-run two-carrier simulation."""
     repo = SpecRepository()
     a320 = _a320(repo)
-    for code, name, rwy in [("ORG", "Origin Intl", 3800), ("HUB", "Hub Intl", 4000)]:
+    # The sandbox's two airports are fictional, but they need real POSITIONS:
+    # weather is geographic, so an airport at (0, 0) gets no climate and no
+    # weather at all — which left the demo world unable to demonstrate any of
+    # it, and the explorer's weather knobs inert on the tree it roots by
+    # default. These sit on the real continental interior, ~1,430 km apart,
+    # which agrees with the 1,500 km the route spec declares and gives the
+    # sandbox a genuine winter.
+    for code, name, rwy, lat, lon in [
+            ("ORG", "Origin Intl", 3800, 39.86, -104.67),
+            ("HUB", "Hub Intl", 4000, 41.98, -87.90)]:
         repo._tables[AirportSpec][code] = AirportSpec(
             spec_id=code, display_name=name, iata=code, runway_length_m=rwy,
             total_gates=20, has_maintenance_facility=True,
-            facility_max_class=PlaneClass.WIDEBODY, fuel_supply_per_day_l=3_000_000)
+            facility_max_class=PlaneClass.WIDEBODY, fuel_supply_per_day_l=3_000_000,
+            lat=lat, lon=lon)
     eqr = EquipmentRequirements(1500, 2500, PlaneClass.NARROWBODY, 120, 240)
     out_r = RouteSpec(spec_id="ORG-HUB", display_name="Out", origin_iata="ORG", dest_iata="HUB",
                       distance_km=1500, base_demand_per_day=900,

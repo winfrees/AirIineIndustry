@@ -26,8 +26,8 @@ constraint enforcement — not partial stubs.
       finance_cabin.py  # cabin classes + seat layout; financing/banking; depreciation
       cabin.py          # cabin GEOMETRY: pitch/abreast per class, row-snapping
                         #   seat fitter, named cabin presets
-      weather.py        # deterministic geographic weather: climate from lat/lon,
-                        #   moving systems, per-airport sky
+      weather.py        # probabilistic geographic weather: climate from lat/lon,
+                        #   a stochastic process of moving systems, per-airport sky
       disruption.py     # what weather COSTS: cancellations, delays, crew
                         #   timeouts, stranded pax, hotels, airport reliability
       builder.py        # build_demo_world() / run() convenience entry points
@@ -278,12 +278,38 @@ touching `weather.py`, `disruption.py`, or anything that scales with `dt`.
   *detail*. Saves written with the old day-rate are converted on load
   (`_LEGACY_MAX_DAYS_PER_S`); without that a resumed game runs 24x slow and
   reads as frozen.
-- **Weather is DETERMINISTIC, and that is load-bearing.** Every system is a
-  pure function of `(seed, time slot, basin)` — nothing is stored, nothing is
-  rolled. That is what lets the explorer fork a state, replay it, and get the
-  same storms, so two branches differ only by the decisions taken. It uses
-  **blake2b, not `hash()`**: string hashing is salted per process, so a model
-  built on `hash()` would generate a different climate in every process.
+- **Weather is PROBABILISTIC but REPRODUCIBLE, and the distinction is the
+  whole design.** `WeatherModel.advance()` is a stochastic process: each tick
+  it retires dead systems and rolls for new ones, so a player cannot learn
+  next week's storms and two playthroughs of the same opening diverge. The
+  draws come from `WeatherModel.rng` and the live systems live on the model —
+  BOTH pickle with the world, so a save resumes into the weather it would have
+  had and an explorer fork replays its parent's season exactly. That is what
+  `scenario_explorer`'s "identical branches produce identical outcomes" check
+  actually needs: reproducibility on fork, not predictability. `engine.py`
+  still contains no `random` call; the randomness lives in state the world
+  owns. Never reach for `hash()` here — it is salted per process.
+- **A new game draws a fresh seed** (`DEFAULT_WEATHER_SEED = None`), so each
+  playthrough gets its own season. The explorer attaches at a FIXED seed
+  (`EXPLORER_WEATHER_SEED`) instead, because two sibling branches that both
+  switch weather on have to face the same season or the comparison between
+  them is noise rather than a result.
+- **The explorer can switch weather on or off at ANY node** (`weather` = 0/1,
+  which attaches a model to a clear world if there isn't one) and can STAGE a
+  named event at an airport (`weather_<kind>`, one knob per `WeatherKind`,
+  generated from the enum so the two can't drift). A staged event obeys
+  GEOGRAPHY but not the calendar — a blizzard at ORD in July is a legitimate
+  what-if, a hurricane at ORD is refused with a reason rather than staged as a
+  silent no-op. Its `intensity` is what gets DELIVERED at the target, so the
+  system is sized to overcome the local susceptibility gate.
+- **The sky is averaged ACROSS a tick, not sampled at its first instant**
+  (`WeatherModel.over()`). A thunderstorm lives ~6h: sampled once per 24-hour
+  tick it was usually born and dead between two looks, so a coarse run saw
+  almost no weather and the explorer's weather knob looked inert.
+- **Spawn draws scale with `dt`, and a long tick gets MULTIPLE draws** rather
+  than one draw at a scaled-up probability — folding the scale into a single
+  Bernoulli saturates at `p > 1` and quietly produced *less* weather at coarse
+  resolution than at fine.
 - **Weather is opt-in** (`disruption.attach_weather(world, engine)`), ON for a
   played game and OFF for every existing scenario, which is what keeps them
   comparable. It needs geography: airports with no lat/lon get no weather, so

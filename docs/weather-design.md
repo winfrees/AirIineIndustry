@@ -65,19 +65,52 @@ reason to model geography rather than roll dice per airport.
 give a capacity multiplier, a delay, and possibly a closure. A blizzard
 passing over Miami does nothing, because Miami's winter severity is zero.
 
-### Determinism is load-bearing
+### Probabilistic, and still reproducible
 
-`engine.py` has no `random` call and `explorer.py` depends on it. So weather
-is a **pure function of `(seed, time slot, basin)`** — every system that will
-ever exist is derived from the clock on demand, nothing is stored, and a
-forked-and-replayed world faces identical storms. Two branches in the
-explorer therefore differ only by the decisions taken, which is what makes
-them comparable.
+Weather is a **stochastic process**. `WeatherModel.advance()` runs each tick:
+retire the systems that have died, roll for new ones against season- and
+geography-dependent probabilities. A player cannot know next week's storms,
+and two playthroughs of the same opening diverge — weather is a risk to hedge,
+not a timetable to learn. A new game draws a fresh seed.
 
-The noise source is **blake2b, not Python's `hash()`**. String hashing is
-salted per process, so a model built on it would generate a different climate
-in every process — including between the explorer's parent and child runs.
-`airlinesim run weather` asserts stability.
+That does not cost the explorer anything, because what it needs is
+*reproducibility on fork*, not predictability. The draws come from
+`WeatherModel.rng` and the live systems are stored on the model; both pickle
+with the world. Forking a node copies the generator state, so re-running a
+branch replays the identical season and two branches differ only by the
+decisions taken — exactly what `scenario_explorer` asserts. `engine.py` still
+contains no `random` call; the randomness lives in state the world owns.
+
+Three subtleties, each of which was a bug first:
+
+1. **The sky is averaged across a tick**, not sampled at its first instant. A
+   thunderstorm lives ~6 h, so at 24-hour resolution it was usually born and
+   dead between two looks — a coarse run saw almost no weather and the
+   explorer's weather knob looked inert.
+2. **A tick longer than one spawn slot gets multiple draws**, not one draw at
+   a scaled-up probability. Folding the scale into a single Bernoulli
+   saturates at `p > 1`, so coarse resolution quietly produced *less* weather
+   than fine.
+3. **Weather realizations are NOT resolution-independent**, and this is not a
+   bug to fix. Different tick sizes consume different numbers of draws, so
+   they sample different seasons. The dt-independence guarantee is about the
+   *engine* — carriage, cash and fuel with weather off — and that is what
+   `airlinesim run weather` asserts.
+
+### Explorer controls
+
+Weather is a variable there rather than a fact:
+
+| knob | what it does |
+|---|---|
+| `weather` = 0/1 | switch weather off or on **at any node**; switching it on attaches a model to a clear world at a FIXED seed, so two sibling branches face the same season and the comparison between them is a result rather than noise |
+| `weather_<kind>` | stage a named event (blizzard, hurricane, icing, ash, …) over a chosen airport at a chosen intensity — one knob per `WeatherKind`, generated from the enum so the picker cannot drift from the model |
+
+A staged event obeys **geography but not the calendar**: a blizzard at ORD in
+July is a legitimate what-if, while a hurricane at ORD is refused with a
+reason rather than staged as a silent no-op. Its intensity is what gets
+*delivered* at the target, so the system is sized to overcome the local
+susceptibility gate.
 
 ### Calibration, and what it cost to get right
 

@@ -8,8 +8,10 @@ Pins the whole chain the weather work added:
                  whether it is stepped in 24h, 6h or 1h slices. This is the
                  foundation everything else rests on, and it is what two
                  per-day-spent-per-tick bugs used to break.
-  2. DETERMINISM the same seed gives the same storms, in this process and the
-                 next one. explorer.py's whole premise depends on it.
+  2. PROBABILISTIC weather is a stochastic process, so a new game gets a new
+                 season — but it is REPRODUCIBLE: same seed replays, and a
+                 fork carries the generator state so two explorer branches
+                 face the same weather and differ only by their decisions.
   3. GEOGRAPHY   climate comes out of latitude and coastline: the north gets
                  snow, the Gulf coast gets convection and hurricanes, the
                  west gets fire smoke, and Miami never sees a blizzard.
@@ -22,6 +24,7 @@ Pins the whole chain the weather work added:
 Run:  airlinesim run weather
 """
 import collections
+import pickle
 
 from airlinesim.builder import build_demo_world
 from airlinesim.databuilder import build_world_from_data
@@ -89,42 +92,84 @@ def check_clock():
 # ------------------------------------------------------------------
 # 2 — determinism
 # ------------------------------------------------------------------
-def check_determinism():
-    print("\n=== DETERMINISM ===")
-    a = WeatherModel(seed=7)
-    b = WeatherModel(seed=7)
-    c = WeatherModel(seed=8)
-    for m in (a, b, c):
-        m.add_airport("ORD", 41.98, -87.90)
-        m.add_airport("MIA", 25.79, -80.29)
+def _season_of(model, hours=24 * 60):
+    """Run a model's process forward and record what the sky did."""
+    out = []
+    for h in range(hours):
+        model.advance(float(h), 1.0)
+        w = model.at("ORD", float(h))
+        out.append((w.kind.name, round(w.capacity_factor, 6), round(w.delay_h, 6)))
+    return out
 
-    sa = [(w.kind.name, round(w.capacity_factor, 6), round(w.delay_h, 6))
-          for w in (a.at("ORD", float(h)) for h in range(0, 24 * 60))]
-    sb = [(w.kind.name, round(w.capacity_factor, 6), round(w.delay_h, 6))
-          for w in (b.at("ORD", float(h)) for h in range(0, 24 * 60))]
-    sc = [(w.kind.name, round(w.capacity_factor, 6), round(w.delay_h, 6))
-          for w in (c.at("ORD", float(h)) for h in range(0, 24 * 60))]
-    check("the same seed produces identical weather", sa == sb,
-          f"{len(sa)} hours compared")
-    check("a different seed produces different weather", sa != sc)
 
-    # Out-of-order access must not change anything: the explorer forks and
-    # replays, so asking about hour 500 before hour 3 has to be safe.
-    d = WeatherModel(seed=7)
-    d.add_airport("ORD", 41.98, -87.90)
-    shuffled = {}
-    for h in list(range(0, 24 * 60))[::-1]:
-        w = d.at("ORD", float(h))
-        shuffled[h] = (w.kind.name, round(w.capacity_factor, 6), round(w.delay_h, 6))
-    check("weather doesn't depend on the order it's asked about",
-          [shuffled[h] for h in range(0, 24 * 60)] == sa)
+def _model(seed):
+    m = WeatherModel(seed=seed)
+    m.add_airport("ORD", 41.98, -87.90)
+    m.add_airport("MIA", 25.79, -80.29)
+    return m
 
-    # hash() would be salted per process; blake2b is not. This is the property
-    # that makes a save reproducible on another machine.
-    from airlinesim.weather import _h01
-    check("the noise source is stable, not process-salted",
-          abs(_h01("airlinesim", 1, "check") - 0.5) < 0.5
-          and _h01("a", 1) == _h01("a", 1) and _h01("a", 1) != _h01("a", 2))
+
+def check_probabilistic():
+    print("\n=== PROBABILISTIC, AND REPRODUCIBLE ===")
+    # Probabilistic: an unseeded model is a fresh season every time, so a
+    # player cannot learn next week's weather from last playthrough's.
+    seasons = [_season_of(WeatherModel(climates=_model(1).climates)) for _ in range(3)]
+    check("an unseeded model draws a different season each time",
+          len({tuple(s) for s in seasons}) == 3,
+          f"{len({tuple(s) for s in seasons})} distinct seasons from 3 models")
+
+    # Reproducible: the same seed replays exactly. This is what makes a SAVE
+    # resume into the weather it would have had.
+    a, b, c = _season_of(_model(7)), _season_of(_model(7)), _season_of(_model(8))
+    check("the same seed replays the same season", a == b, f"{len(a)} hours compared")
+    check("a different seed gives a different season", a != c)
+
+    # The explorer's actual requirement: fork mid-season and both halves
+    # continue identically. The generator state travels in the pickle.
+    m = _model(11)
+    for h in range(24 * 30):
+        m.advance(float(h), 1.0)
+    forked_a = pickle.loads(pickle.dumps(m))
+    forked_b = pickle.loads(pickle.dumps(m))
+
+    def continue_from(model):
+        out = []
+        for h in range(24 * 30, 24 * 60):
+            model.advance(float(h), 1.0)
+            w = model.at("ORD", float(h))
+            out.append((w.kind.name, round(w.capacity_factor, 6)))
+        return out
+
+    check("forking mid-season and replaying gives identical weather",
+          continue_from(forked_a) == continue_from(forked_b),
+          "720 hours after a 30-day fork")
+    check("a fork carries the generator state, not just the seed",
+          forked_a.rng.getstate() != WeatherModel(seed=11).rng.getstate())
+
+    # Switching off has to actually clear the sky, not freeze it.
+    off = _model(7)
+    for h in range(24 * 10):
+        off.advance(float(h), 1.0)
+    off.enabled = False
+    w = off.at("ORD", 24 * 10.0)
+    check("disabling weather reports a clear sky",
+          w.kind is WeatherKind.CLEAR and w.capacity_factor == 1.0
+          and not w.disrupted and off.active(24 * 10.0) == [])
+
+    # Staged events: geography is respected, the calendar is not.
+    jul = _model(3)
+    jul.advance(0.0, 1.0)
+    summer = 24 * 200.0
+    check("a staged blizzard works out of season at a northern airport",
+          jul.inject("BLIZZARD", "ORD", summer, 0.9) is not None)
+    check("a staged hurricane is refused where the geography can't produce one",
+          jul.inject("HURRICANE", "ORD", summer, 0.9) is None)
+    check("a staged hurricane IS allowed on the hurricane coast",
+          jul.inject("HURRICANE", "MIA", summer, 0.9) is not None)
+    staged = jul.at("ORD", summer + 6.0)
+    check("a staged event delivers roughly the intensity it was asked for",
+          staged.intensity > 0.5,
+          f"asked 0.9 out of season, delivered {staged.intensity:.2f}")
 
 
 # ------------------------------------------------------------------
@@ -164,26 +209,32 @@ def check_geography():
 
     # A year of weather, to confirm the seasons land in the right months and
     # that each airport's disruption is dominated by the right thing.
+    # The model is a PROCESS now, so it has to be driven forward rather than
+    # queried at arbitrary times: one pass over the year, advancing as it goes,
+    # sampling every airport at each step.
     m = WeatherModel(seed=42)
     for k, (la, lo) in spots.items():
         m.add_airport(k, la, lo)
-    profile = {}
-    for k in spots:
-        kinds = collections.Counter()
-        winter_bad = summer_bad = 0
-        for h in range(0, 24 * 365, 2):
+    kinds = {k: collections.Counter() for k in spots}
+    winter = {k: 0 for k in spots}
+    summer = {k: 0 for k in spots}
+    step = 2.0
+    for h in range(0, 24 * 365, int(step)):
+        m.advance(float(h), step)
+        day = (h / 24.0) % 365
+        for k in spots:
             w = m.at(k, float(h))
             if not w.disrupted:
                 continue
-            kinds[w.kind.name] += 1
-            day = (h / 24.0) % 365
+            kinds[k][w.kind.name] += 1
             if day < 60 or day > 330:
-                winter_bad += 1
+                winter[k] += 1
             elif 150 < day < 240:
-                summer_bad += 1
-        profile[k] = (kinds, winter_bad, summer_bad)
-        print(f"  {k}: {dict(kinds.most_common(3))}  winter-hit {winter_bad} "
-              f"summer-hit {summer_bad}")
+                summer[k] += 1
+    profile = {k: (kinds[k], winter[k], summer[k]) for k in spots}
+    for k in spots:
+        print(f"  {k}: {dict(kinds[k].most_common(3))}  winter-hit {winter[k]} "
+              f"summer-hit {summer[k]}")
 
     check("a northern hub is disrupted more in winter than in summer",
           profile["MSP"][1] > profile["MSP"][2],
@@ -274,7 +325,7 @@ def main():
     print("WEATHER + DISRUPTION CHECK")
     print("=" * 70)
     check_clock()
-    check_determinism()
+    check_probabilistic()
     check_geography()
     check_impact()
     passed = sum(1 for _, ok in CHECKS if ok)

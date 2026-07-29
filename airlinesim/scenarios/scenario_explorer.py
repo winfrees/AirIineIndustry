@@ -57,16 +57,51 @@ def main():
         "cash":         ("*", 1e6, 9e6),
         "fuel_price":   ("*", 0.5, 3.0),
         "demand_scale": ("*", 0.4, 1.0),
+        # Weather off vs on. The tree roots on a clear world, so "on" attaches
+        # a model at a fixed seed — which is what makes two weathered branches
+        # comparable rather than two different seasons.
+        "weather":      ("*", 0, 1),
     }
-    assert set(probes) == set(MUTATION_KINDS), "probe list drifted from MUTATION_KINDS"
+    # Staged weather events are one knob per kind, generated from WeatherKind,
+    # so this probe list is generated the same way and cannot drift from it.
+    # Each is checked against a target its geography can actually produce.
+    event_targets = {
+        "weather_rain": "HUB", "weather_fog": "HUB",
+        "weather_thunderstorm": "HUB", "weather_snow": "HUB",
+        "weather_icing": "HUB", "weather_blizzard": "HUB",
+        "weather_wildfire_smoke": "ORG", "weather_volcanic_ash": "ORG",
+        # The sandbox is continental, so nowhere in it gets a hurricane. That
+        # is a correct refusal rather than a dead knob, and it is asserted
+        # separately below instead of probed for sensitivity here.
+    }
+    for kind, target in event_targets.items():
+        probes[kind] = (target, 0.05, 0.95)
+    unprobed = set(MUTATION_KINDS) - set(probes) - {"weather_hurricane"}
+    assert not unprobed, f"probe list drifted from MUTATION_KINDS: {unprobed}"
     for kind, (target, lo, hi) in probes.items():
-        n_lo = tree.branch(tree.root_id, (Mutation(kind, target, lo),), cycles=45)
-        n_hi = tree.branch(tree.root_id, (Mutation(kind, target, hi),), cycles=45)
+        # A staged event needs a sky to be staged into, and the tree roots on a
+        # clear world — so the event probes switch weather on in the same edge.
+        pre = (Mutation("weather", "*", 1),) if kind.startswith("weather_") else ()
+        n_lo = tree.branch(tree.root_id, pre + (Mutation(kind, target, lo),), cycles=45)
+        n_hi = tree.branch(tree.root_id, pre + (Mutation(kind, target, hi),), cycles=45)
         w_lo, w_hi = _human(n_lo)["net_worth"], _human(n_hi)["net_worth"]
         moved = w_lo != w_hi
         print(f"  {kind:13s} {lo:>8g} -> ${w_lo/1e6:7.3f}M | "
               f"{hi:>8g} -> ${w_hi/1e6:7.3f}M  {'move' if moved else 'NO EFFECT'}")
         checks.append((f"'{kind}' changes the outcome", moved))
+
+    # A staged event the geography cannot produce is REFUSED with a reason,
+    # not silently staged as a no-op the user would have to diagnose from an
+    # unchanged number. The sandbox is continental, so it gets no hurricanes.
+    refused = False
+    try:
+        tree.branch(tree.root_id,
+                    (Mutation("weather", "*", 1),
+                     Mutation("weather_hurricane", "HUB", 0.9)), cycles=2)
+    except ValueError as e:
+        refused = "hurricane" in str(e).lower()
+    checks.append(("an impossible weather event is refused, not staged as a no-op",
+                   refused))
 
     # -- 4. sweeps and the node cap -------------------------------------
     small = ScenarioTree(max_nodes=8)
