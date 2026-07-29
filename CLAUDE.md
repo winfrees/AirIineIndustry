@@ -26,6 +26,10 @@ constraint enforcement — not partial stubs.
       finance_cabin.py  # cabin classes + seat layout; financing/banking; depreciation
       cabin.py          # cabin GEOMETRY: pitch/abreast per class, row-snapping
                         #   seat fitter, named cabin presets
+      weather.py        # probabilistic geographic weather: climate from lat/lon,
+                        #   a stochastic process of moving systems, per-airport sky
+      disruption.py     # what weather COSTS: cancellations, delays, crew
+                        #   timeouts, stranded pax, hotels, airport reliability
       builder.py        # build_demo_world() / run() convenience entry points
       cli.py            # `airlinesim` command (list / run / demo / probe)
       routedata.py      # RUNTIME provider: 3-tier historic/comparable lookup
@@ -79,6 +83,7 @@ constraint enforcement — not partial stubs.
     airlinesim run refresh_cx        # corpus-refresh logic (offline)
     airlinesim run explorer          # outcome-explorer + engine-determinism check
     airlinesim run cabin             # cabin geometry, seat fitting, per-cabin fares
+    airlinesim run weather           # clock resolution, weather, disruption chain
     airlinesim run session           # real-time clock guard + log rotation
     airlinesim gui                   # play it in a browser; defaults to --world data
     airlinesim gui --world demo      # the two-airport sandbox instead
@@ -252,6 +257,85 @@ demand code.
 - Frequency is derived from measured demand and capped by airframe hours. Cabin
   duty limits then trim it further on most trunk ops — the data-implied frequency
   genuinely meets the duty envelope.
+
+## Time resolution, weather and disruption
+
+Design and the road to real data: `docs/weather-design.md`. Read it before
+touching `weather.py`, `disruption.py`, or anything that scales with `dt`.
+
+- **`engine.dt` is HOURS PER TICK and is a real knob.** The engine is
+  dt-independent: a simulated month gives the same carriage and cash at 24 h,
+  6 h or 1 h resolution, and `airlinesim run weather` asserts it. Scenarios
+  keep the 24 h default; a played game runs hourly.
+- **Anything that consumes a DAILY budget must scale by `dt / 24`.** Two
+  things didn't, and both broke the moment ticks were sub-day: the gate claim
+  asked for a whole day's frequency every tick (an airport's gates were gone
+  before noon, every carrier's frequency collapsed to zero), and a deadheading
+  crew's seat reservation was subtracted whole from a tick-sized cabin (6 of
+  the 7.5 seats an hourly tick offers). Both are fixed and pinned.
+- **`GameSession.speed` is sim HOURS per real second**, not days. Rate and
+  resolution are independent knobs — the GUI exposes them as *speed* and
+  *detail*. Saves written with the old day-rate are converted on load
+  (`_LEGACY_MAX_DAYS_PER_S`); without that a resumed game runs 24x slow and
+  reads as frozen.
+- **Weather is PROBABILISTIC but REPRODUCIBLE, and the distinction is the
+  whole design.** `WeatherModel.advance()` is a stochastic process: each tick
+  it retires dead systems and rolls for new ones, so a player cannot learn
+  next week's storms and two playthroughs of the same opening diverge. The
+  draws come from `WeatherModel.rng` and the live systems live on the model —
+  BOTH pickle with the world, so a save resumes into the weather it would have
+  had and an explorer fork replays its parent's season exactly. That is what
+  `scenario_explorer`'s "identical branches produce identical outcomes" check
+  actually needs: reproducibility on fork, not predictability. `engine.py`
+  still contains no `random` call; the randomness lives in state the world
+  owns. Never reach for `hash()` here — it is salted per process.
+- **A new game draws a fresh seed** (`DEFAULT_WEATHER_SEED = None`), so each
+  playthrough gets its own season. The explorer attaches at a FIXED seed
+  (`EXPLORER_WEATHER_SEED`) instead, because two sibling branches that both
+  switch weather on have to face the same season or the comparison between
+  them is noise rather than a result.
+- **The explorer can switch weather on or off at ANY node** (`weather` = 0/1,
+  which attaches a model to a clear world if there isn't one) and can STAGE a
+  named event at an airport (`weather_<kind>`, one knob per `WeatherKind`,
+  generated from the enum so the two can't drift). A staged event obeys
+  GEOGRAPHY but not the calendar — a blizzard at ORD in July is a legitimate
+  what-if, a hurricane at ORD is refused with a reason rather than staged as a
+  silent no-op. Its `intensity` is what gets DELIVERED at the target, so the
+  system is sized to overcome the local susceptibility gate.
+- **The sky is averaged ACROSS a tick, not sampled at its first instant**
+  (`WeatherModel.over()`). A thunderstorm lives ~6h: sampled once per 24-hour
+  tick it was usually born and dead between two looks, so a coarse run saw
+  almost no weather and the explorer's weather knob looked inert.
+- **Spawn draws scale with `dt`, and a long tick gets MULTIPLE draws** rather
+  than one draw at a scaled-up probability — folding the scale into a single
+  Bernoulli saturates at `p > 1` and quietly produced *less* weather at coarse
+  resolution than at fine.
+- **Weather is opt-in** (`disruption.attach_weather(world, engine)`), ON for a
+  played game and OFF for every existing scenario, which is what keeps them
+  comparable. It needs geography: airports with no lat/lon get no weather, so
+  the demo sandbox has none and the corpus world does.
+- **Ordering matters.** `WeatherSubsystem` runs FIRST and only annotates ops
+  with the capacity/delay they face; `DisruptionSubsystem` runs LAST, after
+  Operations has recorded what actually flew. Operations stays the single
+  authority on how much flying happens — a version that cancelled flights in
+  the weather subsystem would have two authorities on one number.
+- **The indirect path is the point.** Weather delay is added to
+  `fh_per_rotation` inside the crew-legality gate, so a delay eats the duty
+  day and the *next* rotation is the one that cancels. The delay is cheap; the
+  crew it strands is not.
+- **Climate is derived from MEASURED lat/lon; everything else is HEURISTIC.**
+  No weather record is committed to this repo. Five calibration errors were
+  fixed and are documented in the design doc — the two worth remembering are
+  that continentality and hurricane exposure must be measured to the OCEAN
+  (measuring to any water made Chicago maritime and gave it hurricanes), and
+  that convection needs a Gulf-moisture term or Los Angeles storms like
+  Atlanta.
+- **Rebooking is same-tick, same-market only** — about 7% of stranded
+  passengers on a corpus world, the rest refunded. That OVERSTATES the cost;
+  a real recovery model carries passengers forward over days and searches
+  alternate routings. Listed with the other honest limits in the design doc,
+  along with the big one: a cancelled flight leaves its aircraft in the right
+  place anyway.
 
 ## Cabins: geometry, fitting and per-cabin fares
 

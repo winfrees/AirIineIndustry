@@ -289,3 +289,6 @@ dialog {
 }
 dialog::backdrop { background: rgba(4, 10, 18, 0.7); }
 dialog h2 { margin-top: 0; }
+
+/* the hour beside the day in the topbar clock */
+.hour { color: var(--muted); font-variant-numeric: tabular-nums; }

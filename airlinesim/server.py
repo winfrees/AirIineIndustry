@@ -385,9 +385,17 @@ def make_handler(hub: Hub):
             elif action == "resume":
                 gs.resume()
             elif action == "speed":
+                # sim HOURS per real second
                 gs.set_speed(body.get("value", gs.speed))
+            elif action == "resolution":
+                gs.set_tick_hours(body.get("value", gs.engine.dt))
             elif action == "advance":
-                gs.advance_days(body.get("days", 1))
+                # `hours` is the native form; `days` stays accepted so an older
+                # client (or a saved bookmark) still fast-forwards correctly.
+                if "hours" in body:
+                    gs.advance_hours(body.get("hours", 1))
+                else:
+                    gs.advance_days(body.get("days", 1))
             else:
                 self._send_json({"ok": False, "message": f"unknown action {action}"}, status=400)
                 return

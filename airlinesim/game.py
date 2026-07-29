@@ -33,6 +33,7 @@ from airlinesim.engine import (
     CrewType,
 )
 from airlinesim.cabin import CABIN_ORDER, fit_report, geometry_for, presets_for
+from airlinesim.disruption import airport_reliability, disruption_snapshot
 from airlinesim.finance_cabin import (
     DEFAULT_SEAT_CLASSES, cabin_slots_for,
     AcquisitionMethod, FinancingTerms, Bank, aircraft_value,
@@ -41,6 +42,24 @@ from airlinesim import actions, gamelog
 from airlinesim.builder import build_demo_world
 
 log = gamelog.get("session")
+
+# A played game steps the world hourly and passes a day of game time every
+# real second. Resolution and rate are separate knobs: DEFAULT_TICK_HOURS is
+# how finely the world is simulated, DEFAULT_SPEED_H_PER_S is how fast it goes.
+DEFAULT_TICK_HOURS = 1.0
+DEFAULT_SPEED_H_PER_S = 24.0
+# None means "draw a fresh seed", so every new game gets its own season and
+# weather is a genuine risk rather than a schedule to be learned. Pass an
+# explicit seed to replay a particular season. Either way the seed and the
+# generator state pickle with the world, so a save — and an explorer fork —
+# reproduces the weather it would have had.
+DEFAULT_WEATHER_SEED = None
+
+# The old speed slider ran 0.1-5.0 sim-DAYS per real second. A stored speed
+# inside that range is read as a legacy day-rate and converted to hours on
+# load; above it, the value is already hours. 5 h/s and below is slower than
+# anything the hour slider offers, so nothing current is misread.
+_LEGACY_MAX_DAYS_PER_S = 5.0
 
 # -- real-time clock guards -------------------------------------------------
 # The loop wakes every TICK_POLL_S. A wall-clock gap much larger than that
@@ -75,6 +94,15 @@ def _fmt_args(args) -> str:
     parts = [repr(a) for a in args
              if isinstance(a, (str, int, float, bool, dict, tuple, type(None)))]
     return "(" + ", ".join(parts) + ")"
+
+
+def _fmt_sim_time(hours: float) -> str:
+    """A span of SIM time, in the largest unit that reads naturally."""
+    if hours < 48:
+        return f"{hours:,.0f} hour{'' if 0.5 <= hours < 1.5 else 's'}"
+    if hours < 24 * 365:
+        return f"{hours / 24:,.0f} days"
+    return f"{hours / (24 * 365):,.1f} years"
 
 
 def _fmt_gap(seconds: float) -> str:
@@ -157,7 +185,10 @@ def build_game_world(human_name: str = "You", ai_name: str = "SkyRival",
 def new_game(human_name: str = "You", ai_name: str = "SkyRival",
              ai_step_frac: float = 0.03, world: str = "demo",
              ai_profiles=None, hub: str = "ORD",
-             n_destinations: int = 5) -> "GameSession":
+             n_destinations: int = 5,
+             tick_hours: float = DEFAULT_TICK_HOURS,
+             weather: bool = True,
+             weather_seed=DEFAULT_WEATHER_SEED) -> "GameSession":
     """
     Build a ready-to-play game.
 
@@ -166,6 +197,11 @@ def new_game(human_name: str = "You", ai_name: str = "SkyRival",
                      whole airlines (routes, fleet, cabins, service, crew).
                      Assign styles with ai_profiles={player_id: archetype};
                      see ai.ARCHETYPES.
+
+    `tick_hours` is the simulation RESOLUTION. A played game runs hourly so
+    weather, delays and duty timeouts land at a time of day; the scenarios keep
+    the engine's 24-hour default, where a day is the smallest interesting unit
+    and 24x the ticks would buy nothing.
     """
     w, engine, human_id = build_game_world(human_name, ai_name, ai_step_frac,
                                            world=world, ai_profiles=ai_profiles,
@@ -176,17 +212,42 @@ def new_game(human_name: str = "You", ai_name: str = "SkyRival",
         log.info("  start %-14s %s fleet=%d routes=%d cash=$%.0f",
                  p.name, "AI" if p.is_ai else "human",
                  len(p.fleet), len(p.route_ops), p.ledger.cash)
+    engine.dt = max(0.25, min(24.0, float(tick_hours)))
+    if weather:
+        # Weather is opt-in at the engine level (see disruption.attach_weather)
+        # but ON for a played game: the whole point of an hourly clock is that
+        # a storm can arrive during the afternoon and cost you the evening.
+        from airlinesim.disruption import attach_weather
+        model = attach_weather(w, engine, seed=weather_seed)
+        log.info("weather attached (seed=%d) over %d airports",
+                 model.seed, len(model.climates))
     return GameSession(w, engine, human_player_id=human_id)
 
 
 class GameSession:
+    """
+    Wraps a world + engine in a real-time clock.
+
+    The clock is denominated in SIM HOURS PER REAL SECOND. It used to be
+    sim-DAYS per real second, with one tick hard-wired to one day — which made
+    the finest thing the player could observe a whole day, and left no way to
+    express a three-hour weather delay or a crew timing out mid-afternoon.
+    `speed` is hours now, and the loop steps the engine at whatever resolution
+    `engine.dt` is set to, so the two are independent: how fast time passes and
+    how finely it is simulated are separate decisions.
+
+    Old saves pickled with a days-per-second `speed` are converted on load —
+    see `__setstate__`. Without that a resumed game would run 24x too slow and
+    look frozen.
+    """
+
     def __init__(self, world, engine, human_player_id: str,
-                 sim_days_per_real_second: float = 0.5,
+                 sim_hours_per_real_second: float = DEFAULT_SPEED_H_PER_S,
                  bankruptcy_floor: float = -5_000_000.0):
         self.world = world
         self.engine = engine
         self.human_player_id = human_player_id
-        self.speed = sim_days_per_real_second
+        self.speed = float(sim_hours_per_real_second)
         self.bankruptcy_floor = bankruptcy_floor
         self.paused = True   # start paused so the player can look around first
         self.game_over = False
@@ -219,6 +280,14 @@ class GameSession:
 
     def __setstate__(self, state):
         self.__dict__.update(state)
+        # Saves from before the clock was denominated in hours carry a speed in
+        # DAYS per second (0.1-5.0). Left alone, such a save resumes at ~0.5
+        # sim-hours per second — a day of game time every 48 real seconds,
+        # which reads as a hung clock rather than a slow one. Anything at or
+        # below the old slider's ceiling is a day-rate and is converted.
+        speed = getattr(self, "speed", 0.0)
+        if 0 < speed <= _LEGACY_MAX_DAYS_PER_S:
+            self.speed = speed * 24.0
         self._init_runtime()
 
     def stop(self):
@@ -252,13 +321,14 @@ class GameSession:
                     running = not (self.paused or self.game_over)
                     if running:
                         self.paused = True
-                        skipped = elapsed * self.speed
+                        skipped = elapsed * self.speed        # sim HOURS
                         self.clock_notice = (
                             f"Paused: the clock jumped {_fmt_gap(elapsed)} "
                             f"(computer asleep or process suspended). "
-                            f"{skipped:,.0f} simulated days were skipped rather "
-                            f"than fast-forwarded, so your fleet and routes are "
-                            f"as you left them. Press Resume to continue.")
+                            f"{_fmt_sim_time(skipped)} of simulated time was "
+                            f"skipped rather than fast-forwarded, so your fleet "
+                            f"and routes are as you left them. Press Resume to "
+                            f"continue.")
                         snap = self.snapshot()
                     log.warning("clock gap %.1fs on day %d — %s",
                                 elapsed, int(self.world.sim_time // 24),
@@ -275,11 +345,15 @@ class GameSession:
                     # Clamp even a normal gap: the lock is held for the whole
                     # catch-up burst, so an unbounded one freezes the command
                     # API and the SSE stream along with it.
+                    # _carry is in SIM HOURS owed; a tick spends engine.dt of
+                    # them. Keeping the debt in hours rather than ticks is what
+                    # lets tick resolution change without touching the clock.
                     self._carry += min(elapsed, MAX_CATCHUP_S) * self.speed
+                    step = max(1e-6, self.engine.dt)
                     ticks = 0
-                    while self._carry >= 1.0 and ticks < MAX_TICKS_PER_WAKE:
+                    while self._carry >= step and ticks < MAX_TICKS_PER_WAKE:
                         self.engine.tick(self.ctx)
-                        self._carry -= 1.0
+                        self._carry -= step
                         ticks += 1
                     if ticks >= MAX_TICKS_PER_WAKE:
                         # Speed is set faster than this process can simulate.
@@ -319,14 +393,32 @@ class GameSession:
                 log.info("resumed on day %d at %.2f days/s",
                          int(self.world.sim_time // 24), self.speed)
 
-    def set_speed(self, sim_days_per_real_second: float):
+    def set_speed(self, sim_hours_per_real_second: float):
         with self.lock:
-            self.speed = max(0.01, float(sim_days_per_real_second))
+            self.speed = max(0.1, float(sim_hours_per_real_second))
 
-    def advance_days(self, n: int = 1) -> dict:
-        """Manual fast-forward, independent of real-time/pause state."""
+    def set_tick_hours(self, hours: float):
+        """
+        Change simulation RESOLUTION without changing how fast time passes.
+        Finer ticks cost proportionally more CPU per simulated day and buy
+        sharper timing on anything that happens within a day — weather windows,
+        delays, a crew running out of duty hours mid-afternoon.
+        """
         with self.lock:
-            for _ in range(max(0, int(n))):
+            self.engine.dt = max(0.25, min(24.0, float(hours)))
+            self._carry = 0.0
+            return self.engine.dt
+
+    def advance_hours(self, hours: float) -> dict:
+        """
+        Manual fast-forward, independent of real-time/pause state. Runs whole
+        ticks, so the world lands on a tick boundary: asking for 5 hours at
+        6-hour resolution advances nothing, which is honest about what the
+        engine can actually resolve.
+        """
+        with self.lock:
+            step = max(1e-6, self.engine.dt)
+            for _ in range(int(max(0.0, float(hours)) / step)):
                 if self.game_over:
                     break
                 self.engine.tick(self.ctx)
@@ -335,6 +427,9 @@ class GameSession:
         if self.on_tick:
             self.on_tick(snap)
         return snap
+
+    def advance_days(self, n: int = 1) -> dict:
+        return self.advance_hours(max(0, int(n)) * 24.0)
 
     # -- win/loss -------------------------------------------------------
     def _net_worth(self, p) -> float:
@@ -520,6 +615,13 @@ class GameSession:
     def snapshot(self) -> dict:
         with self.lock:
             w = self.world
+            # Computed once for the whole snapshot: the weather lookup and the
+            # reliability roll-up are both per-airport, and the airports block
+            # below would otherwise call them inside a comprehension.
+            active = self._active_iatas()
+            model = getattr(w, "weather", None)
+            wx = model.snapshot(w.sim_time, active) if model else {}
+            rel = airport_reliability(w, active)
             return {
                 # Which build produced this state. The GUI shows it in the
                 # topbar so "which version am I actually running?" is read off
@@ -527,8 +629,13 @@ class GameSession:
                 "engine_version": _pkg_version(),
                 "sim_time_hours": w.sim_time,
                 "day": int(w.sim_time // 24),
+                # Hour of the simulated day. The clock is hours now, so the
+                # GUI can show when in the day something happened rather than
+                # only which day it was.
+                "hour": int(w.sim_time % 24),
                 "paused": self.paused,
-                "speed": self.speed,
+                "speed": self.speed,                      # sim hours / real second
+                "tick_hours": self.engine.dt,             # simulation resolution
                 "game_over": self.game_over,
                 "game_over_reason": self.game_over_reason,
                 # Non-empty when the loop caught the process being suspended.
@@ -545,9 +652,15 @@ class GameSession:
                     iata: {
                         "gates_used": gl.used(), "gates_total": gl.total_gates,
                         "fuel_spot": w.fuel[iata].spot_price() if iata in w.fuel else None,
+                        # live sky + the cumulative record, so a hub that
+                        # costs you every winter shows it
+                        "weather": wx.get(iata, {}),
+                        "reliability": rel.get(iata, {}),
                     } for iata, gl in w.gates.items()
-                    if iata in self._active_iatas()
+                    if iata in active
                 },
+                "weather_systems": (w.weather.system_snapshot(w.sim_time)
+                                    if getattr(w, "weather", None) else []),
             }
 
     def _active_iatas(self) -> set:
@@ -583,6 +696,7 @@ class GameSession:
             "hubs": list(getattr(p, "hub_iatas", [])),
             "log": list(p.log[-20:]),
             "ai_profile": self._ai_profile(p),
+            "disruption": disruption_snapshot(self.world, p),
         }
 
     def _ai_profile(self, p) -> Optional[dict]:
@@ -626,6 +740,11 @@ class GameSession:
             "service_tier": getattr(o, "service_tier", 2),
             "fees": getattr(o, "last_fees", 0.0),
             "data_tier": getattr(o.spec, "data_tier", ""),
+            # what the weather is doing to THIS route right now
+            "weather": getattr(o, "weather_text", ""),
+            "weather_capacity": round(getattr(o, "weather_capacity", 1.0), 3),
+            "weather_delay_h": round(getattr(o, "weather_delay_h", 0.0), 2),
+            "weather_cancelled": round(getattr(o, "last_weather_cancelled", 0.0), 2),
             # Per-cabin economics for the cabins the ASSIGNED aircraft has:
             # the fare being charged, whether that fare is the route's own or
             # the base-fare default, and how that cabin actually sold. This is

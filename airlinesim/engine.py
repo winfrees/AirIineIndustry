@@ -353,6 +353,17 @@ class RouteOp:
     # fees charged and the desirability passengers assign to this op.
     service_tier: int = 2
     last_fees: float = 0.0             # airport fees paid last tick
+    # --- weather, written by WeatherSubsystem before Operations runs ---
+    # capacity multiplier this tick (1.0 clear, 0.0 a closed field at either
+    # end) and the delay each operated flight carries. Defaults mean "no
+    # weather model attached", so a world without one behaves as before.
+    weather_capacity: float = 1.0
+    weather_delay_h: float = 0.0
+    weather_kind: str = ""
+    weather_text: str = ""
+    # written by DisruptionSubsystem after Operations
+    last_weather_cancelled: float = 0.0
+    last_weather_cost: float = 0.0
 
     def effective_layout(self):
         """The cabin this op sells: its own override, else the airframe's."""
@@ -1062,9 +1073,16 @@ class OperationsSubsystem(Subsystem):
                 gate_priority = op.ticket_price
                 if op.spec.dest_iata in getattr(p, "hub_iatas", ()):
                     gate_priority *= HUB_GATE_PRIORITY
+                # Claimed for the ROTATIONS THAT LAND IN THIS TICK, not for the
+                # whole day's schedule. GateLedger resets once per calendar day,
+                # so claiming the full daily frequency every tick consumed a
+                # day's gates every tick: at hourly ticks a 20-gate airport
+                # saturated by hour 20 and every carrier's effective frequency
+                # collapsed to zero. Harmless while a tick WAS a day; wrong the
+                # moment dt is anything else.
                 claims.append(Claim(p.player_id, ResourceKind.GATE, op.spec.dest_iata,
-                                    amount=op.daily_frequency, priority=gate_priority,
-                                    payload=op))
+                                    amount=op.daily_frequency * day_frac,
+                                    priority=gate_priority, payload=op))
                 # fuel claim
                 fh = (op.spec.distance_km / op.plane.spec.cruise_speed_kmh) * op.daily_frequency * day_frac
                 litres = op.plane.spec.fuel_burn_lph * fh
@@ -1100,11 +1118,20 @@ class OperationsSubsystem(Subsystem):
             for op in p.route_ops:
                 if id(op) not in ops_with_claims:
                     continue
-                # effective frequency = min(desired, gates actually granted).
+                # Effective frequency = min(desired, gates actually granted).
                 # A denied gate means that flight physically can't operate.
+                # eff_freq stays a DAILY RATE (everything downstream multiplies
+                # it by day_frac), so the grant — which is in gate slots for
+                # this tick — is converted back to a daily rate to compare.
                 desired_freq = op.daily_frequency
-                granted_gates = gates_granted.get(id(op), desired_freq)
-                eff_freq = max(0.0, min(desired_freq, granted_gates))
+                granted_gates = gates_granted.get(id(op), desired_freq * day_frac)
+                granted_freq = (granted_gates / day_frac) if day_frac > 1e-9 else 0.0
+                eff_freq = max(0.0, min(desired_freq, granted_freq))
+                # WEATHER. An airport under weather runs at a reduced arrival
+                # and departure rate, and a closed one runs at none: that is
+                # a cancellation, and it happens before crew legality because
+                # a flight that can't land doesn't consume a duty day.
+                eff_freq *= max(0.0, min(1.0, getattr(op, "weather_capacity", 1.0)))
                 freq_ratio = (eff_freq / desired_freq) if desired_freq > 0 else 0.0
 
                 # --- CREW LEGALITY GATE ---
@@ -1113,7 +1140,13 @@ class OperationsSubsystem(Subsystem):
                 # count is reduced to what duty/rest limits allow. No legal crew
                 # -> no flight, even with plane and gate available.
                 from airlinesim.crew import is_legal_for_flight, crew_is_type_rated
-                fh_per_rotation = (op.spec.distance_km / op.plane.spec.cruise_speed_kmh)
+                # Weather delay is DUTY TIME. Holding, de-icing and a longer
+                # taxi are hours on the crew's clock, so a delayed rotation
+                # eats the duty day faster and the crew can legally fly fewer
+                # of them. This is the indirect disruption path: the delay
+                # itself is cheap, the rotation it makes illegal is not.
+                fh_per_rotation = (op.spec.distance_km / op.plane.spec.cruise_speed_kmh
+                                   + max(0.0, getattr(op, "weather_delay_h", 0.0)))
                 crew_flew = ctx.setdefault("_crew_flew_this_tick", set())
                 legal_rotations = eff_freq
                 # a flight needs BOTH cockpit and cabin crew; a missing roster
@@ -1162,7 +1195,14 @@ class OperationsSubsystem(Subsystem):
                 class_revenue = {}
                 total_seats_offered = 0.0
                 # deadheading crew occupy economy seats, removing them from sale
-                dh_seats = getattr(op, "deadhead_seats", 0)
+                # Crew riding home occupy seats that can't be sold. Scaled to
+                # the tick like every other capacity figure: the reservation is
+                # a headcount against a DAY of departures, so subtracting it
+                # whole from a tick-sized cabin removed 6 seats from the 7.5 an
+                # hourly tick offers — 80% of the aircraft, for one deadheading
+                # crew. Over a full day this still removes exactly headcount
+                # seat-days, so a 24h tick is unchanged.
+                dh_seats = getattr(op, "deadhead_seats", 0) * day_frac
                 dm = world.demand.get(market_key(op.spec))
 
                 if dm and dm.segments:
@@ -1528,11 +1568,33 @@ class AIStrategySubsystem(Subsystem):
 # ============================================================
 
 class SimulationEngine:
-    def __init__(self, world: World):
+    """
+    The tick loop. ``dt`` is HOURS PER TICK and is a genuine resolution knob:
+    every subsystem scales its work by ``dt / 24``, so total carriage, cash and
+    fuel over a simulated month agree to within rounding whether the world is
+    stepped in 24-hour, 1-hour or 30-minute slices. `airlinesim run clock`
+    asserts that.
+
+    Two things had to be fixed for that to be true, and both are the same
+    mistake — a per-DAY quantity spent per TICK:
+
+      - the gate claim asked for a whole day's frequency every tick, so at
+        hourly resolution an airport's gates were exhausted before noon;
+      - a deadheading crew's seat reservation was subtracted whole from a
+        tick-sized cabin, removing 6 of the 7.5 seats an hourly tick offers.
+
+    Anything added here that consumes a daily budget must scale the same way.
+    Sub-day ticks smear a day's departures uniformly across it rather than
+    scheduling them at real departure times — that is the honest limit of this
+    resolution, and it is what lets weather bite in proportion to the hours it
+    actually covers.
+    """
+
+    def __init__(self, world: World, tick_hours: float = 24.0):
         self.world = world
         self.players: list = []
         self.subsystems: list = []
-        self.dt = 24.0   # hours per tick (resolution knob)
+        self.dt = float(tick_hours)   # hours per tick (resolution knob)
         self._last_day = -1
 
     def add_player(self, p: Player):
