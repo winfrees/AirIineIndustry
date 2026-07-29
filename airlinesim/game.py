@@ -21,6 +21,7 @@ touching engine invariants:
 
 from __future__ import annotations
 
+import logging
 import pickle
 import threading
 import time
@@ -36,8 +37,27 @@ from airlinesim.finance_cabin import (
     DEFAULT_SEAT_CLASSES, cabin_slots_for,
     AcquisitionMethod, FinancingTerms, Bank, aircraft_value,
 )
-from airlinesim import actions
+from airlinesim import actions, gamelog
 from airlinesim.builder import build_demo_world
+
+log = gamelog.get("session")
+
+# -- real-time clock guards -------------------------------------------------
+# The loop wakes every TICK_POLL_S. A wall-clock gap much larger than that
+# doesn't mean we ran late — it means the PROCESS WAS FROZEN: laptop asleep,
+# VM suspended, container stopped, debugger paused.
+TICK_POLL_S = 0.2
+# Past this, treat the gap as a suspend and refuse to replay it. 5s is ~25
+# poll intervals: far beyond any scheduling delay, far below anything a player
+# would experience as the game silently skipping ahead.
+SUSPEND_GAP_S = 5.0
+# Even a legitimate gap is capped, so a burst can't be replayed inside one
+# locked iteration. At the default 0.5 days/s this is 8 sim-days of catch-up
+# per wake, which is plenty to absorb a slow snapshot or a GC pause.
+MAX_CATCHUP_S = 16.0
+# Hard ceiling on ticks per wake regardless of speed: the session lock is held
+# for the whole burst, so an unbounded loop makes the UI unresponsive.
+MAX_TICKS_PER_WAKE = 64
 
 
 def route_op_id(op: RouteOp) -> str:
@@ -47,6 +67,22 @@ def route_op_id(op: RouteOp) -> str:
     GUI shows; if this format ever changes, both move together.
     """
     return f"{op.owner_id}:{op.spec.spec_id}:{op.plane.tail_number}"
+
+
+def _fmt_args(args) -> str:
+    """Command arguments for the log line. Scalars only — the Bank and other
+    objects threaded through actions are identity, not information."""
+    parts = [repr(a) for a in args
+             if isinstance(a, (str, int, float, bool, dict, tuple, type(None)))]
+    return "(" + ", ".join(parts) + ")"
+
+
+def _fmt_gap(seconds: float) -> str:
+    if seconds < 90:
+        return f"{seconds:.0f}s"
+    if seconds < 5400:
+        return f"{seconds / 60:.0f} min"
+    return f"{seconds / 3600:.1f} h"
 
 
 def _pkg_version() -> str:
@@ -134,6 +170,12 @@ def new_game(human_name: str = "You", ai_name: str = "SkyRival",
     w, engine, human_id = build_game_world(human_name, ai_name, ai_step_frac,
                                            world=world, ai_profiles=ai_profiles,
                                            hub=hub, n_destinations=n_destinations)
+    log.info("new game: world=%s hub=%s dests=%d human=%s profiles=%s",
+             world, hub, n_destinations, human_id, ai_profiles or {})
+    for p in engine.players:
+        log.info("  start %-14s %s fleet=%d routes=%d cash=$%.0f",
+                 p.name, "AI" if p.is_ai else "human",
+                 len(p.fleet), len(p.route_ops), p.ledger.cash)
     return GameSession(w, engine, human_player_id=human_id)
 
 
@@ -160,13 +202,18 @@ class GameSession:
         self.ctx = {"market": MarketConditions()}
         self._carry = 0.0
         self._stop = threading.Event()
+        # Set by the loop when it detects a suspend-sized clock gap; surfaced
+        # in the snapshot so the GUI can say why the game paused itself.
+        # Runtime state, not game state — a loaded save starts with none.
+        self.clock_notice = ""
         self.on_tick = None   # optional callback(snapshot: dict), set by server.py
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
     def __getstate__(self):
         state = self.__dict__.copy()
-        for k in ("lock", "ctx", "_carry", "_stop", "on_tick", "_thread"):
+        for k in ("lock", "ctx", "_carry", "_stop", "on_tick", "_thread",
+                  "clock_notice"):
             state.pop(k, None)
         return state
 
@@ -181,34 +228,96 @@ class GameSession:
     def _loop(self):
         last = time.monotonic()
         while not self._stop.is_set():
-            time.sleep(0.2)
+            time.sleep(TICK_POLL_S)
             now = time.monotonic()
             elapsed = now - last
             last = now
+
+            # SUSPEND. The machine was asleep (or the VM/container frozen), so
+            # this gap is real time that nobody played. Converting it to
+            # sim-time is what silently destroyed a player's airline overnight:
+            # three hours at the default speed is ~5,400 sim-days, ~15 years,
+            # during which every 84-month lease legitimately expires and
+            # BankingSubsystem correctly hands the metal back — taking the
+            # route ops flown by those tails with it. Nothing there is wrong
+            # except that the player was asleep and could not re-lease. The AI
+            # appears immune only because it re-acquires every review cycle.
+            #
+            # So the gap is discarded, not replayed, and the game pauses so the
+            # state the player left is the state they come back to.
+            if elapsed > SUSPEND_GAP_S:
+                snap = None
+                with self.lock:
+                    self._carry = 0.0
+                    running = not (self.paused or self.game_over)
+                    if running:
+                        self.paused = True
+                        skipped = elapsed * self.speed
+                        self.clock_notice = (
+                            f"Paused: the clock jumped {_fmt_gap(elapsed)} "
+                            f"(computer asleep or process suspended). "
+                            f"{skipped:,.0f} simulated days were skipped rather "
+                            f"than fast-forwarded, so your fleet and routes are "
+                            f"as you left them. Press Resume to continue.")
+                        snap = self.snapshot()
+                    log.warning("clock gap %.1fs on day %d — %s",
+                                elapsed, int(self.world.sim_time // 24),
+                                "auto-paused" if running else "already paused")
+                if snap and self.on_tick:
+                    self.on_tick(snap)
+                continue
+
             if self.paused or self.game_over:
                 continue
-            with self.lock:
-                self._carry += elapsed * self.speed
-                ticked = False
-                while self._carry >= 1.0:
-                    self.engine.tick(self.ctx)
-                    self._carry -= 1.0
-                    ticked = True
-                if ticked:
-                    self._check_game_over()
-                    snap = self.snapshot()
-            if ticked and self.on_tick:
-                self.on_tick(snap)
+
+            try:
+                with self.lock:
+                    # Clamp even a normal gap: the lock is held for the whole
+                    # catch-up burst, so an unbounded one freezes the command
+                    # API and the SSE stream along with it.
+                    self._carry += min(elapsed, MAX_CATCHUP_S) * self.speed
+                    ticks = 0
+                    while self._carry >= 1.0 and ticks < MAX_TICKS_PER_WAKE:
+                        self.engine.tick(self.ctx)
+                        self._carry -= 1.0
+                        ticks += 1
+                    if ticks >= MAX_TICKS_PER_WAKE:
+                        # Speed is set faster than this process can simulate.
+                        # Dropping the backlog keeps the game responsive and
+                        # slow rather than responsive-then-lurching.
+                        self._carry = 0.0
+                    if ticks:
+                        self._check_game_over()
+                        snap = self.snapshot()
+                if ticks and self.on_tick:
+                    self.on_tick(snap)
+            except Exception:
+                # A raise here used to kill the thread outright: the clock
+                # simply stopped and the GUI showed a frozen but healthy game
+                # with no error anywhere. Log it and pause, so the failure is
+                # visible in the file and the session is still inspectable.
+                log.exception("tick failed on day %d — pausing",
+                              int(self.world.sim_time // 24))
+                with self.lock:
+                    self.paused = True
+                    self.clock_notice = ("Paused: the simulation hit an "
+                                         "internal error. See the log file.")
 
     def pause(self):
         with self.lock:
             self.paused = True
+            log.info("paused on day %d", int(self.world.sim_time // 24))
 
     def resume(self):
         with self.lock:
             if not self.game_over:
                 self.paused = False
                 self._carry = 0.0
+                # Acknowledging the pause is what dismisses the notice — the
+                # banner should survive a reload, not one SSE frame.
+                self.clock_notice = ""
+                log.info("resumed on day %d at %.2f days/s",
+                         int(self.world.sim_time // 24), self.speed)
 
     def set_speed(self, sim_days_per_real_second: float):
         with self.lock:
@@ -240,6 +349,8 @@ class GameSession:
             self.game_over = True
             self.paused = True
             self.game_over_reason = f"bankrupt: net worth ${nw:,.0f}"
+            log.warning("game over on day %d — %s",
+                        int(self.world.sim_time // 24), self.game_over_reason)
 
     # -- lookups -----------------------------------------------------------
     def _player(self, player_id: str):
@@ -287,7 +398,19 @@ class GameSession:
 
     def _do(self, fn, *args, **kwargs):
         with self.lock:
-            return fn(self.world, self._human(), *args, **kwargs)
+            result = fn(self.world, self._human(), *args, **kwargs)
+            # Every human command, with its outcome, at the sim-day it
+            # happened. This is the record that answers "my routes vanished —
+            # did I close them, did the engine, or did the clock?".
+            try:
+                ok, message = result
+            except (TypeError, ValueError):
+                ok, message = True, repr(result)
+            log.log(logging.INFO if ok else logging.WARNING,
+                    "day %d cmd %s%s -> %s %s",
+                    int(self.world.sim_time // 24), fn.__name__,
+                    _fmt_args(args), "ok" if ok else "REFUSED", message)
+            return result
 
     def set_price(self, route_op_id: str, price: float):
         return self._do(actions.set_price, route_op_id, price)
@@ -408,6 +531,9 @@ class GameSession:
                 "speed": self.speed,
                 "game_over": self.game_over,
                 "game_over_reason": self.game_over_reason,
+                # Non-empty when the loop caught the process being suspended.
+                # Cleared by resume(), so it survives a reload of the page.
+                "clock_notice": getattr(self, "clock_notice", ""),
                 "human_player_id": self.human_player_id,
                 "players": [self._player_snapshot(p) for p in self.engine.players],
                 # Only airports the game is actually touching — on a data world
@@ -542,8 +668,12 @@ class GameSession:
         with self.lock:
             with open(path, "wb") as f:
                 pickle.dump(self, f)
+            log.info("saved day %d to %s", int(self.world.sim_time // 24), path)
 
     @classmethod
     def load(cls, path: str) -> "GameSession":
         with open(path, "rb") as f:
-            return pickle.load(f)
+            session = pickle.load(f)
+        log.info("loaded day %d from %s",
+                 int(session.world.sim_time // 24), path)
+        return session

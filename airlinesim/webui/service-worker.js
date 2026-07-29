@@ -8,7 +8,7 @@
 // serving the UI it had cached the very first time it was opened. The
 // network-first handler below is the structural fix — a bump alone would only
 // have papered over it until the next asset change.
-const CACHE = "airlinesim-shell-v7";
+const CACHE = "airlinesim-shell-v8";
 const SHELL = ["/", "/app.js", "/styles.css", "/manifest.json",
                "/explore.html", "/explore.js", "/explore.css",
                "/icons/icon-192.png", "/icons/icon-512.png"];

@@ -246,6 +246,16 @@ function render(snap) {
     els.gameOver.classList.add("hidden");
   }
 
+  // The clock detected the machine being asleep and paused rather than
+  // fast-forwarding through it. Say so — the alternative is a player finding
+  // the game silently stopped and assuming it crashed. Cleared by Resume,
+  // server-side, so it survives a page reload.
+  const notice = document.getElementById("clockNotice");
+  if (notice) {
+    notice.textContent = snap.clock_notice || "";
+    notice.classList.toggle("hidden", !snap.clock_notice);
+  }
+
   renderStart(snap);
   renderPlayers(snap);
   renderIfIdle(els.routes, routesHtml(snap));
