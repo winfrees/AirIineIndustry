@@ -113,16 +113,53 @@ SEGMENT_CABIN_SPLIT = {
 }
 
 
+# How premium each cabin is, as a rung on a ladder. Used only to tilt the
+# split above toward or away from the front of the aircraft — see
+# cabin_split_for().
+CABIN_PREMIUM_RANK = {"ECONOMY": 0, "PREMIUM": 1, "BUSINESS": 2, "FIRST": 3}
+
+
+def cabin_split_for(segment, premium_propensity: float = 1.0) -> tuple:
+    """
+    A segment's cabin split, tilted by how premium THIS market is.
+
+    ``premium_propensity`` is a per-route multiplier: 1.0 reproduces
+    SEGMENT_CABIN_SPLIT exactly (the global default), above 1.0 shifts demand
+    up the cabin ladder, below 1.0 down it. Each cabin's share is weighted by
+    ``propensity ** rank`` and RE-NORMALIZED within the segment, so a tilt
+    moves travelers between cabins and never invents any: a market where more
+    people turn left is not a market with more people in it.
+
+    Nothing in the shipped corpus sets this — every route runs at 1.0, so the
+    numbers are unchanged. It exists because the split fractions are a single
+    global game-balance default (see the caveat in SEGMENT_CABIN_SPLIT) and
+    the honest way to make them per-route is to drive them off a measured
+    property of the market. ``docs/cabin-demand-design.md`` is the plan for
+    doing that from airport-catchment income; this is the seam it plugs into.
+    """
+    base = SEGMENT_CABIN_SPLIT.get(segment, ())
+    k = float(premium_propensity)
+    if not base or abs(k - 1.0) < 1e-9 or k <= 0:
+        return base
+    weighted = [(name, frac * (k ** CABIN_PREMIUM_RANK.get(name, 0)))
+                for name, frac in base]
+    total = sum(w for _, w in weighted)
+    if total <= 0:
+        return base
+    return tuple((name, w / total) for name, w in weighted)
+
+
 def cabin_demand_on(segments: tuple, cabin_name: str, sim_time_hours: float,
-                    price_ratio: float) -> float:
+                    price_ratio: float, premium_propensity: float = 1.0) -> float:
     """
     Pool size for ONE cabin within a route's segment tuple: sums every
     segment's contribution to that cabin (its demand_on(), scaled by that
-    cabin's split fraction for the segment — see SEGMENT_CABIN_SPLIT).
+    cabin's split fraction for the segment — see SEGMENT_CABIN_SPLIT and
+    cabin_split_for).
     """
     total = 0.0
     for seg in segments:
-        for name, frac in SEGMENT_CABIN_SPLIT.get(seg.segment, ()):
+        for name, frac in cabin_split_for(seg.segment, premium_propensity):
             if name == cabin_name:
                 total += seg.demand_on(sim_time_hours, price_ratio) * frac
     return total

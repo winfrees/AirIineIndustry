@@ -241,3 +241,42 @@ details summary {
   #topbar { gap: 0.4rem; }
   .speed { display: none; }
 }
+
+/* --- cabin planner (acquisition + recabin) ---------------------------- */
+.cabinPlan { margin: 0.4rem 0 0.2rem; }
+.cabinLine { font-size: 0.9rem; }
+.cabinBar {
+  height: 0.5rem;
+  background: #16283c;
+  border: 1px solid var(--card-border);
+  border-radius: 0.25rem;
+  overflow: hidden;
+  margin: 0.3rem 0;
+  max-width: 26rem;
+}
+.cabinBar span { display: block; height: 100%; background: var(--accent); }
+
+/* --- per-cabin fares under a route row -------------------------------- */
+.cabinRow td { border-top: 0; padding-top: 0; }
+.cabinFare {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.3rem;
+  margin: 0 0.7rem 0.25rem 0;
+  padding: 0.1rem 0.4rem;
+  border-left: 2px solid var(--card-border);
+  font-size: 0.85rem;
+}
+.cabinFare.priced { border-left-color: var(--accent); }
+.cabinFare input { width: 5.5rem; }
+
+dialog {
+  background: var(--card);
+  color: var(--text);
+  border: 1px solid var(--card-border);
+  border-radius: 0.6rem;
+  padding: 1rem 1.2rem;
+  max-width: min(38rem, 92vw);
+}
+dialog::backdrop { background: rgba(4, 10, 18, 0.7); }
+dialog h2 { margin-top: 0; }

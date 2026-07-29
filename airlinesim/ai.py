@@ -96,7 +96,9 @@ class Archetype:
 
     # --- product ---
     service_tier: int = 2
-    business_seat_frac: float = 0.0    # share of cabin slots given to business
+    # Share of CABIN LENGTH given to each premium cabin (see _cabin_for), so
+    # the same figure means the same product on any airframe in the catalog.
+    business_seat_frac: float = 0.0
     premium_seat_frac: float = 0.0
 
     # --- airport character (see airport_fit) ---
@@ -974,28 +976,30 @@ class AICarrierSubsystem(Subsystem):
     def _cabin_for(self, spec, arch) -> Optional[dict]:
         """
         Cabin configuration at acquisition — the cheap moment to choose it.
-        Business/premium seats consume more slots than they add in count, so
-        the economy cabin shrinks by each cabin's footprint.
+
+        The archetype's business/premium fractions are read as shares of CABIN
+        LENGTH, which is the resource a seat actually consumes: 15% of the
+        tube is 15% of the tube whether the type is 4-abreast or 10-abreast.
+        Economy is left unspecified so the fitter fills whatever remains,
+        which is the same call a human player gets from the same function.
         """
-        from airlinesim.finance_cabin import DEFAULT_SEAT_CLASSES, cabin_slots_for
+        from airlinesim.cabin import fit_layout, geometry_for
         if arch.business_seat_frac <= 0 and arch.premium_seat_frac <= 0:
             return None                      # all-economy: let the default stand
-        slots = cabin_slots_for(spec.max_seats)
-        biz = int(slots * arch.business_seat_frac
-                  / DEFAULT_SEAT_CLASSES[CabinClass.BUSINESS].footprint)
-        prem = int(slots * arch.premium_seat_frac
-                   / DEFAULT_SEAT_CLASSES[CabinClass.PREMIUM].footprint)
-        used = (biz * DEFAULT_SEAT_CLASSES[CabinClass.BUSINESS].footprint
-                + prem * DEFAULT_SEAT_CLASSES[CabinClass.PREMIUM].footprint)
-        econ = int(max(0.0, slots - used))
-        if econ <= 0:
+        geom = geometry_for(spec)
+        want = {}
+        for cc, frac in ((CabinClass.BUSINESS, arch.business_seat_frac),
+                         (CabinClass.PREMIUM, arch.premium_seat_frac)):
+            if frac > 0:
+                seats = geom.geom(cc).seats_in(geom.cabin_length_m * frac)
+                if seats > 0:
+                    want[cc] = seats
+        if not want:
             return None
-        cabin = {"ECONOMY": econ}
-        if biz > 0:
-            cabin["BUSINESS"] = biz
-        if prem > 0:
-            cabin["PREMIUM"] = prem
-        return cabin
+        layout = fit_layout(spec, want).layout
+        if layout.seats_of(CabinClass.ECONOMY) <= 0:
+            return None                      # a premium-only cabin isn't the plan
+        return {cc.name: n for cc, n in layout.seats.items() if n > 0}
 
     def _maybe_acquire(self, world, p, mem, arch):
         """

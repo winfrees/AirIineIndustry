@@ -23,6 +23,8 @@ constraint enforcement — not partial stubs.
       crew.py           # duty/rest limits, rostering, positioning, deadheading
       route.py          # market segments, stage economics, equipment/crew suitability
       finance_cabin.py  # cabin classes + seat layout; financing/banking; depreciation
+      cabin.py          # cabin GEOMETRY: pitch/abreast per class, row-snapping
+                        #   seat fitter, named cabin presets
       builder.py        # build_demo_world() / run() convenience entry points
       cli.py            # `airlinesim` command (list / run / demo / probe)
       routedata.py      # RUNTIME provider: 3-tier historic/comparable lookup
@@ -75,6 +77,7 @@ constraint enforcement — not partial stubs.
     airlinesim run databuilt         # engine running on real BTS routes
     airlinesim run refresh_cx        # corpus-refresh logic (offline)
     airlinesim run explorer          # outcome-explorer + engine-determinism check
+    airlinesim run cabin             # cabin geometry, seat fitting, per-cabin fares
     airlinesim gui                   # play it in a browser; defaults to --world data
     airlinesim gui --world demo      # the two-airport sandbox instead
     airlinesim explore               # the outcome-explorer GUI (same server as `gui`)
@@ -207,6 +210,60 @@ demand code.
   duty limits then trim it further on most trunk ops — the data-implied frequency
   genuinely meets the duty envelope.
 
+## Cabins: geometry, fitting and per-cabin fares
+
+`cabin.py` answers "what physically fits in this airframe?"; `finance_cabin.py`
+still answers "what is a seat in this class worth?". Keep that split.
+
+- **The model is one-dimensional on purpose.** A cabin is a box of fixed width
+  and length; width is already captured by ABREAST (seats per row), so the
+  constraint collapses to `Σ rows × pitch ≤ cabin_length_m`. Floor area is
+  `length × width` — this IS the area model, width just cancels. Seats come in
+  whole rows because that is how they are installed.
+- **Footprints are derived, not asserted.** `(pitch_c/pitch_Y) ×
+  (abreast_Y/abreast_c)` — so a business seat costs ~2.2 economy seats on a
+  6-abreast narrowbody and ~4.2 on a 9-abreast widebody, because the economy it
+  displaces is denser. The flat `DEFAULT_SEAT_CLASSES.footprint` table can't
+  express that and remains only as the legacy fallback for callers with no
+  aircraft spec in hand.
+- **`cabin_abreast` on `AircraftSpec` is the one MEASURED input** (published
+  economy seats per row). `cabin_length_m` is DERIVED, back-computed from
+  `max_seats` at economy pitch so that all-economy == `max_seats` exactly —
+  it is not a fuselage dimension and must not be presented as one. Pitch tables
+  and premium-abreast fractions are HEURISTIC game balance. A spec with no
+  `cabin_abreast` gets a banded estimate, flagged `abreast_source="estimated"`
+  all the way out to the UI.
+- **`max_seats` doubles as the certified occupancy limit.** The derived cabin
+  rounds up to a whole row, so without that cap an all-economy 787-9 would come
+  out at 297 seats on a 290-seat type. It only ever binds on a single-class
+  cabin — a premium seat eats more length per seat, so a mixed cabin is under
+  it by construction. `airlinesim run cabin` asserts this for every type.
+- **The fitter never rejects for size.** `fit_layout` snaps to whole rows,
+  trims overflow cheapest-cabin-first (economy yields, first class doesn't),
+  and fills unspecified economy with whatever is left — then reports every
+  adjustment in `CabinFit.notes`. Nothing is changed silently. Blank economy
+  means "fill it", which is the auto-calculation the whole feature exists for.
+- **One fitter, three entry points.** Acquisition, recabin and the per-op
+  layout override all go through `actions.build_layout` -> `cabin.fit_layout`,
+  and the GUI previews through `GET /api/cabin` -> the *same* function. The
+  browser deliberately owns no geometry: a preview that disagreed with the
+  installed cabin would be worse than no preview.
+- **Do not set an HTML `max` on the seat inputs.** It makes the browser refuse
+  to submit an over-large number, replacing the fitter's "here is what fits and
+  why" with a bare tooltip. The maxima are displayed instead.
+- **Per-cabin fares live on the route** (`RouteOp.cabin_prices`), not on the
+  fleet: what a business seat is worth is a property of the market. A cabin
+  with no entry falls back to `ticket_price × price_multiplier`, so a route
+  nobody has priced by cabin behaves exactly as it did before — and
+  `set_cabin_price` refuses a cabin the assigned aircraft doesn't have, rather
+  than storing a fare against seats that don't exist. Recabining a tail out of
+  a cabin clears that cabin's fares on its routes and says so.
+- **`databuilder._layout` used to subtract business seats from `max_seats`
+  one-for-one**, which installed cabins no fuselage could hold (26 lie-flat
+  seats displace far more than 26 economy seats) — those aircraft flew with
+  capacity that didn't exist. It goes through the fitter now; `airlinesim run
+  cabin` pins the old arithmetic as over-capacity so it can't come back.
+
 ## AI carriers and the action layer
 
 `actions.py` holds every decision an airline can make as a plain function over
@@ -285,11 +342,19 @@ is where the corpus, the 16-type fleet and the three AI archetypes actually
 live — the demo sandbox is still there behind `--world demo`. Every action in
 `actions.py` is reachable from it: route opening is a free-text origin/dest
 pair over a datalist of all 300 corpus airports (a 300-row `<select>` is
-unusable, and the point is that any pair is legal), cabins are chosen at
-acquisition, and Sell / Return / Recabin / Close / service tier / hubs are
-per-row controls. `Hub.world_kind` remembers which world the server was
-started with so **New Game** rebuilds *that* world rather than silently
-dropping back to the demo one.
+unusable, and the point is that any pair is legal), cabins are planned live
+against the airframe's geometry at acquisition and again in the recabin
+dialog, each cabin on a route carries its own fare input, and Sell / Return /
+Recabin / Close / service tier / hubs are per-row controls. `Hub.world_kind`
+remembers which world the server was started with so **New Game** rebuilds
+*that* world rather than silently dropping back to the demo one.
+
+The HTTP command table in `server.py` is a hand-written argument mapping, and
+that is exactly where a field goes missing: `acquire_aircraft` did not forward
+`seats`, and `open_route` did not forward `service_tier`, so both were typed
+into the form, sent over the wire, and dropped in the lambda — silently, since
+a dropped kwarg just takes its default. **When you add a field to a form, check
+its entry in `COMMANDS`.**
 
 One deliberate asymmetry: `/api/catalog` serves all 300 airports (the route
 picker needs them), but `snapshot()["airports"]` is filtered to airports the
@@ -325,7 +390,11 @@ modeled, deliberately, rather than faked.
   (business -> 12.5% FIRST / 87.5% BUSINESS; leisure -> 15.2% PREMIUM / 84.8%
   ECONOMY; connecting -> 100% ECONOMY). Those split fractions are global
   game-balance defaults matched to `DEFAULT_SEAT_CLASSES`, not per-route or
-  certified — see `route.py`'s `SEGMENT_CABIN_SPLIT`.
+  certified — see `route.py`'s `SEGMENT_CABIN_SPLIT`. A per-route tilt exists
+  (`RouteSpec.premium_propensity` -> `route.cabin_split_for`) but every route
+  in the corpus runs at its neutral 1.0: nothing measures premium propensity.
+  `docs/cabin-demand-design.md` is the plan for driving it off catchment
+  income, with the options costed.
 - **`MarketConditions.fuel_index` is a dead field.** It is declared on the
   dataclass and threaded through `ctx["market"]`, but no subsystem ever reads it
   — grep `engine.py` and the only hit is its own declaration. Setting it changes
@@ -336,7 +405,8 @@ modeled, deliberately, rather than faked.
   the next caller to "adjust the fuel market" and measure nothing.
 - Crew deadheading is direct-to-base only; no multi-hop routing or ferry flights.
 - The bundled AI adjusts price/frequency but doesn't use route suitability to
-  right-size equipment.
+  right-size equipment, and it sets only the ECONOMY base fare — the premium
+  cabins it configures sell at the default class multiple, never repriced.
 - Roster is conservative — can leave capacity unflown.
 - **Use `Bank.try_acquire()`, not `Bank.acquire()`**, unless you need the
   Loan/Lease object. `acquire()` returns None both for a denial AND for a
@@ -402,11 +472,14 @@ gravity coefficients, and de-censoring where capacity exists.
 
 ## Good next steps (from prior design discussion)
 
-- Make the segment/cabin split fractions (`SEGMENT_CABIN_SPLIT`) tunable per
-  route instead of a single global default, if different markets should have
-  different premium-cabin propensities.
+- Load airport-catchment income and switch the per-route cabin split on. The
+  mechanism is already in (`RouteSpec.premium_propensity` ->
+  `route.cabin_split_for`), sitting inert at 1.0; what's missing is the data.
+  `docs/cabin-demand-design.md` costs four ways to get it and recommends one.
 - Multi-hop / ferry crew positioning.
-- Make the AI read suitability + per-route P&L to choose aircraft and cabins.
+- Make the AI read suitability + per-route P&L to choose aircraft and cabins,
+  and set per-cabin fares — it still prices only the economy base fare, so
+  every premium cabin it configures sells at the default multiple.
 - Resale / used-aircraft market feeding the existing depreciation + retirement.
 - Explorer: persist a tree to disk (it is in-memory and dies with the server),
   and let a derivation *drive* expansion — branch only where it holds, so the

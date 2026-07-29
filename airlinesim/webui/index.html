@@ -88,15 +88,20 @@
         </select>
         <input name="base_iata" id="baseInput" list="airportsDL" placeholder="base (IATA)"
                autocomplete="off">
-        <input name="economy" type="number" min="0" step="1" placeholder="econ seats">
-        <input name="premium" type="number" min="0" step="1" placeholder="prem seats">
-        <input name="business" type="number" min="0" step="1" placeholder="biz seats">
-        <input name="first" type="number" min="0" step="1" placeholder="first seats">
+        <select id="acqPreset" title="a cabin plan to start from">
+          <option value="">cabin plan…</option>
+        </select>
+        <input name="first" type="number" min="0" step="1" placeholder="first" data-cabin="first">
+        <input name="business" type="number" min="0" step="1" placeholder="business" data-cabin="business">
+        <input name="premium" type="number" min="0" step="1" placeholder="premium" data-cabin="premium">
+        <input name="economy" type="number" min="0" step="1" placeholder="economy" data-cabin="economy">
         <button class="btn" type="submit">Acquire</button>
       </form>
-      <div class="metric">Leave seat counts blank for all-economy. The cabin is
-        set at acquisition — changing it later costs money and grounds the
-        aircraft for weeks.</div>
+      <div id="acqCabin" class="cabinPlan"></div>
+      <div class="metric">Seat counts are fitted to the type's real cabin: they
+        snap to whole installable rows, and a blank economy box fills whatever
+        the premium cabins leave. The cabin is set at acquisition — changing it
+        later costs money and grounds the aircraft for weeks.</div>
     </details>
   </section>
 
@@ -144,6 +149,30 @@
     <div id="log"></div>
   </section>
 </main>
+
+<!-- Recabin uses the SAME planner as acquisition: same fields, same preview,
+     same server-side fitter. A cabin you can plan when you buy the aircraft
+     but only guess at afterwards is the worse half of the decision. -->
+<dialog id="recabinDlg">
+  <form method="dialog" id="formRecabin">
+    <h2>Recabin <span id="recabinTail"></span></h2>
+    <div id="recabinCost" class="metric"></div>
+    <div class="form">
+      <select id="recabinPreset" title="a cabin plan to start from">
+        <option value="">cabin plan…</option>
+      </select>
+      <input id="recabinFirst" type="number" min="0" step="1" placeholder="first" data-cabin="first">
+      <input id="recabinBusiness" type="number" min="0" step="1" placeholder="business" data-cabin="business">
+      <input id="recabinPremium" type="number" min="0" step="1" placeholder="premium" data-cabin="premium">
+      <input id="recabinEconomy" type="number" min="0" step="1" placeholder="economy" data-cabin="economy">
+    </div>
+    <div id="recabinCabin" class="cabinPlan"></div>
+    <div class="form">
+      <button class="btn" value="cancel">Cancel</button>
+      <button class="btn warn" id="recabinGo" value="go">Reconfigure</button>
+    </div>
+  </form>
+</dialog>
 
 <datalist id="airportsDL"></datalist>
 <script src="/app.js"></script>

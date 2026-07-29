@@ -37,9 +37,10 @@ from airlinesim.engine import (
     Airplane, CrewType, market_key,
 )
 from airlinesim.finance_cabin import (
-    CabinClass, SeatLayout, DEFAULT_SEAT_CLASSES, cabin_slots_for,
+    CabinClass, cabin_slots_for,
     AcquisitionMethod, FinancingTerms, Bank, aircraft_value,
 )
+from airlinesim.cabin import fit_layout, parse_seats, preset_layout
 
 # Reference financing products. Same shape/values builder.py and the
 # integration scenario already use.
@@ -110,19 +111,42 @@ def airport(world, iata: str) -> Optional[AirportSpec]:
         return None
 
 
-def build_layout(seats: dict, max_seats: int):
-    """(SeatLayout, None) or (None, error). Accepts cabin names or enums."""
-    try:
-        counts = {}
-        for k, v in seats.items():
-            cc = k if isinstance(k, CabinClass) else CabinClass[str(k).upper()]
-            counts[cc] = int(v)
-    except KeyError as e:
-        return None, f"unknown cabin class {e}"
-    layout = SeatLayout(counts)
-    if not layout.is_valid(cabin_slots_for(max_seats), DEFAULT_SEAT_CLASSES):
-        return None, "layout exceeds cabin capacity"
-    return layout, None
+def build_layout(seats: dict, aircraft_spec):
+    """
+    (SeatLayout, notes, None) or (None, None, error).
+
+    Seat counts are FITTED to the airframe's real cabin geometry rather than
+    accepted-or-rejected against a flat slot count: they snap to whole
+    installable rows, overflow is trimmed cheapest-cabin-first, and a cabin
+    left unspecified fills the space that's left (see airlinesim.cabin). The
+    adjustments come back as `notes` so nothing is changed silently.
+
+    A named preset ("two-class", "three-class", ...) may be passed instead of
+    a seat dict — the same plan resolved against whatever airframe it lands
+    on. Only a genuinely unparseable request is an error.
+    """
+    if isinstance(seats, str):
+        try:
+            fit = preset_layout(aircraft_spec, seats.strip().lower())
+        except KeyError as e:
+            return None, None, str(e).strip("\"'")
+        return fit.layout, fit.notes, None
+    parsed, err = parse_seats(seats)
+    if err:
+        return None, None, err
+    fit = fit_layout(aircraft_spec, parsed)
+    return fit.layout, fit.notes, None
+
+
+def _with_notes(msg: str, notes) -> str:
+    return f"{msg} ({'; '.join(notes)})" if notes else msg
+
+
+def _cabin_summary(layout) -> str:
+    """"12 first, 40 business, 210 economy" — forward to aft."""
+    from airlinesim.cabin import CABIN_ORDER
+    return ", ".join(f"{layout.seats_of(cc)} {cc.name.lower()}"
+                     for cc in CABIN_ORDER if layout.seats_of(cc) > 0)
 
 
 def validate_equipment(world, route_spec, aircraft_spec):
@@ -201,7 +225,8 @@ def ensure_market(world, route_spec):
             base_demand_per_day=route_spec.base_demand_per_day,
             seasonality_amplitude=route_spec.seasonality_amplitude,
             segments=route_spec.segments,
-            reference_price=getattr(route_spec, "reference_price", 0.0) or 0.0)
+            reference_price=getattr(route_spec, "reference_price", 0.0) or 0.0,
+            premium_propensity=getattr(route_spec, "premium_propensity", 1.0))
     return world.demand[key]
 
 
@@ -240,14 +265,65 @@ def set_frequency(world, player, route_op_id: str, freq: int):
 
 
 def set_layout(world, player, route_op_id: str, seats: dict):
+    """
+    Override the cabin FOR THIS ROUTE ONLY, without touching the airframe.
+    Kept for scenarios that configure a cabin per operation; the airframe's
+    own configuration (see reconfigure_aircraft) is what a player normally
+    changes, since a seat installed for one route is installed for all.
+    """
     op = find_route_op(player, route_op_id)
     if op is None:
         return False, "route not found"
-    layout, err = build_layout(seats, op.plane.spec.max_seats)
+    layout, notes, err = build_layout(seats, op.plane.spec)
     if err:
         return False, err
     op.layout = layout
-    return True, "layout updated"
+    return True, _with_notes("layout updated", notes)
+
+
+def set_cabin_price(world, player, route_op_id: str, cabin: str, price):
+    """
+    Price ONE cabin on ONE route. `price` of 0 or None clears the override,
+    returning that cabin to the base fare times its class multiplier.
+
+    A cabin the assigned aircraft doesn't have is refused rather than stored:
+    a fare on seats that don't exist reads like revenue you're not getting,
+    and re-cabining the tail is what makes such a fare meaningful.
+    """
+    op = find_route_op(player, route_op_id)
+    if op is None:
+        return False, "route not found"
+    try:
+        cc = cabin if isinstance(cabin, CabinClass) else CabinClass[str(cabin).strip().upper()]
+    except KeyError:
+        return False, f"unknown cabin class '{cabin}'"
+    # A route op from a save older than per-cabin pricing has no dict at all.
+    if not isinstance(getattr(op, "cabin_prices", None), dict):
+        op.cabin_prices = {}
+
+    # Blank, zero or negative all mean "stop overriding this cabin" — the one
+    # way to say it, whether it arrives as None from a cleared form field or
+    # as a typed 0.
+    value = None
+    if price is not None and str(price).strip() != "":
+        try:
+            value = float(price)
+        except (TypeError, ValueError):
+            return False, f"price must be a number, got '{price}'"
+    if value is None or value <= 0:
+        had = op.cabin_prices.pop(cc, None)
+        return True, (f"{cc.name.lower()} fare follows the base fare again "
+                      f"(${op.fare_for(cc):,.0f})" if had is not None else
+                      f"{cc.name.lower()} was already at the base fare "
+                      f"(${op.fare_for(cc):,.0f})")
+
+    seats = op.effective_layout().seats_of(cc)
+    if seats <= 0:
+        return False, (f"{op.plane.tail_number} has no {cc.name.lower()} seats — "
+                       f"recabin the aircraft before pricing that cabin")
+    op.cabin_prices[cc] = round(value, 2)
+    return True, (f"{cc.name.lower()} fare set to ${value:,.0f} "
+                  f"across {seats} seats")
 
 
 def set_service_tier(world, player, route_op_id: str, tier: int):
@@ -290,9 +366,9 @@ def open_route(world, player, route_spec_id: str, tail_number: str, price: float
     if not ok:
         return False, "; ".join(reasons)
 
-    layout = None
+    layout, notes = None, []
     if seats:
-        layout, err = build_layout(seats, plane.spec.max_seats)
+        layout, notes, err = build_layout(seats, plane.spec)
         if err:
             return False, err
     player.route_ops.append(RouteOp(
@@ -300,8 +376,9 @@ def open_route(world, player, route_spec_id: str, tail_number: str, price: float
         ticket_price=float(price), daily_frequency=max(0, int(freq)),
         owner_id=player.player_id, layout=layout,
         service_tier=max(1, min(3, int(service_tier)))))
-    return True, (f"opened {route_spec.origin_iata}->{route_spec.dest_iata} "
-                  f"({route_spec.distance_km:.0f}km) with {tail_number}")
+    return True, _with_notes(
+        f"opened {route_spec.origin_iata}->{route_spec.dest_iata} "
+        f"({route_spec.distance_km:.0f}km) with {tail_number}", notes)
 
 
 def close_route(world, player, route_op_id: str):
@@ -323,6 +400,11 @@ def acquire_aircraft(world, player, spec_id: str, tail_number: str, method: str,
     Acquire an airframe. `seats` sets the cabin CONFIGURATION at acquisition —
     the cheap moment to choose it, since changing it later costs money and
     downtime (see reconfigure_aircraft).
+
+    `seats` may be a per-cabin count ({"BUSINESS": 16}), a preset name
+    ("two-class"), or None for all-economy. Counts are fitted to the type's
+    cabin geometry: name the premium cabins you want and economy fills what's
+    left, with every adjustment reported back in the message.
     """
     if any(a.tail_number == tail_number for a in player.fleet):
         return False, "tail number already in use"
@@ -335,9 +417,12 @@ def acquire_aircraft(world, player, spec_id: str, tail_number: str, method: str,
         return False, f"unknown acquisition method {method}"
     terms = TERMS_BY_METHOD[method_enum]
 
-    layout = None
+    # The cabin is validated BEFORE any money moves: an unparseable request
+    # shouldn't leave the carrier holding a financed airframe it never meant
+    # to buy.
+    layout, notes = None, []
     if seats:
-        layout, err = build_layout(seats, spec.max_seats)
+        layout, notes, err = build_layout(seats, spec)
         if err:
             return False, err
 
@@ -357,7 +442,11 @@ def acquire_aircraft(world, player, spec_id: str, tail_number: str, method: str,
         owned=(method_enum != AcquisitionMethod.OPERATING_LEASE),
         location_iata=base_iata or next(iter(world.gates)),
         acquired_at=world.sim_time, layout=layout))
-    return True, f"acquired {tail_number} ({spec.display_name}) via {method_enum.name}"
+    cabin_msg = (f" — {layout.total_seats()} seats: {_cabin_summary(layout)}"
+                 if layout else "")
+    return True, _with_notes(
+        f"acquired {tail_number} ({spec.display_name}) via {method_enum.name}{cabin_msg}",
+        notes)
 
 
 def sell_aircraft(world, player, tail_number: str):
@@ -428,6 +517,10 @@ def reconfigure_aircraft(world, player, tail_number: str, seats: dict):
     Change an airframe's cabin configuration. Costs per cabin slot and grounds
     the tail for the type's reconfiguration downtime — the reason choosing
     well at acquisition matters.
+
+    Takes the same input acquisition does (per-cabin counts or a preset name)
+    and fits it to the same geometry, so "20 business" means the identical
+    cabin whether you ask for it on day one or on day four hundred.
     """
     plane = find_plane(player, tail_number)
     if plane is None:
@@ -435,9 +528,13 @@ def reconfigure_aircraft(world, player, tail_number: str, seats: dict):
     busy = plane_is_busy(world, plane)
     if busy:
         return False, busy
-    layout, err = build_layout(seats, plane.spec.max_seats)
+    layout, notes, err = build_layout(seats, plane.spec)
     if err:
         return False, err
+    current = plane.effective_layout()
+    if layout.seats == current.seats:
+        return False, (f"{tail_number} is already configured that way "
+                       f"({current.total_seats()} seats)")
 
     slots = cabin_slots_for(plane.spec.max_seats)
     cost = plane.spec.reconfig_cost_per_slot * slots
@@ -455,12 +552,29 @@ def reconfigure_aircraft(world, player, tail_number: str, seats: dict):
     if days > 0:
         plane.reconfiguring_until = world.sim_time + days * 24.0
         plane.in_service = False
-    # a per-op layout override would mask the new airframe config
+    dropped = set()
     for op in player.route_ops:
-        if op.plane.tail_number == tail_number:
-            op.layout = None
-    return True, (f"reconfiguring {tail_number}: ${cost:,.0f}, down {days:.0f} days"
-                  if days > 0 else f"reconfigured {tail_number}: ${cost:,.0f}, no downtime")
+        if op.plane.tail_number != tail_number:
+            continue
+        # a per-op layout override would mask the new airframe config
+        op.layout = None
+        # A per-cabin fare on a cabin this tail no longer has would sit in the
+        # books priced against seats that don't exist. Drop those, keep the
+        # rest: repricing every route because one aircraft changed would throw
+        # away decisions the player made deliberately.
+        priced = getattr(op, "cabin_prices", None) or {}
+        for cc in [c for c in priced if layout.seats_of(c) <= 0]:
+            priced.pop(cc, None)
+            dropped.add(cc.name.lower())
+
+    msg = (f"reconfiguring {tail_number} to {layout.total_seats()} seats "
+           f"({_cabin_summary(layout)}): ${cost:,.0f}, down {days:.0f} days"
+           if days > 0 else
+           f"reconfigured {tail_number} to {layout.total_seats()} seats "
+           f"({_cabin_summary(layout)}): ${cost:,.0f}, no downtime")
+    if dropped:
+        msg += f"; cleared {', '.join(sorted(dropped))} fares (cabin removed)"
+    return True, _with_notes(msg, notes)
 
 
 # ============================================================

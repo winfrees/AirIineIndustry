@@ -5,7 +5,10 @@ A continuous-time, multi-player simulation with:
   - spec-driven entities (aircraft, airports, crew, routes) loaded from data
   - tiered A/B/C/D maintenance with A+B fold and 3C/IL escalation
   - structured route demand (business/leisure/connecting segments)
-  - cabin-class revenue with per-class price elasticity
+  - cabin-class revenue with per-class price elasticity and per-route,
+    per-cabin fares
+  - cabin geometry: seat pitch and abreast per class, so a configuration is
+    fitted to the airframe it's installed in rather than to a seat count
   - crew duty/rest limits, rostering, deadheading (FAR Part 117-shaped)
   - financing: buy / finance / operating-lease, with depreciation and banking
   - a resource arbiter for gate/fuel/passenger contention between carriers
@@ -57,6 +60,7 @@ from airlinesim.route import (
     TravelerSegment, SegmentDemand, default_segments,
     EquipmentRequirements, CrewRequirements, route_can_fly,
     block_hours, per_seat_cost_index, augmented_crew_required,
+    SEGMENT_CABIN_SPLIT, cabin_split_for, cabin_demand_on,
 )
 
 # --- finance / cabin ---
@@ -64,6 +68,12 @@ from airlinesim.finance_cabin import (
     CabinClass, SeatClassSpec, SeatLayout, DEFAULT_SEAT_CLASSES, cabin_slots_for,
     AcquisitionMethod, FinancingTerms, Loan, Lease, Bank,
     DepreciationModel, DEFAULT_DEPRECIATION, aircraft_value,
+)
+
+# --- cabin geometry (what physically fits in an airframe) ---
+from airlinesim.cabin import (
+    CabinGeometry, ClassGeometry, CabinFit, geometry_for, fit_layout,
+    fit_report, preset_layout, presets_for, parse_seats, PRESETS, CABIN_ORDER,
 )
 
 from airlinesim import actions

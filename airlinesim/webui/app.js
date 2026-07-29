@@ -29,6 +29,14 @@ const els = {
   formAcquire: document.getElementById("formAcquire"),
   formHire: document.getElementById("formHire"),
   formHub: document.getElementById("formHub"),
+  acqPreset: document.getElementById("acqPreset"),
+  acqCabin: document.getElementById("acqCabin"),
+  recabinDlg: document.getElementById("recabinDlg"),
+  formRecabin: document.getElementById("formRecabin"),
+  recabinTail: document.getElementById("recabinTail"),
+  recabinCost: document.getElementById("recabinCost"),
+  recabinPreset: document.getElementById("recabinPreset"),
+  recabinCabin: document.getElementById("recabinCabin"),
 };
 
 let catalog = null;
@@ -98,6 +106,118 @@ async function loadCatalog() {
   els.airportsDL.innerHTML = catalog.airports.map((ap) =>
     `<option value="${esc(ap.iata)}" label="${esc(ap.display_name)}` +
     `${ap.has_mx ? " · MX" : ""}"></option>`).join("");
+}
+
+// -- cabin planner ---------------------------------------------------------
+// Every seat-count field on the page is driven from here, and every number it
+// shows comes from GET /api/cabin — i.e. from the same fitter the acquire and
+// recabin commands run. The browser deliberately owns NO geometry of its own:
+// a preview that disagreed with the installed cabin would be worse than no
+// preview at all.
+const CABIN_FIELDS = ["first", "business", "premium", "economy"];
+const CABIN_SHORT = { FIRST: "F", BUSINESS: "J", PREMIUM: "W", ECONOMY: "Y" };
+
+function seatsFromInputs(inputs) {
+  const seats = {};
+  for (const [cls, el] of Object.entries(inputs)) {
+    const v = String(el.value).trim();
+    if (v !== "" && Number(v) > 0) seats[cls] = parseInt(v, 10);
+  }
+  return seats;
+}
+
+async function fetchCabinFit(specId, seats) {
+  const qs = new URLSearchParams({ spec_id: specId });
+  for (const [k, v] of Object.entries(seats)) qs.set(k, v);
+  return fetch(`/api/cabin?${qs}`).then((r) => r.json()).catch(() => null);
+}
+
+function cabinPlanHtml(fit) {
+  if (!fit) return "";
+  if (fit.error) return `<span class="bad">${esc(fit.error)}</span>`;
+  const plan = Object.entries(fit.seats)
+    .map(([c, n]) => `<b>${n}</b>${CABIN_SHORT[c] || c[0]}`).join(" + ");
+  const g = fit.geometry;
+  const pct = Math.min(100, (fit.length_used_m / fit.cabin_length_m) * 100);
+  const notes = (fit.notes || []).length
+    ? `<div class="warn">${esc(fit.notes.join("; "))}</div>` : "";
+  // How much bigger each cabin could be alongside this plan. Shown rather
+  // than enforced as an input max: a `max` attribute makes the browser refuse
+  // to submit an over-large number, which would replace the fitter's "here is
+  // what fits and why" with a bare tooltip.
+  const room = ["FIRST", "BUSINESS", "PREMIUM", "ECONOMY"]
+    .map((c) => `${CABIN_SHORT[c]} up to ${fit.max_with_plan[c]}`).join(" &middot; ");
+  // What each premium seat costs in economy seats is the whole trade-off, so
+  // it's on screen rather than left to be discovered through lost revenue.
+  const cost = Object.entries(g.classes)
+    .filter(([c]) => c !== "ECONOMY")
+    .map(([c, d]) => `${CABIN_SHORT[c]} ${d.footprint}Y (${d.abreast}-abreast, ${d.pitch_in}")`)
+    .join(" &middot; ");
+  return `
+    <div class="cabinLine"><b>${fit.total_seats}</b> seats: ${plan || "—"}</div>
+    <div class="cabinBar"><span style="width:${pct.toFixed(1)}%"></span></div>
+    <div class="metric">${fit.length_used_m}m of ${fit.cabin_length_m}m cabin used
+      &middot; ${g.abreast_economy}-abreast economy${
+        g.abreast_source === "estimated" ? " (estimated)" : ""}</div>
+    <div class="metric">room for: ${room}</div>
+    <div class="metric">seat cost: ${cost}</div>${notes}`;
+}
+
+// Wires a set of seat inputs + a preset picker + a preview panel together.
+// Returns a refresh() the caller can trigger when the aircraft changes.
+function bindCabinPlanner({ inputs, preset, panel, specId }) {
+  let current = specId;
+  let pending = null;
+
+  async function refresh() {
+    if (!current) { panel.innerHTML = ""; return; }
+    const fit = await fetchCabinFit(current, seatsFromInputs(inputs));
+    panel.innerHTML = cabinPlanHtml(fit);
+  }
+
+  function schedule() {
+    clearTimeout(pending);
+    pending = setTimeout(refresh, 150);
+  }
+
+  for (const el of Object.values(inputs)) el.addEventListener("input", schedule);
+
+  if (preset) {
+    preset.addEventListener("change", () => {
+      const spec = (catalog?.aircraft || []).find((s) => s.spec_id === current);
+      const plan = spec?.cabin_presets?.[preset.value];
+      if (!plan) return;
+      for (const [cls, el] of Object.entries(inputs)) {
+        el.value = plan[cls.toUpperCase()] || "";
+      }
+      refresh();
+    });
+  }
+
+  return {
+    refresh,
+    setSpec(id) {
+      current = id;
+      if (preset) {
+        const spec = (catalog?.aircraft || []).find((s) => s.spec_id === id);
+        preset.innerHTML = `<option value="">cabin plan…</option>` +
+          Object.keys(spec?.cabin_presets || {})
+            .map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join("");
+      }
+      refresh();
+    },
+    seats: () => seatsFromInputs(inputs),
+    clear() {
+      for (const el of Object.values(inputs)) el.value = "";
+      refresh();
+    },
+  };
+}
+
+function cabinInputs(scope) {
+  const out = {};
+  for (const c of CABIN_FIELDS) out[c] = scope.querySelector(`[data-cabin="${c}"]`);
+  return out;
 }
 
 // -- rendering ---------------------------------------------------------
@@ -258,12 +378,37 @@ function routesHtml(snap) {
           : ""}</td>
         <td>${warn}</td>
       </tr>`);
+      const cabins = cabinFareRow(o, isHuman);
+      if (cabins) rows.push(cabins);
     }
   }
   return `<table><thead><tr>
     <th>Carrier</th><th>Route</th><th>Tail</th><th>Price</th><th>Freq</th><th>Service</th>
     <th>LF</th><th>Pax</th><th>Profit</th><th></th><th></th>
   </tr></thead><tbody>${rows.join("") || emptyRow(11)}</tbody></table>`;
+}
+
+// Per-cabin pricing, for the cabins the ASSIGNED aircraft actually has. A
+// cabin left unpriced follows the base fare times its class multiplier, and
+// says so — so the row shows what every seat on the aeroplane is selling for,
+// not one number standing in for four different products.
+function cabinFareRow(o, isHuman) {
+  const cabins = o.cabins || [];
+  if (cabins.length < 2) return "";
+  const cells = cabins.map((c) => {
+    const lf = (c.load_factor * 100).toFixed(0);
+    const fare = isHuman
+      ? `<input type="number" min="0" step="1" value="${c.priced ? Math.round(c.fare) : ""}"
+                placeholder="${Math.round(c.default_fare)}"
+                data-op="${o.route_op_id}" data-cabin-price="${c.cabin}"
+                title="blank follows the base fare (${money(c.default_fare)})">`
+      : `$${c.fare.toFixed(0)}`;
+    return `<span class="cabinFare ${c.priced ? "priced" : ""}">
+       <b>${CABIN_SHORT[c.cabin] || c.cabin[0]}</b> ${fare}
+       <span class="metric">${c.seats}st &middot; ${lf}% &middot; ${money(c.revenue)}</span>
+     </span>`;
+  }).join("");
+  return `<tr class="cabinRow"><td></td><td colspan="10">${cells}</td></tr>`;
 }
 
 function fleetHtml(snap) {
@@ -403,7 +548,13 @@ els.btnNew.addEventListener("click", async () => {
 els.routes.addEventListener("change", (e) => {
   const t = e.target;
   if (!t.dataset.op) return;
-  if (t.dataset.field === "price") {
+  if (t.dataset.cabinPrice) {
+    // blank clears the override and hands the cabin back to the base fare
+    sendCommand("set_cabin_price", {
+      route_op_id: t.dataset.op, cabin: t.dataset.cabinPrice,
+      price: t.value.trim() === "" ? null : parseFloat(t.value),
+    });
+  } else if (t.dataset.field === "price") {
     sendCommand("set_price", { route_op_id: t.dataset.op, price: parseFloat(t.value) });
   } else if (t.dataset.field === "freq") {
     sendCommand("set_frequency", { route_op_id: t.dataset.op, freq: parseInt(t.value, 10) });
@@ -436,22 +587,55 @@ els.fleet.addEventListener("click", (e) => {
       sendCommand("break_lease", { tail_number: tail });
     }
   } else if (b.dataset.act === "recabin") {
-    const human = latest?.players.find((p) => p.player_id === latest.human_player_id);
-    const plane = human?.fleet.find((x) => x.tail_number === tail);
-    const spec = (catalog?.aircraft || []).find((s) => s.spec_id === plane?.spec_id);
-    const hint = spec ? `${money(spec.reconfig_cost)} and ${spec.reconfig_days} days on the ground` : "money and downtime";
-    const ans = prompt(
-      `New cabin for ${tail} as "economy,premium,business,first" seat counts.\n` +
-      `Costs ${hint}.`, "150,0,12,0");
-    if (ans == null) return;
-    const [economy, premium, business, first] = ans.split(",").map((x) => parseInt(x.trim() || "0", 10));
-    const seats = {};
-    if (economy > 0) seats.economy = economy;
-    if (premium > 0) seats.premium = premium;
-    if (business > 0) seats.business = business;
-    if (first > 0) seats.first = first;
-    sendCommand("reconfigure_aircraft", { tail_number: tail, seats });
+    openRecabin(tail);
   }
+});
+
+// -- recabin dialog ---------------------------------------------------------
+let recabinTail = null;
+const recabinPlanner = bindCabinPlanner({
+  inputs: cabinInputs(els.formRecabin),
+  preset: els.recabinPreset,
+  panel: els.recabinCabin,
+  specId: null,
+});
+
+function openRecabin(tail) {
+  const human = latest?.players.find((p) => p.player_id === latest.human_player_id);
+  const plane = human?.fleet.find((x) => x.tail_number === tail);
+  if (!plane) return;
+  const spec = (catalog?.aircraft || []).find((s) => s.spec_id === plane.spec_id);
+  recabinTail = tail;
+  els.recabinTail.textContent = `${tail} (${plane.display_name})`;
+  els.recabinCost.innerHTML = spec
+    ? `Costs <b>${money(spec.reconfig_cost)}</b> and grounds the aircraft for
+       <b>${spec.reconfig_days} days</b>. Any route flying it keeps running once it's back.`
+    : "";
+  // Start from the cabin it has now, so a small change is a small edit — but
+  // economy goes in the PLACEHOLDER, not the value. Typed in, it pins economy
+  // and every premium seat you then add has to be trimmed back out of it;
+  // left blank, it refills itself around whatever you choose.
+  const current = plane.cabin || { ECONOMY: spec ? spec.max_seats : 0 };
+  const inputs = cabinInputs(els.formRecabin);
+  for (const [cls, el] of Object.entries(inputs)) {
+    const now = current[cls.toUpperCase()] || 0;
+    if (cls === "economy") {
+      el.value = "";
+      el.placeholder = now ? `economy (now ${now})` : "economy";
+    } else {
+      el.value = now || "";
+    }
+  }
+  recabinPlanner.setSpec(plane.spec_id);
+  els.recabinDlg.showModal();
+}
+
+els.recabinDlg.addEventListener("close", () => {
+  if (els.recabinDlg.returnValue !== "go" || !recabinTail) return;
+  sendCommand("reconfigure_aircraft", {
+    tail_number: recabinTail, seats: recabinPlanner.seats(),
+  });
+  recabinTail = null;
 });
 
 els.formHub.addEventListener("submit", (e) => {
@@ -484,21 +668,31 @@ els.formOpenRoute.addEventListener("submit", (e) => {
   });
 });
 
+// The acquisition cabin planner. `seats` here reaches the engine — it used to
+// be assembled correctly, sent correctly, and then dropped by the server's
+// command table, which is why typed seat counts appeared to be ignored.
+const acquirePlanner = bindCabinPlanner({
+  inputs: cabinInputs(els.formAcquire),
+  preset: els.acqPreset,
+  panel: els.acqCabin,
+  specId: null,
+});
+els.specSelect.addEventListener("change", () => acquirePlanner.setSpec(els.specSelect.value));
+
 els.formAcquire.addEventListener("submit", (e) => {
   e.preventDefault();
   const f = new FormData(e.target);
-  const seats = {};
-  for (const cls of ["economy", "premium", "business", "first"]) {
-    const n = parseInt(f.get(cls) || "0", 10);
-    if (n > 0) seats[cls] = n;
-  }
+  const seats = acquirePlanner.seats();
   sendCommand("acquire_aircraft", {
     spec_id: f.get("spec_id"),
     tail_number: f.get("tail_number"),
     method: f.get("method"),
     base_iata: String(f.get("base_iata") || "").trim().toUpperCase() || null,
     seats: Object.keys(seats).length ? seats : null,
-  }).then(() => e.target.reset());
+  }).then(() => {
+    e.target.reset();
+    acquirePlanner.setSpec(els.specSelect.value);
+  });
 });
 
 els.formHire.addEventListener("submit", (e) => {
@@ -519,6 +713,9 @@ if ("serviceWorker" in navigator) {
 
 (async function boot() {
   await loadCatalog();
+  // the aircraft list only exists after the catalog loads, so the cabin
+  // planner can't be primed until now
+  acquirePlanner.setSpec(els.specSelect.value);
   const state = await fetch("/api/state").then((r) => r.json());
   render(state);
   connect();
