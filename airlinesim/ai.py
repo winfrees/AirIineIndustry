@@ -141,6 +141,12 @@ class Archetype:
     max_hubs: int = 1
     hub_min_routes_each: int = 4       # routes per hub before opening another
 
+    # --- consolidation ---
+    # Whether this style will buy a rival outright. A Legacy carrier
+    # consolidates; a Low-Cost one grows organically because acquiring a
+    # legacy cost base is the opposite of its strategy. See _merger_review.
+    can_acquire_carriers: bool = False
+
 
 LOW_COST = Archetype(
     name="Low-Cost",
@@ -180,6 +186,7 @@ LEGACY = Archetype(
     # This is what keeps a Legacy carrier off OAK->LGA and on SFO->JFK.
     min_runway_pref_m=3000.0, prefers_primary=1.0, fit_weight=1.6,
     min_operating_margin=0.08, cash_runway_days=120.0, min_viable_routes=6,
+    can_acquire_carriers=True,
     max_hubs=3, hub_min_routes_each=4,
 )
 
@@ -969,6 +976,64 @@ class AICarrierSubsystem(Subsystem):
     def _fleet_review(self, world, p, mem, arch):
         self._shed_idle(world, p, mem, arch)
         self._maybe_acquire(world, p, mem, arch)
+        self._merger_review(world, p, mem, arch)
+
+    # ------------------------------------------------------------------
+    # MERGERS AND ACQUISITIONS
+    # ------------------------------------------------------------------
+    def _merger_review(self, world, p, mem, arch):
+        """
+        Should this carrier buy a rival?
+
+        Runs on the fleet cycle because it is a fleet decision at heart — the
+        cheapest way to add thirty aircraft and their routes is sometimes to
+        buy the airline flying them. Every candidate is costed by
+        merger.merger_case(), which states a RATIONALE, so the AI's log says
+        why it bid rather than only that it did.
+
+        The archetype gates appetite: a carrier that will not expand for cash
+        reasons has no business buying a competitor, and one already in
+        retrenchment certainly doesn't.
+        """
+        from airlinesim.merger import Rationale, merger_case
+        if not arch.can_acquire_carriers:
+            return
+        if mem.stage != "healthy":
+            return                       # not while retrenching
+        if p.ledger.cash < arch.min_cash_buffer:
+            return
+
+        best = None
+        for other in self._players:
+            if other.player_id == p.player_id:
+                continue
+            if not other.fleet and not other.route_ops:
+                continue
+            other_mem = self.memory.get(other.player_id)
+            other_cf = other_mem.cash_flow_per_day if other_mem else 0.0
+            case = merger_case(world, self._players, p, other,
+                               mem.cash_flow_per_day, other_cf)
+            if not case.verdict:
+                continue
+            # Prefer the deal that pays back soonest; a survival deal wins
+            # regardless, because the alternative there is not "keep the cash"
+            # but "lose slowly".
+            key = (case.rationale is not Rationale.SURVIVAL, case.payback_years())
+            if best is None or key < best[0]:
+                best = (key, case, other)
+
+        if best is None:
+            return
+        _key, case, target = best
+        ok, msg = actions.acquire_carrier(
+            world, p, target.player_id,
+            acquirer_cf=mem.cash_flow_per_day,
+            target_cf=(self.memory.get(target.player_id).cash_flow_per_day
+                       if self.memory.get(target.player_id) else 0.0))
+        if ok:
+            self._note(p, mem, f"{msg} — {case.reason}")
+        else:
+            self._note(p, mem, f"merger with {target.name} failed: {msg}")
 
     def _shed_idle(self, world, p, mem, arch):
         """Metal that isn't flying still costs rent or capital — let it go."""

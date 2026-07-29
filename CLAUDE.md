@@ -30,6 +30,10 @@ constraint enforcement — not partial stubs.
                         #   a stochastic process of moving systems, per-airport sky
       disruption.py     # what weather COSTS: cancellations, delays, crew
                         #   timeouts, stranded pax, hotels, airport reliability
+      alliance.py       # co-ops/unions: connecting FEED, alliance tiers,
+                        #   no-compete hubs
+      merger.py         # valuation, synergy, the three merger rationales, and
+                        #   the "neither can compete alone" test
       builder.py        # build_demo_world() / run() convenience entry points
       cli.py            # `airlinesim` command (list / run / demo / probe)
       routedata.py      # RUNTIME provider: 3-tier historic/comparable lookup
@@ -84,6 +88,7 @@ constraint enforcement — not partial stubs.
     airlinesim run explorer          # outcome-explorer + engine-determinism check
     airlinesim run cabin             # cabin geometry, seat fitting, per-cabin fares
     airlinesim run weather           # clock resolution, weather, disruption chain
+    airlinesim run alliance          # feed, alliances, valuation, mergers
     airlinesim run session           # real-time clock guard + log rotation
     airlinesim gui                   # play it in a browser; defaults to --world data
     airlinesim gui --world demo      # the two-airport sandbox instead
@@ -336,6 +341,49 @@ touching `weather.py`, `disruption.py`, or anything that scales with `dt`.
   alternate routings. Listed with the other honest limits in the design doc,
   along with the big one: a cancelled flight leaves its aircraft in the right
   place anyway.
+
+## Alliances and consolidation
+
+Design, limits and the historic-data question: `docs/consolidation-design.md`.
+
+- **Connecting demand has to be FED.** `CONNECTING` existed as a segment but
+  was carried as if it were local, so a hub was worth no more than a spoke and
+  an alliance was worth nothing. `alliance.feed_factor()` scores what departs a
+  leg's DESTINATION: own metal in full, a partner's at the alliance tier's
+  efficiency, a **stranger's at nothing** — which is the entire commercial case
+  for allying. It reaches the arbiter through the existing `desirability` seam,
+  so no allocation logic changed.
+- **Feed is a connectivity INDEX, not an itinerary ledger.** No passenger is
+  traced to a final destination and connections are one stop only. It is a
+  deliberate stand-in for an O&D itinerary model the engine doesn't have; the
+  design doc says what that would take and what it would replace.
+- **A partner's return leg is not feed.** Nobody connects onto the flight back
+  where they came from — counting it made every out-and-back pair look like a
+  hub. `onward_capacity(..., exclude_dest=)`.
+- **Alliance actions need the player roster, which World doesn't hold.**
+  `register_players()` is called at attach time AND every tick; when it was
+  only set during a tick, `form_alliance` before the first tick silently
+  refused and `blocks_route` silently allowed.
+- **Allying costs something** — dues per day, a connecting passenger worth
+  less than a local one, and `no_compete_hubs` that genuinely block a member
+  from a route a partner flies. Two carriers at the SAME hub gain almost
+  nothing and still pay: complementary networks are what pay off.
+- **Valuation is itemised** and floored at liquidation value; a loss-making
+  carrier carries NO going-concern value. It reads the AI's smoothed operating
+  cash flow, never `RouteOp.last_profit` — that's a contribution margin and
+  excludes lease rent, loan service, payroll and hub overhead.
+- **Three merger rationales** (HORIZONTAL / COMPLEMENTARY / SURVIVAL), and
+  SURVIVAL is the only one that can approve weak synergies. It is gated on
+  `Position.cannot_compete_alone()`: outmatched by a leader with 2x your share
+  AND sub-scale or short of runway. **Being small is not enough** — a healthy
+  niche carrier is small on purpose, and the scenario pins that the same
+  carrier flips viable purely on the sign of its cash flow.
+- **A merger transfers the DEBT too.** Overlap is DIRECTIONAL: a duplicated
+  ORD->LGA does not make LGA->ORD redundant, and treating routes as unordered
+  pairs consolidated twelve legs where six markets overlapped.
+- **There is no regulator**, and that is the biggest gap: real horizontal
+  mergers get blocked or conditioned on divestitures, here they only get
+  expensive.
 
 ## Cabins: geometry, fitting and per-cabin fares
 

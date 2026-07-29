@@ -101,6 +101,12 @@ airlinesim run integration       # run a named scenario
   Each new game draws its own season; the outcome explorer can switch weather
   off or on at any node and stage named events — a blizzard at your hub in
   week three — to compare against a sibling branch that didn't get one.
+- **Alliances and consolidation.** Connecting demand has to be *fed*: a leg is
+  worth more when something departs its destination, your own metal counts in
+  full, a partner's counts at the alliance tier's efficiency, and a stranger's
+  counts for nothing. Mergers run off an itemised valuation with three stated
+  rationales — horizontal, complementary, or survival when neither carrier can
+  compete alone.
 - **Hourly clock.** The engine's tick length is a resolution knob and the
   simulation is independent of it: a month of flying comes out the same
   stepped in 24-hour, 6-hour or 1-hour slices.
@@ -134,6 +140,7 @@ competitor is adding a `Player`, not rewriting allocation logic.
 | `finance`     | buy vs finance vs lease, with depreciation                  |
 | `cabin`       | cabin geometry, seat fitting, and per-cabin fares            |
 | `weather`     | clock resolution, geographic weather, and the disruption chain |
+| `alliance`    | connecting feed, alliances, valuation, and mergers          |
 | `btsdata`     | BTS ingest pipeline against committed fixtures (offline)    |
 | `routedata`   | the three-tier historic/comparable route lookup             |
 | `databuilt`   | the engine running on real BTS route data                   |

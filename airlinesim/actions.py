@@ -366,6 +366,16 @@ def open_route(world, player, route_spec_id: str, tail_number: str, price: float
     if not ok:
         return False, "; ".join(reasons)
 
+    # An alliance's no-compete agreement is a real restraint with a real cost:
+    # refused here with the reason, rather than allowed and left to
+    # under-perform, because a self-imposed rule the player can't see is
+    # indistinguishable from a bug.
+    from airlinesim.alliance import blocks_route
+    blocked, why = blocks_route(world, player.player_id,
+                                route_spec.origin_iata, route_spec.dest_iata)
+    if blocked:
+        return False, why
+
     layout, notes = None, []
     if seats:
         layout, notes, err = build_layout(seats, plane.spec)
@@ -637,3 +647,138 @@ def hire_crew(world, player, crew_type: str, base_iata: str, headcount: int,
     else:
         player.crews.append(unit)
     return True, f"hired {headcount}x {ctype.name} at {base_iata}"
+
+
+# ============================================================
+# ALLIANCE ACTIONS
+# ============================================================
+
+def form_alliance(world, player, name: str, kind: str = "CODESHARE",
+                  partners: Optional[list] = None):
+    """
+    Found a co-operation agreement. Partners must exist and must not already
+    belong to one — a carrier is in at most one alliance, because overlapping
+    memberships make feed easy to double-count and the mechanism hard to read.
+    """
+    from airlinesim.alliance import (Alliance, AllianceKind, alliance_of,
+                                     alliances)
+    try:
+        k = kind if isinstance(kind, AllianceKind) else AllianceKind[str(kind).strip().upper()]
+    except KeyError:
+        return False, (f"unknown alliance kind '{kind}' — one of "
+                       f"{', '.join(a.name for a in AllianceKind)}")
+    if alliance_of(world, player.player_id) is not None:
+        return False, "already in an alliance — leave it first"
+
+    members = [player.player_id]
+    for pid in (partners or []):
+        other = _find_player(world, pid)
+        if other is None:
+            return False, f"no carrier '{pid}'"
+        if alliance_of(world, pid) is not None:
+            return False, f"{other.name} is already in an alliance"
+        members.append(pid)
+
+    reg = alliances(world)
+    al = Alliance(alliance_id=f"AL{len(reg) + 1}", name=name.strip() or "Alliance",
+                  kind=k, members=members, formed_at=world.sim_time)
+    reg.append(al)
+    return True, (f"formed {al.name} ({k.name}) with "
+                  f"{len(members) - 1} partner(s)")
+
+
+def join_alliance(world, player, alliance_id: str):
+    from airlinesim.alliance import alliance_of, alliances
+    if alliance_of(world, player.player_id) is not None:
+        return False, "already in an alliance — leave it first"
+    al = next((a for a in alliances(world) if a.alliance_id == alliance_id), None)
+    if al is None:
+        return False, f"no alliance '{alliance_id}'"
+    al.members.append(player.player_id)
+    return True, f"joined {al.name} ({al.kind.name})"
+
+
+def leave_alliance(world, player):
+    from airlinesim.alliance import alliance_of
+    al = alliance_of(world, player.player_id)
+    if al is None:
+        return False, "not in an alliance"
+    al.members.remove(player.player_id)
+    return True, (f"left {al.name} — its partners' onward flights no longer "
+                  f"feed your routes")
+
+
+def set_no_compete_hub(world, player, iata: str, enabled: bool = True):
+    """
+    Agree (or stop agreeing) not to compete with partners at an airport.
+    A real restraint with a real cost: it blocks the member from opening a
+    route a partner already flies there.
+    """
+    from airlinesim.alliance import alliance_of
+    al = alliance_of(world, player.player_id)
+    if al is None:
+        return False, "not in an alliance"
+    code = iata.strip().upper()
+    if airport(world, code) is None:
+        return False, f"unknown airport {code}"
+    if enabled:
+        if code in al.no_compete_hubs:
+            return False, f"{code} is already coordinated"
+        al.no_compete_hubs.append(code)
+        return True, f"{al.name} now coordinates {code} — members won't overlap there"
+    if code not in al.no_compete_hubs:
+        return False, f"{code} is not coordinated"
+    al.no_compete_hubs.remove(code)
+    return True, f"{al.name} no longer coordinates {code}"
+
+
+def _find_player(world, player_id: str):
+    from airlinesim.alliance import _players
+    return next((p for p in _players(world) if p.player_id == player_id), None)
+
+
+# ============================================================
+# MERGERS AND ACQUISITIONS
+# ============================================================
+
+def evaluate_merger(world, player, target_id: str,
+                    acquirer_cf: float = 0.0, target_cf: float = 0.0):
+    """
+    (ok, message) plus the case itself on the message — a costed, reasoned
+    answer to "should I buy this carrier?" that commits to nothing.
+    """
+    from airlinesim.alliance import _players
+    from airlinesim.merger import merger_case
+    target = _find_player(world, target_id)
+    if target is None:
+        return False, f"no carrier '{target_id}'"
+    if target.player_id == player.player_id:
+        return False, "a carrier can't acquire itself"
+    case = merger_case(world, _players(world), player, target,
+                       acquirer_cf, target_cf)
+    return True, case.describe()
+
+
+def acquire_carrier(world, player, target_id: str,
+                    acquirer_cf: float = 0.0, target_cf: float = 0.0,
+                    force: bool = False):
+    """
+    Buy another airline outright. Refused when the case doesn't stand up,
+    unless `force` — a human may overrule the valuation, but they do it
+    knowingly and the refusal says why.
+    """
+    from airlinesim.alliance import _players
+    from airlinesim.merger import execute_merger, merger_case
+    players = _players(world)
+    target = _find_player(world, target_id)
+    if target is None:
+        return False, f"no carrier '{target_id}'"
+    if target.player_id == player.player_id:
+        return False, "a carrier can't acquire itself"
+    if not target.fleet and not target.route_ops:
+        return False, f"{target.name} has nothing left to buy"
+
+    case = merger_case(world, players, player, target, acquirer_cf, target_cf)
+    if not case.verdict and not force:
+        return False, f"acquisition rejected — {case.reason}"
+    return execute_merger(world, players, player, target, case)
