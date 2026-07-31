@@ -36,6 +36,7 @@ because that's the fast-moving competitive signal.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -214,6 +215,37 @@ ARCHETYPES = {a.name: a for a in (LOW_COST, LEGACY, REGIONAL)}
 DEFAULT_ARCHETYPE = LOW_COST
 
 
+def archetype(name, default=None):
+    """
+    Resolve an archetype by name, accepting either spelling of it.
+
+    The table is keyed by DISPLAY name ("Low-Cost", "Legacy", "Regional")
+    while the constants are named LOW_COST / LEGACY / REGIONAL, so a caller
+    writing the obvious `ai_profiles={"crw": "LEGACY"}` used to miss the dict
+    and fall through to the Low-Cost default — silently. Three carriers asked
+    for three different personalities all flew the same one, at the same
+    service tier, with the same cabins, and the only evidence was that their
+    numbers matched to the dollar.
+
+    So: both spellings resolve, and an name that matches NEITHER raises
+    instead of quietly becoming a Low-Cost carrier. `default` is returned only
+    when no name was given at all.
+    """
+    if name is None or name == "":
+        return default if default is not None else DEFAULT_ARCHETYPE
+    if isinstance(name, Archetype):
+        return name
+    key = str(name)
+    if key in ARCHETYPES:
+        return ARCHETYPES[key]
+    folded = key.replace("_", "-").replace(" ", "-").casefold()
+    for a in ARCHETYPES.values():
+        if a.name.casefold() == folded:
+            return a
+    raise KeyError(f"unknown AI archetype {name!r}; "
+                   f"choose one of {sorted(ARCHETYPES)}")
+
+
 # ============================================================
 # AIRPORT CHARACTER — which fields suit which business model
 # ============================================================
@@ -294,6 +326,12 @@ class CarrierMemory:
     bad_days: dict = field(default_factory=dict)     # route_op_id -> consecutive bad days
     idle_days: dict = field(default_factory=dict)    # tail_number -> consecutive idle days
     tried: set = field(default_factory=set)          # pairs evaluated and rejected
+    # Where the next route search starts in the destination list. Each review
+    # can only afford to score `candidates_per_review` pairs, and without a
+    # cursor it scored THE SAME ONES every time — a carrier whose first
+    # candidates didn't clear its profit bar never saw the rest of the map and
+    # sat at its opening network for the whole game, slowly bleeding.
+    scan_cursor: int = 0
     tail_seq: int = 0
     next_network_review: float = 0.0
     next_fleet_review: float = 0.0
@@ -331,9 +369,8 @@ class AICarrierSubsystem(Subsystem):
     def _mem(self, player, world) -> CarrierMemory:
         m = self.memory.get(player.player_id)
         if m is None:
-            arch = ARCHETYPES.get(self.profiles.get(player.player_id,
-                                                    self.default_archetype),
-                                  DEFAULT_ARCHETYPE)
+            arch = archetype(self.profiles.get(player.player_id),
+                             archetype(self.default_archetype))
             m = CarrierMemory(archetype=arch)
             # Stagger the first reviews so competitors don't all restructure
             # on the same day — otherwise every AI opens routes in lockstep.
@@ -576,21 +613,23 @@ class AICarrierSubsystem(Subsystem):
         network review cadence, so a carrier reacts over weeks, not instantly.
         """
         if mem.stage == "cut" or mem.stage == "shed":
-            # Close the single worst contributor rather than everything at
-            # once — a carrier that dumps its whole network in one review
-            # collapses instead of recovering.
-            ops = [o for o in p.route_ops]
-            if len(ops) > 1:
+            # Close the single worst ROTATION rather than everything at once —
+            # a carrier that dumps its whole network in one review collapses
+            # instead of recovering. Scored on the pair's combined
+            # contribution, since one leg of an out-and-back can look bad
+            # while the round trip pays.
+            if self._rotations(p) > 1:
                 # last_profit is revenue minus fuel, crew AND fees — netting
                 # fees again would understate every route by its fee bill and
                 # close routes that are actually contributing.
-                worst = min(ops, key=lambda o: o.last_profit)
-                net = worst.last_profit
-                if net < 0:
-                    ok, msg = actions.close_route(world, p, actions.op_id(worst))
-                    if ok:
-                        self._note(p, mem, f"{msg} — cash flow "
-                                           f"${mem.cash_flow_per_day:,.0f}/day")
+                def rotation_profit(o):
+                    back = self._return_op(p, o)
+                    return o.last_profit + (back.last_profit if back else 0.0)
+                worst = min(p.route_ops, key=rotation_profit)
+                if rotation_profit(worst) < 0:
+                    self._close_rotation(
+                        world, p, mem, worst,
+                        f"cash flow ${mem.cash_flow_per_day:,.0f}/day")
             # Trim frequency on anything running under its load-factor floor:
             # cheaper than closing, and reversible when demand returns.
             for op in p.route_ops:
@@ -629,8 +668,15 @@ class AICarrierSubsystem(Subsystem):
                 mem.bad_days[oid] = mem.bad_days.get(oid, 0) + days
             else:
                 mem.bad_days.pop(oid, None)
+        # IDLE MEANS UNASSIGNED, NOT UNFLOWN. An aircraft that has a schedule
+        # but couldn't be crewed is not spare capacity — the answer is to hire,
+        # not to hand the aeroplane back. Counting it as idle produced the
+        # churn loop that made AI fleets look like they were collapsing:
+        # acquire, open a rotation, fail to crew it, shed the metal at an
+        # early-termination penalty after `idle_days_before_shedding`, repeat.
+        assigned = {op.plane.tail_number for op in p.route_ops}
         for a in p.fleet:
-            if a.tail_number in flying:
+            if a.tail_number in flying or a.tail_number in assigned:
                 mem.idle_days.pop(a.tail_number, None)
             else:
                 mem.idle_days[a.tail_number] = mem.idle_days.get(a.tail_number, 0) + days
@@ -769,6 +815,34 @@ class AICarrierSubsystem(Subsystem):
             self._note(p, mem, f"moved {changed} route(s) to service tier "
                                f"{arch.service_tier}")
 
+    def _crew_target(self, p) -> int:
+        """
+        How many crew units this network needs, derived from the BLOCK HOURS
+        it is scheduled to fly rather than from a count of routes.
+
+        A route is not a unit of crew demand: seven daily rotations of a
+        1.4-hour leg is ten block hours, more than one crew can legally fly in
+        a day, while one rotation of the same leg is a fraction of a duty
+        period. Sizing off `len(route_ops)` therefore under-hired exactly the
+        carriers that were growing frequency, which is most of them.
+
+        Each crew can fly `max_daily_flight_hours` before it must rest, and
+        while it rests it isn't available — CREW_DEPTH is that rest-rotation
+        factor, the same one `databuilder` sizes its starting pools with.
+        """
+        from airlinesim.crew import DEFAULT_DUTY_LIMITS
+        from airlinesim.databuilder import CREW_DEPTH
+        from airlinesim.route import block_hours
+
+        daily_bh = sum(
+            block_hours(o.spec.distance_km, o.plane.spec.cruise_speed_kmh)
+            * max(1, o.daily_frequency) for o in p.route_ops)
+        per_crew = max(1.0, DEFAULT_DUTY_LIMITS.max_daily_flight_hours)
+        need = math.ceil(daily_bh / per_crew * CREW_DEPTH)
+        # never fewer than one per leg: the roster assigns exclusively, so a
+        # network of N legs cannot be flown by fewer than N crews in a tick
+        return max(len(p.route_ops), need)
+
     def _staff_up(self, world, p, mem):
         """
         Hire against routes that reported a crew block. Rostering is what
@@ -783,11 +857,10 @@ class AICarrierSubsystem(Subsystem):
         # a route that stays blocked for a reason hiring can't fix (a
         # type-rating mismatch, say) makes this hire every single review
         # forever — one carrier reached 50 cockpit crews for 3 routes and paid
-        # payroll on all of them. CREW_DEPTH is the same rest-rotation factor
-        # databuilder sizes its starting pools with.
-        from airlinesim.databuilder import CREW_DEPTH
-        ceiling = max(2, int(round(len(p.route_ops) * CREW_DEPTH))) + 2
-        if len(p.cockpit_pool) >= ceiling:
+        # payroll on all of them.
+        target = self._crew_target(p)
+        short = target - len(p.cockpit_pool)
+        if short <= 0:
             return
         base = p.hub_iatas[0] if p.hub_iatas else (
             p.fleet[0].location_iata if p.fleet else "")
@@ -797,25 +870,121 @@ class AICarrierSubsystem(Subsystem):
         # and include spec ids so a type with no rating authored still works.
         ratings = tuple({a.spec.type_rating for a in p.fleet if a.spec.type_rating}
                         | {a.spec.spec_id for a in p.fleet})
-        # one crew set per blocked route, capped so a bad tick can't trigger
-        # a hiring spree the carrier can't pay for
-        for _ in range(min(len(blocked), 2)):
-            ok, _msg = actions.hire_crew(world, p, "COCKPIT", base, 2, 220, ratings)
+        # Close the gap in real steps. Two per review was a trickle against a
+        # network adding a rotation a week: the new routes stayed grounded
+        # long enough to look like failures and got their aircraft handed back.
+        hires = min(short, self.MAX_HIRES_PER_REVIEW)
+        for _ in range(hires):
+            actions.hire_crew(world, p, "COCKPIT", base, 2, 220, ratings)
             actions.hire_crew(world, p, "CABIN", base, 4, 60, ())
-        self._note(p, mem, f"hired crew at {base} for {len(blocked)} blocked route(s)")
+        self._note(p, mem, f"hired {hires} crew set(s) at {base} for "
+                           f"{len(blocked)} blocked route(s) "
+                           f"({len(p.cockpit_pool)}/{target} needed)")
+
+    # Payroll is real, so hiring is bounded per review even when the gap is
+    # large — a carrier staffs up over weeks, not in one afternoon.
+    MAX_HIRES_PER_REVIEW = 6
 
     # ------------------------------------------------------------------
     # NETWORK
+    #
+    # A ROUTE IS A DIRECTIONAL LEG, SO AN AIRLINE HAS TO OPEN BOTH OF THEM.
+    # ---------------------------------------------------------------------
+    # This is not a preference, it is what makes crews work at all. A crew
+    # that flies ORD->LGA ENDS THE TICK AT LGA (CrewPositioningSubsystem), and
+    # gets home by deadheading on a revenue flight whose origin is where it is
+    # and whose destination is its base — direct-to-base only, by design.
+    #
+    # The AI used to open outbound legs only. So every crew it rostered flew
+    # once, landed at a spoke, and was stranded there permanently: there was
+    # no leg pointing home to ride. Within sixty days every crew in the pool
+    # sat at a different spoke, every route reported "no legal crew available
+    # to roster", and load factors went to zero across the whole network.
+    #
+    # What that looked like from outside was the fleet collapsing. It was
+    # actually a churn loop: acquire an aircraft, open a route, watch it fly
+    # nothing, have it declared idle after `idle_days_before_shedding`, hand
+    # the lease back at an early-termination penalty, repeat. A carrier could
+    # burn several million dollars a cycle and end at one aeroplane.
+    #
+    # `build_world_from_data` always opened both directions, which is why the
+    # built-in worlds looked healthy and only AI-grown networks rotted. So the
+    # AI now opens and closes ROTATIONS: the leg and its return, on the same
+    # tail. Aircraft utilisation doubles per tail, which is correct — that is
+    # a round trip, not two aeroplanes.
     # ------------------------------------------------------------------
+    @staticmethod
+    def _return_op(p, op):
+        """The leg that brings this one's crews and metal home, if it's open."""
+        for other in p.route_ops:
+            if (other.spec.origin_iata == op.spec.dest_iata
+                    and other.spec.dest_iata == op.spec.origin_iata
+                    and other.plane.tail_number == op.plane.tail_number):
+                return other
+        return None
+
+    @staticmethod
+    def _rotations(p) -> int:
+        """Network size in ROTATIONS, so caps written per-aircraft still mean
+        what they meant before legs came in pairs."""
+        seen = set()
+        for o in p.route_ops:
+            a, b = o.spec.origin_iata, o.spec.dest_iata
+            seen.add((min(a, b), max(a, b), o.plane.tail_number))
+        return len(seen)
+
+    def _open_rotation(self, world, p, mem, arch, plane, pair, price, freq):
+        """
+        Open `pair` AND its return on the same tail. The outbound is what was
+        evaluated; the return is what makes it flyable. If the return can't be
+        opened the outbound is rolled back, because a one-way leg strands its
+        crew at the far end and is worse than not flying it at all.
+        """
+        origin, _, dest = pair.partition("-")
+        ok, msg = actions.open_route(world, p, pair, plane.tail_number, price,
+                                     freq=freq, service_tier=arch.service_tier)
+        if not ok:
+            mem.tried.add(pair)
+            return False, msg
+        back = f"{dest}-{origin}"
+        ok_b, msg_b = actions.open_route(world, p, back, plane.tail_number, price,
+                                         freq=freq, service_tier=arch.service_tier)
+        if not ok_b:
+            out = next((o for o in p.route_ops
+                        if o.spec.origin_iata == origin
+                        and o.spec.dest_iata == dest
+                        and o.plane.tail_number == plane.tail_number), None)
+            if out is not None:
+                actions.close_route(world, p, actions.op_id(out))
+            mem.tried.add(pair)
+            return False, f"no return leg for {pair}: {msg_b}"
+        return True, msg
+
+    def _close_rotation(self, world, p, mem, op, why):
+        """Close a leg and its return together — closing one half re-creates
+        exactly the stranding this pairing exists to prevent."""
+        closed = []
+        for leg in (self._return_op(p, op), op):
+            if leg is None:
+                continue
+            oid = actions.op_id(leg)
+            ok, msg = actions.close_route(world, p, oid)
+            if ok:
+                mem.bad_days.pop(oid, None)
+                closed.append(msg)
+        if closed:
+            mem.tried.add(f"{op.spec.origin_iata}-{op.spec.dest_iata}")
+            self._note(p, mem, f"{closed[-1]} (and return) — {why}")
+        return bool(closed)
+
     def _close_bad_routes(self, world, p, mem, arch):
         for op in list(p.route_ops):
+            if op not in p.route_ops:
+                continue                      # already closed as someone's return
             oid = actions.op_id(op)
             if mem.bad_days.get(oid, 0) >= arch.bad_days_before_close:
-                ok, msg = actions.close_route(world, p, oid)
-                if ok:
-                    mem.bad_days.pop(oid, None)
-                    mem.tried.add(f"{op.spec.origin_iata}-{op.spec.dest_iata}")
-                    self._note(p, mem, f"{msg} — {arch.bad_days_before_close}d unprofitable")
+                self._close_rotation(world, p, mem, op,
+                                     f"{arch.bad_days_before_close}d unprofitable")
 
     def _idle_tails(self, p, mem):
         busy = {op.plane.tail_number for op in p.route_ops}
@@ -828,8 +997,9 @@ class AICarrierSubsystem(Subsystem):
         idle = self._idle_tails(p, mem)
         if not idle:
             return
-        max_routes = int(arch.max_routes_per_plane * len(p.fleet)) + 1
-        if len(p.route_ops) >= max_routes:
+        # counted in ROTATIONS, not legs: an out-and-back is one market served
+        max_rotations = int(arch.max_routes_per_plane * len(p.fleet)) + 1
+        if self._rotations(p) >= max_rotations:
             return
         for plane in idle[:2]:              # at most two openings per review
             cand = self._best_candidate(world, p, mem, arch, plane)
@@ -837,15 +1007,12 @@ class AICarrierSubsystem(Subsystem):
                 continue
             pair, est_profit, ref_fare = cand
             price = round(ref_fare * arch.fare_vs_reference, 2)
-            ok, msg = actions.open_route(
-                world, p, pair, plane.tail_number, price,
-                freq=max(1, min(3, arch.max_freq_per_plane - 2)),
-                service_tier=arch.service_tier)
+            ok, msg = self._open_rotation(
+                world, p, mem, arch, plane, pair, price,
+                freq=max(1, min(3, arch.max_freq_per_plane - 2)))
             if ok:
-                self._note(p, mem, f"{msg} @ ${price:,.0f} "
+                self._note(p, mem, f"{msg} and return @ ${price:,.0f} "
                                    f"(est ${est_profit:,.0f}/day)")
-            else:
-                mem.tried.add(pair)
 
     def _origins(self, p) -> list:
         """Where this carrier can realistically start a route from."""
@@ -862,7 +1029,14 @@ class AICarrierSubsystem(Subsystem):
         ``(pair, est_daily_profit, reference_fare)``.
         """
         served = {f"{o.spec.origin_iata}-{o.spec.dest_iata}" for o in p.route_ops}
-        airports = world.repo.all(AirportSpec)
+        # Sorted for determinism (the explorer depends on the engine and its
+        # AI being reproducible), then ROTATED by the carrier's own cursor so
+        # successive reviews walk the whole map instead of re-scoring the same
+        # opening slice of the alphabet forever.
+        airports = sorted(world.repo.all(AirportSpec), key=lambda a: a.iata)
+        if airports:
+            start = mem.scan_cursor % len(airports)
+            airports = airports[start:] + airports[:start]
         best = None
         checked = 0
         for origin_iata in self._origins(p):
@@ -887,6 +1061,9 @@ class AICarrierSubsystem(Subsystem):
                     continue
                 if best is None or profit > best[1]:
                     best = (pair, profit, ref_fare)
+        # Advance the window whether or not anything was found — a review that
+        # came up empty is exactly the one that must look somewhere else next.
+        mem.scan_cursor += max(1, checked)
         return best
 
     def _market_estimate(self, world, origin, dest, dist):
@@ -1118,16 +1295,18 @@ class AICarrierSubsystem(Subsystem):
                 p.ledger.cash < -mem.cash_flow_per_day * arch.cash_runway_days:
             return
 
-        spec = self._pick_aircraft(world, p, arch)
+        # A ROUTE CASE MUST JUSTIFY THE METAL, AND THE METAL MUST SUIT THE
+        # ROUTE. Acquiring first and looking for flying afterwards is how this
+        # burned $48k/day in lease early-termination fees. Picking one
+        # globally-cheapest type and then hunting for a mission is how a
+        # carrier ends up flying a single type everywhere regardless of how
+        # thick the market is. So the shortlist is scored AGAINST the best
+        # route each type could actually fly, and the winner is the pairing —
+        # which is what right-sizes equipment, since `_evaluate` caps
+        # passengers at what the market offers and still charges the whole
+        # trip cost of a bigger aeroplane.
+        spec = self._pick_for_mission(world, p, mem, arch)
         if spec is None:
-            return
-
-        # A ROUTE CASE MUST JUSTIFY THE METAL. Acquiring first and looking for
-        # flying afterwards is how this burned $48k/day in lease
-        # early-termination fees: buy a plane, fail to find a route that
-        # clears the bar, let it sit idle, hand it back at a penalty, repeat.
-        # Check the aircraft has somewhere profitable to go BEFORE committing.
-        if not self._has_case_for(world, p, mem, arch, spec):
             return
 
         mem.tail_seq += 1
@@ -1162,32 +1341,41 @@ class AICarrierSubsystem(Subsystem):
         def __init__(self, spec):
             self.spec = spec
 
-    def _has_case_for(self, world, p, mem, arch, spec) -> bool:
+    def _case_for(self, world, p, mem, arch, spec):
         """
-        Is there an unserved route this aircraft type could fly profitably?
-        Evaluated against a scratch copy of the tried-set so a candidate
-        rejected for a hypothetical purchase isn't permanently blacklisted
-        for the real fleet.
+        The best unserved route this aircraft TYPE could fly profitably, as
+        ``(pair, est_daily_profit, reference_fare)``, or None. Evaluated
+        against a scratch copy of the tried-set so a candidate rejected for a
+        hypothetical purchase isn't permanently blacklisted for the real fleet.
         """
         saved = set(mem.tried)
         try:
             return self._best_candidate(world, p, mem, arch,
-                                        self._Prospect(spec)) is not None
+                                        self._Prospect(spec))
         finally:
             mem.tried = saved
 
-    def _pick_aircraft(self, world, p, arch):
+    # How many types off the seat-km ranking get a route search run against
+    # them. The search is the expensive half, so this is a real cost — but
+    # one is far too few, because the cheapest seat-km in the catalog is
+    # always the same aeroplane and the network is not always the same shape.
+    SHORTLIST = 4
+
+    def _rank_aircraft(self, world, p, arch):
         """
-        Choose equipment on cost per available seat-km over the mission this
-        carrier actually flies — the metric real fleet planners use — rather
-        than sticker price. Capital, fuel and maintenance all count, so an
-        old airframe with a cheap list price doesn't win on the strength of
+        Rank eligible equipment by cost per available seat-km over the stage
+        this carrier actually flies — the metric real fleet planners use,
+        rather than sticker price. Capital, fuel and maintenance all count, so
+        an old airframe with a cheap list price doesn't win on the strength of
         being cheap to acquire while burning the profit off in fuel.
 
         Restricted to the archetype's plane classes, to types that can make
-        the stage length, and to what its hubs' runways can take. The upshot
-        is that long-stage carriers grow into widebodies on their own,
-        because that's genuinely where the seat-km economics go.
+        the stage length, and to what its hubs' runways can take.
+
+        Returns a LIST, cheapest first. It used to return only the argmin,
+        which meant one type won for a given archetype and stage and the
+        carrier bought nothing else for the rest of the game — a monoculture
+        by construction, whatever the route it was about to fly needed.
         """
         from airlinesim.route import block_hours
 
@@ -1196,7 +1384,7 @@ class AICarrierSubsystem(Subsystem):
         runway = min((ap.runway_length_m for ap in
                       (actions.airport(world, i) for i in p.hub_iatas) if ap),
                      default=99_999.0)
-        best, best_score = None, None
+        scored = []
         for spec in world.repo.all(AircraftSpec):
             if spec.plane_class not in arch.plane_classes:
                 continue
@@ -1211,10 +1399,40 @@ class AICarrierSubsystem(Subsystem):
                     + spec.maint_cost_per_hour * hours
                     + (spec.list_price * self.OWNERSHIP_RATE_PER_YEAR
                        / self.ANNUAL_BLOCK_HOURS) * hours)
-            score = trip / (spec.max_seats * target)     # cost per seat-km
-            if best_score is None or score < best_score:
-                best, best_score = spec, score
-        return best
+            scored.append((trip / (spec.max_seats * target), spec))
+        scored.sort(key=lambda s: (s[0], s[1].spec_id))
+        return [spec for _, spec in scored]
+
+    # A type already in the fleet is worth something a spreadsheet of trip
+    # costs doesn't show: the crews are rated for it, the maintenance program
+    # exists, and the spares are on the shelf. Real airlines pay for that
+    # commonality; here it is a thumb on the scale, not a rule, so a genuinely
+    # better aeroplane for the mission still wins.
+    COMMONALITY_BONUS = 1.08
+
+    def _pick_for_mission(self, world, p, mem, arch):
+        """
+        Choose the type whose BEST AVAILABLE ROUTE is worth the most, rather
+        than the type with the lowest seat-km cost in the abstract.
+
+        This is the right-sizing seam. `_evaluate` caps passengers at what the
+        market will actually give (`min(seats * 0.75, demand * share)`) while
+        still charging the full trip cost of the airframe, so a 290-seat
+        widebody aimed at a 90-passenger market scores badly against a
+        regional jet — automatically, with no seat-count table to maintain.
+        """
+        fleet_types = {a.spec.spec_id for a in p.fleet if not a.retired}
+        best = None
+        for spec in self._rank_aircraft(world, p, arch)[:self.SHORTLIST]:
+            cand = self._case_for(world, p, mem, arch, spec)
+            if cand is None:
+                continue
+            _pair, profit, _fare = cand
+            if spec.spec_id in fleet_types:
+                profit *= self.COMMONALITY_BONUS
+            if best is None or profit > best[1]:
+                best = (spec, profit)
+        return best[0] if best else None
 
     # -- introspection for the GUI ------------------------------------
     def profile_of(self, player_id: str) -> dict:

@@ -314,6 +314,19 @@ dialog h2 { margin-top: 0; }
 .mapLabel { fill: #9db2c6; font-size: 8px; font-family: ui-monospace, monospace;
             pointer-events: none; }
 
+/* compass rose: the map is drawn to one north, the other is shown at its angle */
+.mapCompassRing  { fill: rgba(7, 19, 32, 0.55); stroke: #24384d; stroke-width: 0.8; }
+.mapCompassHub   { fill: #9db2c6; }
+.mapCompassTrue  { stroke: #9db2c6; stroke-width: 1.6; }
+.mapCompassMag   { stroke: #e5556b; stroke-width: 1.6; stroke-dasharray: 3 2; }
+.mapCompassLabel { fill: #9db2c6; font-size: 8px;
+                   font-family: ui-monospace, monospace; }
+
+.mapControls { display: flex; flex-wrap: wrap; align-items: baseline;
+               gap: 0.5rem; margin: 0.3rem 0 0.15rem; font-size: 0.8rem; }
+.mapControls label { color: var(--muted); display: inline-flex;
+                     align-items: center; gap: 0.3rem; }
+
 /* carrier colours and the weather kinds currently on the map */
 .mapLegend { display: flex; flex-wrap: wrap; gap: 0.15rem 0.9rem;
              margin: 0.4rem 0 0.15rem; font-size: 0.78rem; }

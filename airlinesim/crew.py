@@ -177,17 +177,51 @@ class CrewLegalitySubsystem:
             for crew in _all_crews(p):
                 st = crew.duty
                 if id(crew) not in flew:
-                    # idle this tick -> banking rest
-                    st.resting = True
                     st.rest_accumulated += dt
+                    # REST IS OWED FOR A DUTY PERIOD, NOT FOR A TICK BOUNDARY.
+                    # `duty_before_rest_hours` is the FDP after which a rest is
+                    # mandatory; it was declared on DutyLimits and never read,
+                    # and "did not fly this tick" stood in for it. That makes
+                    # the rule depend on tick SIZE: at dt=24 a crew flies a
+                    # whole day's rotations and then owes one rest, while at
+                    # dt=1 the same schedule bills it a ten-hour rest for four
+                    # minutes of flying, so it works one hour in eleven. A
+                    # simulated month came out 81% short at hourly resolution.
+                    if st.continuous_duty_hours >= self.limits.duty_before_rest_hours:
+                        st.resting = True
                     if st.rest_accumulated >= self.limits.min_rest_hours:
                         st.continuous_duty_hours = 0.0
+                        # rest is BANKED, so the crew is no longer resting.
+                        # Leaving the flag set relied on `rest_accumulated`
+                        # growing without bound to stay legal, which made the
+                        # flag unreadable and any reset of it a silent ground.
+                        st.resting = False
 
 
 def _all_crews(player):
+    """
+    EVERY crew the player employs, including the ROSTERING POOLS.
+
+    The pools used to be missing here, and it was the most expensive bug in
+    the crew model. Rest is banked by this subsystem for crews that did not
+    fly, but a pool crew that isn't rostered this tick is attached to no
+    route op — so it appeared in neither `player.crews` nor the op walk, and
+    banked nothing.
+
+    The result was a one-way ratchet. A crew flies (log_flight resets its
+    rest to zero), the roster passes over it next tick because it is resting,
+    and from that moment it is invisible to the only code that could ever
+    clear the rest — so it stays illegal FOREVER at whatever fraction of the
+    minimum it happened to hold. Pools drained to a couple of usable crews,
+    every route reported "no legal crew available to roster", load factors
+    went to zero network-wide, and carriers churned aircraft they could not
+    staff. `engine.tick` already walked the pools for the daily counter roll;
+    only this one place didn't.
+    """
     seen = set()
     out = []
-    for c in list(player.crews):
+    for c in (list(player.crews) + list(getattr(player, "cockpit_pool", []))
+              + list(getattr(player, "cabin_pool", []))):
         if id(c) not in seen:
             seen.add(id(c)); out.append(c)
     for op in player.route_ops:
@@ -208,14 +242,32 @@ def _all_crews(player):
 # This makes positioning a real constraint.
 
 
-def _candidate_score(crew, op, now, fh_needed):
+# Keeping the crew that is already on an op is worth more than any positioning
+# or freshness term, and it is what makes the roster INDEPENDENT OF TICK SIZE.
+#
+# A duty period is a block of flying followed by a rest period. If the roster
+# re-picks the best-rested crew from scratch every tick, then at 1-hour
+# resolution a crew flies for one tick, is passed over on the next because it
+# now owes rest, and ends up working one hour in eleven — while at 24-hour
+# resolution the same crew flies a whole day's rotations in a single tick and
+# rests one tick. Same month, same schedule, wildly different carriage: the
+# hourly run flew almost nothing.
+#
+# Holding the incumbent lets a duty period SPAN ticks. The crew keeps flying
+# until it reaches `max_daily_flight_hours`, is released, banks its rest, and
+# comes back — which is both what a real roster does and what makes a
+# simulated month come out the same at 24h, 6h and 1h.
+INCUMBENT_BONUS = 5000.0
+
+
+def _candidate_score(crew, op, now, fh_needed, incumbent=None):
     """Higher = better. -inf if the crew cannot legally/physically take the op."""
     if not crew_is_type_rated(crew, op.plane.spec):
         return float("-inf")
     ok, _ = is_legal_for_flight(crew, now, fh_needed, crew.limits)
     if not ok:
         return float("-inf")
-    score = 0.0
+    score = INCUMBENT_BONUS if crew is incumbent else 0.0
     if crew.location_iata == op.spec.origin_iata:
         score += 1000.0          # already in position: ideal
     elif crew.location_iata == op.spec.dest_iata:
@@ -249,19 +301,21 @@ class RosterSubsystem:
                 # fly. This lets a multi-rotation op be served by a rested crew.
                 fh_one = (op.spec.distance_km / op.plane.spec.cruise_speed_kmh) \
                     * (dt / 24.0)
-                op.cockpit = self._assign(cockpit_pool, taken, op, now, fh_one)
-                op.cabin = self._assign(cabin_pool, taken, op, now, fh_one)
+                op.cockpit = self._assign(cockpit_pool, taken, op, now, fh_one,
+                                          op.cockpit)
+                op.cabin = self._assign(cabin_pool, taken, op, now, fh_one,
+                                        op.cabin)
                 if op.cockpit is None or op.cabin is None:
                     op.last_crew_block = "no legal crew available to roster"
                 else:
                     op.last_crew_block = ""
 
-    def _assign(self, pool, taken, op, now, fh_needed):
+    def _assign(self, pool, taken, op, now, fh_needed, incumbent=None):
         best, best_score = None, float("-inf")
         for crew in pool:
             if id(crew) in taken:
                 continue
-            s = _candidate_score(crew, op, now, fh_needed)
+            s = _candidate_score(crew, op, now, fh_needed, incumbent)
             if s > best_score:
                 best, best_score = crew, s
         if best is not None and best_score > float("-inf"):
@@ -324,7 +378,15 @@ class DeadheadSubsystem:
                         continue  # only direct-to-base in this model
                     if op.last_eff_freq <= 0:
                         continue  # that flight isn't actually operating
-                    dh_hours = op.spec.distance_km / op.plane.spec.cruise_speed_kmh
+                    # DUTY IS A DAILY BUDGET, SO IT SCALES WITH THE TICK, the
+                    # same way Operations logs flight hours and the same way
+                    # the seat reservation below is sized. Logging a whole
+                    # leg's duty on every tick charged a crew 24x more duty at
+                    # hourly resolution than at daily: it hit
+                    # `duty_before_rest_hours` in hours instead of weeks, and
+                    # a simulated month flew ~39% less at dt=1 than at dt=24.
+                    dh_hours = (op.spec.distance_km / op.plane.spec.cruise_speed_kmh) \
+                        * (dt / 24.0)
                     # reserve a seat and reposition the crew
                     op.deadhead_seats = getattr(op, "deadhead_seats", 0) + crew.headcount
                     crew.duty.log_deadhead(now, dh_hours)

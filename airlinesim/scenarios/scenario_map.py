@@ -24,12 +24,21 @@ where this feature would break silently:
                    map assumes: `eff_freq` gates whether an aircraft is drawn
                    at all, `block_h` sets how fast it moves, and the weather
                    system snapshot carries position, radius and kind.
+  6. ORIENTATION   NORTH IS AT THE TOP, and the magnetic model the map can
+                   orient to reproduces the WMM's own published test values.
+                   The projection drew mirrored top-to-bottom at first: the
+                   textbook Albers formula is written for a frame where +y is
+                   north, and SVG's +y points DOWN the screen. A flipped US
+                   still reads as a plausible landmass at a glance, which is
+                   exactly why it needs a check rather than an eyeball.
 
 Run:  airlinesim run map
 """
 import json
+import math
 from pathlib import Path
 
+from airlinesim import geomag
 from airlinesim.game import new_game
 from airlinesim.server import BASEMAP_PATH, WEBUI_DIR
 
@@ -160,8 +169,9 @@ def check_wiring():
     pp = (Path(__file__).parent.parent.parent / "pyproject.toml")
     if pp.is_file():
         txt = pp.read_text()
-        check("package-data covers webui/ and data/*.json",
-              'webui/**/*' in txt and 'data/*.json' in txt)
+        check("package-data covers webui/, data/*.json and data/*.cof",
+              'webui/**/*' in txt and 'data/*.json' in txt
+              and 'data/*.cof' in txt)
 
 
 # ------------------------------------------------------------------
@@ -274,6 +284,114 @@ def check_snapshot(bm):
           f"{len(aps_live)} airports in play")
 
 
+# ------------------------------------------------------------------
+# 6 — orientation: north up, and a real magnetic model
+# ------------------------------------------------------------------
+def _albers_py(lon, lat):
+    """The projection map.js uses, reimplemented so the SIGN can be asserted.
+
+    Only the vertical sense is being checked here, which is the thing that was
+    wrong and the thing a reimplementation can actually catch — if the JS is
+    edited to flip y again, the two stop agreeing about which way is up and
+    the check below fails.
+    """
+    rad = math.pi / 180
+    lat0, lon0 = 37.5 * rad, -96 * rad
+    p1, p2 = 29.5 * rad, 45.5 * rad
+    n = 0.5 * (math.sin(p1) + math.sin(p2))
+    C = math.cos(p1) ** 2 + 2 * n * math.sin(p1)
+    rho0 = math.sqrt(C - 2 * n * math.sin(lat0)) / n
+    theta = n * (lon * rad - lon0)
+    rho = math.sqrt(C - 2 * n * math.sin(lat * rad)) / n
+    return rho * math.sin(theta), rho * math.cos(theta) - rho0
+
+
+def check_orientation(bm):
+    print("\n=== ORIENTATION: NORTH IS UP ===")
+    js = (WEBUI_DIR / "map.js").read_text() if (WEBUI_DIR / "map.js").is_file() else ""
+    # The JS must carry the negated form. `rho0 - rho*cos(theta)` is the
+    # textbook expression and is upside down in screen coordinates.
+    check("map.js uses the screen-space (negated) Albers northing",
+          "rho * Math.cos(theta) - rho0" in js,
+          "found the flipped form 'rho0 - rho*cos(theta)'"
+          if "rho0 - rho * Math.cos(theta)" in js else "ok")
+
+    # In SVG, y grows DOWNWARD, so a more northerly point must have a SMALLER y.
+    south = _albers_py(-96.0, 25.0)     # southern tip of Texas latitude
+    north = _albers_py(-96.0, 49.0)     # the Canadian border
+    check("a northern point projects ABOVE a southern one", north[1] < south[1],
+          f"lat 49 -> y {north[1]:+.4f}   lat 25 -> y {south[1]:+.4f} "
+          f"(smaller y is higher on screen)")
+    east = _albers_py(-70.0, 40.0)
+    west = _albers_py(-120.0, 40.0)
+    check("an eastern point projects to the RIGHT of a western one",
+          east[0] > west[0],
+          f"lon -70 -> x {east[0]:+.4f}   lon -120 -> x {west[0]:+.4f}")
+
+    print("\n=== MAGNETIC DECLINATION (World Magnetic Model) ===")
+    # The three geomagnetic test values published in the WMM2020 technical
+    # report, at epoch 2020.0 and zero altitude. Reproducing all three to a
+    # tenth of a nanotesla is what says the spherical-harmonic synthesis and
+    # the Schmidt normalisation are right — a double-normalised recursion
+    # gives plausible-looking magnitudes with the wrong signs.
+    cases = [(80.0, 0.0, 6570.4, -146.3, 54606.0, -1.28),
+             (0.0, 120.0, 39624.3, 109.9, -10932.5, 0.16),
+             (-80.0, 240.0, 5940.6, 15772.1, -52480.8, 69.36)]
+    worst_nt = worst_deg = 0.0
+    for lat, lon, X, Y, Z, D in cases:
+        x, y, z = geomag.field(lat, lon, 2020.0)
+        d = geomag.declination(lat, lon, 2020.0)
+        worst_nt = max(worst_nt, abs(x - X), abs(y - Y), abs(z - Z))
+        worst_deg = max(worst_deg, abs(d - D))
+    check("reproduces the WMM's published test values", worst_nt < 0.5,
+          f"worst component error {worst_nt:.2f} nT, "
+          f"worst declination error {worst_deg:.3f} deg over {len(cases)} points")
+
+    # Global sanity: total intensity is between about 22 and 67 microtesla
+    # everywhere on Earth. A normalisation bug sails past a single spot check
+    # but not past a sweep.
+    lo, hi = 1e12, 0.0
+    for la in range(-80, 81, 20):
+        for lo_ in range(-180, 180, 30):
+            x, y, z = geomag.field(float(la), float(lo_), 2020.0)
+            f = math.sqrt(x * x + y * y + z * z)
+            lo, hi = min(lo, f), max(hi, f)
+    check("total field intensity is physical everywhere", 20_000 < lo and hi < 70_000,
+          f"{lo:,.0f} .. {hi:,.0f} nT (Earth's field runs ~22,000-67,000)")
+
+    # The US declinations are the ones a player would recognise, and their
+    # SIGNS are the point: east in the west, west in the east.
+    year = geomag.epoch() + 5.0
+    sea = geomag.declination(47.45, -122.31, year)
+    bgr = geomag.declination(44.81, -68.83, year)
+    check("declination is EAST in the west and WEST in the east",
+          sea > 5.0 > -5.0 > bgr,
+          f"Seattle {sea:+.1f} deg, Bangor ME {bgr:+.1f} deg")
+
+    bbox = (bm or {}).get("bbox", [-125.0, 24.0, -66.5, 50.0])
+    dlo, dhi = geomag.declination_range(bbox, year)
+    check("the window spans too much variation for one magnetic rotation",
+          (dhi - dlo) > 20.0,
+          f"{dlo:+.1f} to {dhi:+.1f} deg across the lower 48 "
+          f"({dhi - dlo:.0f} deg spread) — so magnetic-north-up can only be "
+          f"exact on the reference meridian, and the GUI says so")
+
+    # ...and the GUI has to actually say it, not just the docstring.
+    html = (WEBUI_DIR / "index.html").read_text()
+    check("the map offers a true/magnetic north reference",
+          'id="mapNorthRef"' in html and 'id="mapNorth"' in html)
+    check("the caveat is in the product, not only in the code",
+          "no single rotation" in js and "reference meridian" in js)
+
+    src = (Path(__file__).parent.parent / "server.py").read_text()
+    check("GET /api/magnetic is a route on the server", '"/api/magnetic"' in src)
+    check("the WMM coefficients are committed", geomag.COF_PATH.is_file(),
+          f"{geomag.COF_PATH.name}, {geomag.model_name()} epoch "
+          f"{geomag.epoch():.1f} "
+          f"({geomag.COF_PATH.stat().st_size / 1024:.1f} KB, public domain)"
+          if geomag.COF_PATH.is_file() else "MISSING")
+
+
 def main():
     print("NETWORK MAP CHECK")
     print("=" * 70)
@@ -281,6 +399,7 @@ def main():
     check_basemap(bm)
     check_wiring()
     check_snapshot(bm)
+    check_orientation(bm)
     passed = sum(1 for _, ok in CHECKS if ok)
     print("\n" + "=" * 70)
     print(f"{passed}/{len(CHECKS)} checks passed — "

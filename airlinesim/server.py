@@ -34,6 +34,37 @@ def _basemap_bytes():
         _BASEMAP_CACHE["bytes"] = (BASEMAP_PATH.read_bytes()
                                    if BASEMAP_PATH.is_file() else None)
     return _BASEMAP_CACHE["bytes"]
+
+
+# The map can orient itself to MAGNETIC north, which is what a pilot's chart
+# does. Declination comes from the committed World Magnetic Model, and the
+# spread over the window travels with it because a continental map cannot be
+# magnetic-north-up everywhere — see airlinesim/geomag.py.
+_MAG_REF = (37.5, -96.0)          # the projection's own reference point
+
+
+def _magnetic() -> dict:
+    import datetime as _dt
+    from airlinesim import geomag
+    now = _dt.datetime.now(_dt.timezone.utc)
+    year = now.year + (now.timetuple().tm_yday - 1) / 365.25
+    lat, lon = _MAG_REF
+    try:
+        bbox = json.loads(BASEMAP_PATH.read_text())["bbox"] \
+            if BASEMAP_PATH.is_file() else [-125.0, 24.0, -66.5, 50.0]
+        lo, hi = geomag.declination_range(bbox, year)
+        return {
+            "reference": {"lat": lat, "lon": lon},
+            "declination": round(geomag.declination(lat, lon, year), 2),
+            "min": round(lo, 1), "max": round(hi, 1),
+            "model": geomag.model_name(), "year": round(year, 2),
+            "note": geomag.validity_note(year),
+        }
+    except Exception as exc:                       # never break the map for this
+        import logging
+        logging.getLogger("airlinesim").warning(
+            "magnetic model unavailable: %s", exc)
+        return {"error": str(exc), "declination": 0.0}
 DEFAULT_SAVE_PATH = str(Path.home() / ".airlinesim_save.pkl")
 
 COMMANDS = {
@@ -246,6 +277,8 @@ def make_handler(hub: Hub):
                 self._send_json(hub.session.snapshot())
             elif path == "/api/catalog":
                 self._send_json(hub.session.catalog())
+            elif path == "/api/magnetic":
+                self._send_json(_magnetic())
             elif path == "/api/basemap":
                 # The committed Natural Earth base map (states, highways,
                 # coast, lakes, rivers). Static and ~140 KB, so it is read

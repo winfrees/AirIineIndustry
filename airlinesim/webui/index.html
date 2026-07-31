@@ -59,6 +59,15 @@
     <h2>Network Map</h2>
     <div id="mapWrap"></div>
     <div id="mapLegend" class="mapLegend"></div>
+    <div class="mapControls">
+      <label>north
+        <select id="mapNorthRef" title="magnetic is the aviation convention; true is the cartographic one">
+          <option value="magnetic">magnetic</option>
+          <option value="true">true</option>
+        </select>
+      </label>
+      <span id="mapNorth" class="metric"></span>
+    </div>
     <div id="mapSel" class="metric"></div>
     <div id="mapNote" class="metric">An aircraft is drawn for every route that
       actually operated this tick, and it moves at its type's cruise speed —

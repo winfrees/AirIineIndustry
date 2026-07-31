@@ -41,6 +41,9 @@ const MAP = {
   basemap: null,
   W: 1000, H: 620,
   selection: null,      // {kind: "route"|"plane", id}
+  northRef: "magnetic", // "magnetic" (aviation convention) or "true"
+  declination: null,    // deg east at the projection's reference point
+  magnetic: null,       // the whole /api/magnetic payload, for the note
 };
 
 // Carrier colours, assigned by order of appearance so they're stable within a
@@ -56,6 +59,14 @@ function carrierColor(snap, playerId) {
 // -- projection -------------------------------------------------------------
 // Albers Equal-Area Conic, standard parallels 29.5N/45.5N (the USGS values for
 // the contiguous US). Pure arithmetic, no dependency.
+//
+// NORTH IS UP, WHICH TAKES A SIGN FLIP. The textbook Albers formula is
+// y = rho0 - rho*cos(theta), written for a mathematical frame where +y points
+// north. SVG's +y points DOWN the screen, so using that formula unchanged
+// draws the map mirrored top-to-bottom: Florida ends up at the top and the
+// Great Lakes at the bottom. It still looks like a plausible landmass at a
+// glance, which is why it survived a first look. Negating y puts north at the
+// top where it belongs.
 const ALBERS = (() => {
   const rad = Math.PI / 180;
   const lat0 = 37.5 * rad, lon0 = -96 * rad;
@@ -66,13 +77,49 @@ const ALBERS = (() => {
   return (lon, lat) => {
     const theta = n * (lon * rad - lon0);
     const rho = Math.sqrt(C - 2 * n * Math.sin(lat * rad)) / n;
-    return [rho * Math.sin(theta), rho0 - rho * Math.cos(theta)];
+    // screen coordinates: y grows downward, so negate the projected northing
+    return [rho * Math.sin(theta), rho * Math.cos(theta) - rho0];
   };
 })();
 
+// -- north reference --------------------------------------------------------
+// The map can be oriented to TRUE north or to MAGNETIC north, which is the one
+// a pilot's chart uses — runway numbers, headings and radials are all
+// magnetic. `MAP.declination` is the magnetic variation at the projection's
+// reference point (37.5N 96W), served from the committed World Magnetic Model.
+//
+// THE HONEST PART: declination is not a constant. Across the lower 48 it runs
+// from about +16 deg east in Washington State to -17 deg west in Maine, a
+// spread of some 33 degrees, so NO single rotation puts magnetic north at the
+// top everywhere on this map. Orienting to magnetic north means orienting to
+// it at ONE reference meridian; every other longitude is off by the local
+// difference. The panel states the reference and the spread rather than
+// letting the label imply a precision it hasn't got.
+//
+// It happens to be a small rotation here — the agonic line (zero declination)
+// runs close to the 96W reference — so this is a couple of degrees, not a
+// dramatic tilt. That is the real answer, not a bug.
+let NORTH_ROT = 0;      // radians the map is rotated to put "north" at the top
+
+function setNorthReference(kind) {
+  MAP.northRef = kind;
+  const d = (kind === "magnetic" && MAP.declination != null) ? MAP.declination : 0;
+  // Declination is degrees EAST of true north, so on a true-north-up map the
+  // magnetic-north direction lies that many degrees CLOCKWISE from straight
+  // up. Rotating the map by the same angle anticlockwise brings it upright.
+  NORTH_ROT = -d * Math.PI / 180;
+}
+
 // Fit the projection to the drawing area, computed once from the base map's
-// bbox so the same transform serves every layer.
+// bbox so the same transform serves every layer. The rotation is applied
+// BEFORE the fit, so a tilted map is still framed to the window instead of
+// hanging over the edge.
 let FIT = { s: 1, dx: 0, dy: 0 };
+
+function _rot(x, y) {
+  const c = Math.cos(NORTH_ROT), s = Math.sin(NORTH_ROT);
+  return [x * c - y * s, x * s + y * c];
+}
 
 function fitProjection(bbox, w, h, pad = 12) {
   const [W_, S_, E_, N_] = bbox;
@@ -82,7 +129,8 @@ function fitProjection(bbox, w, h, pad = 12) {
     corners.push(ALBERS(W_ + (E_ - W_) * f, S_), ALBERS(W_ + (E_ - W_) * f, N_));
     corners.push(ALBERS(W_, S_ + (N_ - S_) * f), ALBERS(E_, S_ + (N_ - S_) * f));
   }
-  const xs = corners.map((c) => c[0]), ys = corners.map((c) => c[1]);
+  const pts = corners.map((c) => _rot(c[0], c[1]));
+  const xs = pts.map((c) => c[0]), ys = pts.map((c) => c[1]);
   const minX = Math.min(...xs), maxX = Math.max(...xs);
   const minY = Math.min(...ys), maxY = Math.max(...ys);
   const s = Math.min((w - 2 * pad) / (maxX - minX), (h - 2 * pad) / (maxY - minY));
@@ -94,7 +142,8 @@ function fitProjection(bbox, w, h, pad = 12) {
 }
 
 function project(lon, lat) {
-  const [x, y] = ALBERS(lon, lat);
+  const [x0, y0] = ALBERS(lon, lat);
+  const [x, y] = _rot(x0, y0);
   return [x * FIT.s + FIT.dx, y * FIT.s + FIT.dy];
 }
 
@@ -406,7 +455,15 @@ async function initMap() {
   MAP.base = svgEl("g", {}, MAP.svg);
   MAP.live = svgEl("g", {}, MAP.svg);
 
-  MAP.basemap = await fetch("/api/basemap").then((r) => r.json()).catch(() => null);
+  const [basemap, magnetic] = await Promise.all([
+    fetch("/api/basemap").then((r) => r.json()).catch(() => null),
+    fetch("/api/magnetic").then((r) => r.json()).catch(() => null),
+  ]);
+  MAP.basemap = basemap;
+  MAP.magnetic = magnetic;
+  if (magnetic && !magnetic.error) MAP.declination = magnetic.declination;
+  setNorthReference(MAP.northRef);
+
   if (!MAP.basemap || MAP.basemap.error) {
     MAP.basemap = null;
     const note = document.getElementById("mapNote");
@@ -421,6 +478,8 @@ async function initMap() {
     fitProjection(MAP.basemap.bbox, MAP.W, MAP.H);
     drawBase();
   }
+  drawCompass();
+  wireNorthToggle();
 
   MAP.svg.addEventListener("click", (e) => {
     const plane = e.target.closest(".mapPlane");
@@ -430,4 +489,75 @@ async function initMap() {
     if (MAP.selection) { MAP.selection = null; if (latest) drawLive(latest); applySelection(); }
   });
   applySelection();
+}
+
+// -- north reference: compass, toggle, and the caveat -----------------------
+// A compass rose showing BOTH norths, which is the standard way a chart
+// resolves this: the map is drawn to one of them, and the other is shown at
+// its angle so the difference is visible rather than asserted in prose.
+function drawCompass() {
+  if (!MAP.svg) return;
+  MAP.compass && MAP.compass.remove();
+  const g = svgEl("g", { class: "mapCompass",
+                         transform: `translate(${MAP.W - 62},72)` }, MAP.svg);
+  MAP.compass = g;
+  const d = MAP.declination;
+  // On screen, "up" is whichever north the map is drawn to.
+  const trueUp = (MAP.northRef === "magnetic" && d != null) ? d : 0;
+  const magUp = (MAP.northRef === "magnetic" || d == null) ? 0 : d;
+  // Labels sit at different radii on purpose: over the contiguous US the two
+  // norths can be under two degrees apart, and side-by-side labels would
+  // overlap into an unreadable smudge exactly where the map is most correct.
+  const arm = (deg, len, cls, label, labelAt) => {
+    const a = (deg - 90) * Math.PI / 180;
+    const x = Math.cos(a) * len, y = Math.sin(a) * len;
+    svgEl("line", { x1: 0, y1: 0, x2: x.toFixed(1), y2: y.toFixed(1), class: cls }, g);
+    const lx = Math.cos(a) * labelAt, ly = Math.sin(a) * labelAt;
+    svgEl("text", { x: lx.toFixed(1), y: (ly + 3).toFixed(1),
+                    class: "mapCompassLabel", "text-anchor": "middle" },
+          g).textContent = label;
+  };
+  svgEl("circle", { cx: 0, cy: 0, r: 34, class: "mapCompassRing" }, g);
+  svgEl("circle", { cx: 0, cy: 0, r: 2.5, class: "mapCompassHub" }, g);
+  arm(trueUp, 34, "mapCompassTrue", "TN", 46);
+  if (d != null) arm(magUp, 26, "mapCompassMag", "MN", 26 - 9);
+  svgEl("title", {}, g).textContent = d == null
+    ? "true north"
+    : `map drawn ${MAP.northRef} north up\n` +
+      `variation ${d > 0 ? d.toFixed(1) + "°E" : Math.abs(d).toFixed(1) + "°W"} ` +
+      `at ${MAP.magnetic.reference.lat}°N ${Math.abs(MAP.magnetic.reference.lon)}°W`;
+}
+
+function wireNorthToggle() {
+  const el = document.getElementById("mapNorthRef");
+  if (!el) return;
+  el.value = MAP.northRef;
+  el.onchange = () => {
+    setNorthReference(el.value);
+    if (MAP.basemap) fitProjection(MAP.basemap.bbox, MAP.W, MAP.H);
+    else fitProjection([-125, 24, -66.5, 50], MAP.W, MAP.H);
+    drawBase();
+    drawCompass();
+    if (latest) drawLive(latest);
+    northNote();
+  };
+  northNote();
+}
+
+function northNote() {
+  const el = document.getElementById("mapNorth");
+  if (!el) return;
+  const m = MAP.magnetic;
+  if (!m || m.error) { el.textContent = "Oriented to true north."; return; }
+  const d = m.declination;
+  const fmt = (v) => (v >= 0 ? `${v.toFixed(1)}°E` : `${Math.abs(v).toFixed(1)}°W`);
+  const lead = MAP.northRef === "magnetic"
+    ? `Oriented to MAGNETIC north at ${m.reference.lat}°N `
+      + `${Math.abs(m.reference.lon)}°W, where the variation is ${fmt(d)}. `
+    : "Oriented to TRUE north. ";
+  const caveat = "no single rotation puts magnetic north up everywhere";
+  const where = "only the reference meridian is exact";
+  el.textContent = lead
+    + `Across the window variation runs ${fmt(m.min)} to ${fmt(m.max)}, so `
+    + `${caveat} — ${where}. ${m.model}, evaluated ${m.year}.`;
 }

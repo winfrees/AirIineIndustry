@@ -77,6 +77,26 @@ FLEET_CATALOG = (
     # a business seat costs ~2.2 economy seats on a 6-abreast 737 and ~4.2 on
     # a 9-abreast 787. Cabin LENGTH is derived from max_seats at economy
     # pitch, not taken from a fuselage drawing.
+    #
+    # `list_price` MUST BE ONE MEASURE ACROSS THE WHOLE TABLE. It drives the
+    # purchase price, the financed amount, lease rent, depreciation and book
+    # value, and the AI expenses ownership as a fraction of it — so any type
+    # priced on a different basis than its neighbours wins or loses every
+    # comparison for a reason that isn't about the aeroplane.
+    #
+    # That happened. The 757-200 and 767-300ER are out of production, and
+    # they carried their HISTORIC list prices ($48M and $72M) while every
+    # in-production type carried a current one ($106-317M). At 2.5-3.5x too
+    # little capital for their seat count, both dominated cost per seat-km at
+    # EVERY stage length, and all three AI archetypes converged on the 757 —
+    # a fleet monoculture produced entirely by a units mismatch.
+    #
+    # For a type no longer built there is no current list price, so the figure
+    # here is an EQUIVALENT CAPITAL VALUE: what it costs to put one on the
+    # line today, on the same basis as the rest of the table. Both stay the
+    # cheaper capital choice in their size class, which is their real
+    # commercial argument — they just no longer get it for free, and their
+    # genuinely higher fuel burn and maintenance now decide.
     dict(spec_id="E175", display_name="E175", manufacturer="Embraer",
          plane_class=PlaneClass.REGIONAL if hasattr(PlaneClass, "REGIONAL")
          else PlaneClass.NARROWBODY,
@@ -142,16 +162,18 @@ FLEET_CATALOG = (
          takeoff_runway_m=2400, type_rating="B737",
          cabin_abreast=6,
          reconfig_cost_per_slot=15_500, reconfig_days=15, scale=1.1),
+    # equivalent capital value, not a historic list price — see the note above
     dict(spec_id="B752", display_name="757-200", manufacturer="Boeing",
          plane_class=PlaneClass.NARROWBODY,
-         list_price=48_000_000, max_seats=200, max_range_km=7250,
+         list_price=85_000_000, max_seats=200, max_range_km=7250,
          cruise_speed_kmh=850, fuel_burn_lph=3400, maint_cost_per_hour=1600,
          takeoff_runway_m=2100, type_rating="B757",
          cabin_abreast=6,
          reconfig_cost_per_slot=13_000, reconfig_days=16, scale=1.3),
+    # equivalent capital value, not a historic list price — see the note above
     dict(spec_id="B763", display_name="767-300ER", manufacturer="Boeing",
          plane_class=PlaneClass.WIDEBODY,
-         list_price=72_000_000, max_seats=260, max_range_km=11000,
+         list_price=155_000_000, max_seats=260, max_range_km=11000,
          cruise_speed_kmh=851, fuel_burn_lph=4400, maint_cost_per_hour=2100,
          takeoff_runway_m=2600, type_rating="B757",
          cabin_abreast=7,
@@ -268,6 +290,32 @@ def _layout(spec: AircraftSpec, premium: bool) -> SeatLayout:
     # economy left unspecified, so the fitter fills what the business cabin
     # leaves — which is the honest answer to "how big is economy?"
     return fit_layout(spec, {CabinClass.BUSINESS: biz}).layout
+
+
+def _with_return_legs(chosen, ops_plan):
+    """
+    Pair every seeded leg with its return, pulling it out of the same plan.
+
+    A carrier seeded with ORD->LGA and nothing coming back has no way to get a
+    crew home: crews finish a tick at the DESTINATION and deadhead only on a
+    revenue leg pointing at their base. A one-way seed leaves its first crew
+    stranded at the spoke on day one and permanently — the route reports "no
+    legal crew available to roster" for the rest of the game, and it is the
+    one leg the AI's own planner will never fix, because it only ever adds
+    markets it isn't already serving.
+
+    The full `ops_plan` always contains both directions, so this is a lookup,
+    not a fabrication: the return leg comes with its own measured demand.
+    """
+    by_pair = {(rs.origin_iata, rs.dest_iata): (rs, ac) for rs, ac in ops_plan}
+    out, seen = [], set()
+    for rs, ac in chosen:
+        for key in ((rs.origin_iata, rs.dest_iata), (rs.dest_iata, rs.origin_iata)):
+            entry = by_pair.get(key)
+            if entry is not None and key not in seen:
+                seen.add(key)
+                out.append(entry)
+    return out
 
 
 # ------------------------------------------------------------
@@ -408,7 +456,7 @@ def build_world_from_data(hub: str = "ORD", n_destinations: int = 4,
         h_routes = len(ops_plan) if human_routes is None else human_routes
         a_routes = len(ops_plan) if ai_routes is None else ai_routes
 
-    from airlinesim.ai import ARCHETYPES, route_fit
+    from airlinesim.ai import archetype as _archetype, route_fit
     for pid, name, method, terms, premium in roster:
         is_ai = bool(ai_profiles) and pid in ai_profiles
         n = a_routes if is_ai else h_routes
@@ -417,13 +465,15 @@ def build_world_from_data(hub: str = "ORD", n_destinations: int = 4,
             # model, not just the biggest one — a premium carrier should open
             # from a long-runway primary field, a low-cost one from a cheaper
             # secondary field. Same fit function its own planner uses later.
-            arch = ARCHETYPES.get(ai_profiles[pid])
+            arch = _archetype(ai_profiles[pid])
             plan = sorted(
                 ops_plan,
                 key=lambda pair: -(
                     route_fit(arch, repo.get(AirportSpec, pair[0].origin_iata),
                               repo.get(AirportSpec, pair[0].dest_iata))
                     * pair[0].base_demand_per_day)) if arch else list(ops_plan)
+            plan = _with_return_legs(plan[:n], ops_plan)
+            n = len(plan)
         else:
             plan = list(ops_plan)
         engine.add_player(_carrier(world, bank, pid, name, method, terms,

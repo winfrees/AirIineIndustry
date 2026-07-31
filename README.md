@@ -117,7 +117,10 @@ airlinesim run integration       # run a named scenario
   size. Clicking an aircraft or a route highlights it in the Fleet and Routes
   panels. A route that flew nothing this tick is drawn dashed with the reason
   on its tooltip, so a crew-short carrier looks grounded instead of just
-  losing its icons.
+  losing its icons. It can be oriented to **true or magnetic north**, with
+  declination taken from the committed World Magnetic Model — and it says
+  plainly that variation spans some 33° across the lower 48, so magnetic-north-up
+  can only ever be exact on one reference meridian.
 
 ## Architecture
 
@@ -218,7 +221,16 @@ simplifications:
   so that an all-economy layout comes to exactly `max_seats`. Pitch tables are
   industry-shaped, not certified.
 - Crew positioning deadheads direct-to-base only; multi-hop routing and ferry
-  (positioning) flights are not yet implemented.
+  (positioning) flights are not yet implemented. A consequence worth knowing:
+  a route opened in one direction only strands its crew at the far end, so
+  routes are opened as out-and-back rotations.
+- Crew rest is `min_rest_hours` of *consecutive* time, which a coarse tick
+  cannot represent — a 24-hour tick grants a whole day where ten hours were
+  required, so a daily-resolution run is slightly optimistic about crew
+  availability. Carriage differs by a few percent between 24-hour and 1-hour
+  resolution for that reason alone; everything else in the engine is
+  resolution-independent to well under a percent, and `airlinesim run weather`
+  demonstrates the split rather than asserting it.
 - Weather is a probabilistic model whose climate comes from each airport's real
   coordinates, but every frequency, size and impact figure in it is a
   climate-*shaped* heuristic — no weather record is committed to this repo.
@@ -237,6 +249,10 @@ simplifications:
   geography, not shaded relief: relief needs an elevation raster and none is
   committed. The window is the lower 48, and airports outside it (Alaska,
   Hawaii, the territories) are named rather than plotted.
+- The bundled magnetic model is **WMM-2020, valid 2020.0–2025.0**. Past that
+  its secular-variation term is an extrapolation worth a few tenths of a
+  degree over the US — fine for orienting a map, not for navigation. Dropping
+  a newer `.COF` into `airlinesim/data/` is the whole upgrade.
 - On the historic data specifically: the shipped corpus is built from T-100
   **Market**, which carries no seat counts, so demand equals passengers *flown*
   and is understated on full routes. Capacity, load factor and a measured seat

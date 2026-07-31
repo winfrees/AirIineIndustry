@@ -38,8 +38,11 @@ constraint enforcement — not partial stubs.
       cli.py            # `airlinesim` command (list / run / demo / probe)
       routedata.py      # RUNTIME provider: 3-tier historic/comparable lookup
       databuilder.py    # build_world_from_data(): a world from the BTS corpus
+      geomag.py         # magnetic declination from the committed World
+                        #   Magnetic Model; orients the map, nothing else
       data/             # committed distilled snapshot (routes/airports/gravity)
                         #   + basemap.json, the Natural Earth US base map
+                        #   + wmm2020.cof, the World Magnetic Model
       webui/            # the browser front ends: index.html/app.js (the game),
                         #   explore.html/explore.js (the outcome explorer),
                         #   map.js (the network map)
@@ -414,6 +417,55 @@ Design, limits and the historic-data question: `docs/consolidation-design.md`.
   present — for every one of them. **A feature only the scenario can reach is
   not delivered.**
 
+## Crew rest and rotations (the bug that looked like AI collapse)
+
+A player reported that AI carriers "contract to one airplane". They weren't
+downsizing — they were **crew-starved**, and four separate faults stacked into
+one failure mode. All four are fixed; none of them should be re-broken.
+
+- **`crew._all_crews()` omitted the ROSTERING POOLS.** Rest is banked by
+  `CrewLegalitySubsystem` for crews that didn't fly, but it walked only
+  `player.crews` plus crews attached to a route op. A pool crew that wasn't
+  rostered this tick was attached to nothing, so it banked nothing. That is a
+  one-way ratchet: a crew flies (log_flight zeroes its rest), the roster skips
+  it next tick because it is resting, and from then on it is invisible to the
+  only code that could ever clear the rest — stuck at "resting (1.0/10h)"
+  FOREVER. Pools drained to one or two usable crews and whole networks went to
+  zero load factor. `engine.tick` already walked the pools for the daily
+  counter roll; this one place didn't.
+- **Rest was owed per TICK, not per DUTY PERIOD.** `duty_before_rest_hours`
+  was declared on `DutyLimits` and never read — "did not fly this tick" stood
+  in for it. That makes the rule depend on tick SIZE: at dt=24 a crew flies a
+  whole day's rotations then owes one rest; at dt=1 the same schedule bills it
+  ten hours of rest for four minutes of flying, so it works one hour in
+  eleven. Wiring the field in is what restores dt-independence.
+- **The deadhead logged a whole leg's duty every tick** (`dh_hours =
+  dist/speed`) while flight hours were dt-scaled — the same per-day-budget-
+  spent-per-tick class as the old gate bug. Now `* (dt/24)`.
+- **The AI opened one-way legs.** Combined with direct-to-base deadheading,
+  every crew it rostered flew out once and was stranded at a spoke. What that
+  looked like from outside was a churn loop: acquire, open a route, fly
+  nothing, get declared idle after `idle_days_before_shedding`, hand the lease
+  back at an early-termination penalty, repeat — several million dollars a
+  cycle, ending at one aeroplane. `_open_rotation` / `_close_rotation` now
+  open and close the leg AND its return on the same tail, network caps count
+  ROTATIONS not legs, and `_with_return_legs` pairs the seeded route too.
+- **`_track_health` called an aircraft idle when it merely hadn't flown.** An
+  aircraft with a schedule it couldn't crew is not spare capacity; the answer
+  is to hire, not to hand the metal back. Idle now means UNASSIGNED.
+- **`_staff_up` sized hiring off `len(route_ops)`.** A route is not a unit of
+  crew demand — seven daily rotations of a 1.4-hour leg is more than one crew
+  can legally fly. `_crew_target` derives the pool from scheduled BLOCK HOURS
+  over `max_daily_flight_hours × CREW_DEPTH`, and hiring closes the gap in
+  real steps instead of two per review.
+
+`airlinesim run weather` pins the dt-independence, and now also pins that the
+residual spread is ONLY rest quantisation: with a permissive duty envelope the
+three resolutions agree to under 0.5%. A 24-hour tick genuinely cannot
+represent "ten consecutive hours of rest" — it grants twenty-four — so the
+daily run is slightly optimistic about crew availability. That is a stated
+resolution limit, not a leak, and the check says which is which.
+
 ## Cabins: geometry, fitting and per-cabin fares
 
 `cabin.py` answers "what physically fits in this airframe?"; `finance_cabin.py`
@@ -510,6 +562,25 @@ Natural Earth into `airlinesim/data/basemap.json`, `server.py` serves it at
   legend ("off window: ANC HNL …") rather than projected somewhere wrong.
   Note GUM and SPN are EAST longitude, so any "is this a US coordinate?"
   test that assumes `lon < 0` is wrong.
+- **NORTH IS UP ONLY BECAUSE THE NORTHING IS NEGATED.** The textbook Albers
+  formula is `y = rho0 - rho*cos(theta)`, written for a maths frame where +y
+  points north; SVG's +y points DOWN, so using it unchanged draws the map
+  mirrored top-to-bottom. A flipped US still reads as a plausible landmass at
+  a glance, which is exactly why `scenario_map` asserts the sign instead of
+  relying on an eyeball. Don't "simplify" `project()` back to the textbook
+  form.
+- **The map can orient to MAGNETIC north** (`geomag.py` + the committed
+  public-domain `data/wmm2020.cof`), which is the convention aviation uses.
+  The synthesis reproduces the WMM's three published test values to 0.04 nT,
+  and `scenario_map` pins that — a double-normalised Legendre recursion gives
+  plausible magnitudes with wrong signs, so magnitude alone proves nothing.
+  Two limits travel with it: WMM-2020 expired at 2025.0 so anything later is
+  EXTRAPOLATED (a few tenths of a degree over the US — fine for a map, not for
+  navigation), and **declination is not constant across a continent**. It runs
+  +16°E in Washington to −17°W in Maine, so no single rotation puts magnetic
+  north up everywhere; the map orients at the projection's reference meridian
+  (96°W, where variation is ~1.9°E) and the panel states the spread rather
+  than implying a precision it hasn't got.
 - **SVG, not canvas**, and the base map is drawn ONCE into a `<g>` that never
   changes while only the live layer re-renders per snapshot. Click handling
   then comes free, which is what makes aircraft and routes selectable without
@@ -579,6 +650,47 @@ selection, in three archetypes (Low-Cost / Legacy / Regional) that are one
 policy engine with different weights. Any number can run at once — naming a
 carrier in `ai_profiles` that isn't in the base roster adds it as a new
 leasing entrant, so a three-way market is three names.
+
+**Equipment is chosen for the MISSION, not in the abstract.** `_rank_aircraft`
+orders eligible types by cost per available seat-km over the carrier's stage,
+and `_pick_for_mission` then runs a route search against the top `SHORTLIST`
+and buys the type whose best available route is worth the most. That is what
+right-sizes: `_evaluate` caps passengers at what the market offers while still
+charging the whole trip cost of a bigger aeroplane, so a widebody aimed at a
+90-passenger market loses to a regional jet with no seat-count table to
+maintain. It used to take the global argmin, which meant one type won for an
+archetype and stage and the carrier bought nothing else all game. A modest
+`COMMONALITY_BONUS` favours a type already in the fleet, because rated crews
+and an existing maintenance program are worth something a trip-cost table
+can't show.
+
+**`list_price` MUST BE ONE MEASURE ACROSS THE FLEET CATALOG.** It drives
+purchase, financing, lease rent, depreciation, book value AND the AI's
+ownership charge, so a type priced on a different basis than its neighbours
+wins or loses every comparison for a reason that isn't about the aeroplane.
+The 757-200 and 767-300ER are out of production and carried their HISTORIC
+list prices ($48M, $72M) against in-production types at current list
+($106–317M). At 2.5–3.5x too little capital for their seat count they
+dominated cost per seat-km at EVERY stage length, and all three archetypes
+converged on the 757 — a fleet monoculture produced entirely by a units
+mismatch. Both now carry an EQUIVALENT CAPITAL VALUE on the same basis, and
+`databuilder`'s catalog header says so.
+
+**Archetype names resolve through `ai.archetype()`, and an unknown one
+raises.** `ARCHETYPES` is keyed by DISPLAY name ("Low-Cost", "Legacy",
+"Regional") while the constants are `LOW_COST`/`LEGACY`/`REGIONAL`, so the
+obvious `ai_profiles={"crw": "LEGACY"}` missed the dict and fell through to
+the Low-Cost default — silently. Three carriers asked for three personalities
+all flew the same one, at the same service tier, with the same cabins, and the
+only evidence was that their numbers matched to the dollar. Both spellings now
+resolve and a name matching neither is an error, not a default.
+
+**The route search ROTATES its scan window** (`mem.scan_cursor`). A review can
+only afford `candidates_per_review` evaluations, and without a cursor it
+scored the same opening slice of the airport list every time: a carrier whose
+first candidates didn't clear its profit bar never saw the rest of the map and
+sat at its opening network for the whole game, slowly bleeding. Sorted first,
+so the engine stays deterministic for the explorer.
 
 Two balance figures in there are load-bearing rather than cosmetic.
 `max_fleet` must leave headroom above the fleet a carrier STARTS with: set at
@@ -664,10 +776,16 @@ modeled, deliberately, rather than faked.
   explorer's `fuel_price` mutation drives). Either wire `fuel_index` into
   `OperationsSubsystem`'s fuel costing or delete it; leaving it as-is invites
   the next caller to "adjust the fuel market" and measure nothing.
-- Crew deadheading is direct-to-base only; no multi-hop routing or ferry flights.
-- The bundled AI adjusts price/frequency but doesn't use route suitability to
-  right-size equipment, and it sets only the ECONOMY base fare — the premium
-  cabins it configures sell at the default class multiple, never repriced.
+- Crew deadheading is direct-to-base only; no multi-hop routing or ferry
+  flights. **This is why a one-way route is a trap**: a crew ends its tick at
+  the DESTINATION and can only get home on a leg pointing at its base, so a
+  leg with no return strands its crew there permanently. `build_world_from_data`
+  and `ai.py` both open routes as ROTATIONS for exactly this reason — see
+  "Crew rest and rotations" below.
+- The bundled AI sets only the ECONOMY base fare — the premium cabins it
+  configures sell at the default class multiple, never repriced. It does now
+  right-size equipment to the mission (`_pick_for_mission`), but it still
+  never recabins after acquisition.
 - Roster is conservative — can leave capacity unflown.
 - **Use `Bank.try_acquire()`, not `Bank.acquire()`**, unless you need the
   Loan/Lease object. `acquire()` returns None both for a denial AND for a

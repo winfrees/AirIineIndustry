@@ -165,6 +165,15 @@ def check_gui(base_cmd: list[str], fails: Failures) -> None:
         bm = json.loads(body) if status == 200 else None
         fails.check(isinstance(bm, dict) and bm.get("states") and bm.get("land"),
                     "/api/basemap served the committed base map")
+
+        # The magnetic model lives on its own package-data glob (data/*.cof).
+        # Missing, the map quietly falls back to true north — which is exactly
+        # the sort of silent degradation that needs catching in the WHEEL.
+        status, body = get(f"{url}/api/magnetic")
+        mag = json.loads(body) if status == 200 else None
+        fails.check(isinstance(mag, dict) and "error" not in mag
+                    and mag.get("model", "").startswith("WMM"),
+                    "/api/magnetic served a declination from the committed WMM")
     finally:
         kill_tree(proc)
 
