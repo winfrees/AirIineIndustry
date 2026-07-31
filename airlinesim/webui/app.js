@@ -412,6 +412,11 @@ function render(snap) {
   els.airports.innerHTML = airportsHtml(snap);
   els.log.innerHTML = logHtml(snap);
 
+  if (typeof drawLive === "function" && MAP.svg) {
+    drawLive(snap);
+    applySelection();
+  }
+
   const human = snap.players.find((p) => p.player_id === snap.human_player_id);
   if (human) {
     populateSelect(els.tailSelect, human.fleet.filter((a) => !a.retired), "tail_number",
@@ -478,19 +483,41 @@ function renderPlayers(snap) {
             .map((m) => `<div class="logLine">${esc(m)}</div>`).join("")
         }</details>`
       : "";
+    // the swatch is the map's colour for this carrier, so the two views are
+    // reading the same key
+    const swatch = typeof carrierColor === "function"
+      ? `<i class="swatch" style="background:${carrierColor(snap, p.player_id)}"></i>` : "";
     return `
       <div class="playerBlock">
         <div class="playerHead">
-          <span class="name">${esc(p.name)}</span>
+          ${swatch}<span class="name">${esc(p.name)}</span>
           <span class="tag">${isHuman ? "YOU" : "AI"}</span>
         </div>
         <div class="metric">cash ${money(p.cash)} &middot; debt ${money(p.debt)} &middot;
           net worth <span class="${p.net_worth >= 0 ? "good" : "bad"}">${money(p.net_worth)}</span>
           &middot; ${p.fleet.length} aircraft &middot; ${p.route_ops.length} routes
           &middot; ${pax.toFixed(0)} px/day</div>
+        ${disruptionLine(p)}
         ${style}${moves}
       </div>`;
   }).join("");
+}
+
+// What the weather has cost this carrier, cumulatively. Everything here is a
+// real ledger entry the engine charged — hotels, meals, compensation and crew
+// hotels are separate lines in DisruptionCosts, not one lumped estimate.
+function disruptionLine(p) {
+  const d = p.disruption;
+  if (!d || (!d.cancelled_flights && !d.stranded_pax && !d.total_cost)) return "";
+  const parts = [];
+  if (d.cancelled_flights) parts.push(`${d.cancelled_flights.toFixed(0)} flights cancelled`);
+  if (d.delay_hours) parts.push(`${d.delay_hours.toFixed(0)}h delay`);
+  if (d.stranded_pax) {
+    parts.push(`${d.stranded_pax} stranded (${d.rebooked_pax} rebooked, ` +
+               `${d.refunded_pax} refunded)`);
+  }
+  if (d.total_cost) parts.push(`<span class="bad">${money(d.total_cost)}</span> disruption cost`);
+  return `<div class="metric">weather: ${parts.join(" &middot; ")}</div>`;
 }
 
 const TIER_LABEL = { 1: "Basic", 2: "Standard", 3: "Premium" };
@@ -515,7 +542,7 @@ function routesHtml(snap) {
             `<option value="${t}" ${t === o.service_tier ? "selected" : ""}>` +
             `${TIER_LABEL[t]}</option>`).join("") + `</select>`
         : TIER_LABEL[o.service_tier] || o.service_tier;
-      rows.push(`<tr>
+      rows.push(`<tr data-rowop="${o.route_op_id}" data-rowtail="${esc(o.tail_number)}">
         <td>${esc(p.name)}</td>
         <td>${o.origin}→${o.dest}${o.data_tier && o.data_tier !== "exact"
           ? ` <span class="metric" title="demand is a ${o.data_tier} estimate, not measured">~</span>` : ""}</td>
@@ -530,6 +557,7 @@ function routesHtml(snap) {
         <td>${(o.load_factor * 100).toFixed(0)}%</td>
         <td>${o.pax.toFixed(0)}</td>
         <td class="${o.profit >= 0 ? "good" : "bad"}">${money(o.profit)}</td>
+        <td>${weatherCell(o)}</td>
         <td>${isHuman
           ? `<button class="btn small warn" data-op="${o.route_op_id}" data-act="close">Close</button>`
           : ""}</td>
@@ -541,8 +569,28 @@ function routesHtml(snap) {
   }
   return `<table><thead><tr>
     <th>Carrier</th><th>Route</th><th>Tail</th><th>Price</th><th>Freq</th><th>Service</th>
-    <th>LF</th><th>Pax</th><th>Profit</th><th></th><th></th>
-  </tr></thead><tbody>${rows.join("") || emptyRow(11)}</tbody></table>`;
+    <th>LF</th><th>Pax</th><th>Profit</th>
+    <th title="what the weather is doing to this route right now">Wx</th>
+    <th></th><th></th>
+  </tr></thead><tbody>${rows.join("") || emptyRow(12)}</tbody></table>`;
+}
+
+// The map draws weather; this says what it COST. Capacity lost, delay added
+// and frequencies cancelled are all on the op — without them the map is
+// scenery and a route quietly under-performing has no visible cause.
+function weatherCell(o) {
+  const cap = o.weather_capacity == null ? 1 : o.weather_capacity;
+  const delay = o.weather_delay_h || 0;
+  const cancelled = o.weather_cancelled || 0;
+  if (!o.weather && cap >= 0.999 && delay <= 0.005 && cancelled <= 0.005) return "";
+  const bits = [];
+  if (cap < 0.999) bits.push(`cap ${(cap * 100).toFixed(0)}%`);
+  if (delay > 0.005) bits.push(`+${delay.toFixed(1)}h`);
+  if (cancelled > 0.005) bits.push(`${cancelled.toFixed(1)} cx`);
+  const bad = cap < 0.75 || cancelled > 0.005;
+  return `<span class="${bad ? "bad" : "warn"}" title="${esc(o.weather || "")}">` +
+         `${esc(o.weather || "weather")}</span>` +
+         (bits.length ? ` <span class="metric">${bits.join(" · ")}</span>` : "");
 }
 
 // Per-cabin pricing, for the cabins the ASSIGNED aircraft actually has. A
@@ -565,7 +613,9 @@ function cabinFareRow(o, isHuman) {
        <span class="metric">${c.seats}st &middot; ${lf}% &middot; ${money(c.revenue)}</span>
      </span>`;
   }).join("");
-  return `<tr class="cabinRow"><td></td><td colspan="10">${cells}</td></tr>`;
+  // spans every column but the carrier name — keep in step with routesHtml's
+  // header when a column is added
+  return `<tr class="cabinRow"><td></td><td colspan="11">${cells}</td></tr>`;
 }
 
 function fleetHtml(snap) {
@@ -582,7 +632,7 @@ function fleetHtml(snap) {
              ${a.owned ? "Sell" : "Return"}</button>
            <button class="btn small" data-tail="${esc(a.tail_number)}" data-act="recabin">Recabin</button>`
         : "";
-      rows.push(`<tr>
+      rows.push(`<tr data-rowtail="${esc(a.tail_number)}">
         <td>${esc(p.name)}</td>
         <td>${esc(a.tail_number)}</td>
         <td>${esc(a.display_name)}</td>
@@ -621,14 +671,35 @@ function crewHtml(snap) {
     </div>`).join("");
 }
 
+// Reliability is the cumulative record — the "this hub costs you every winter"
+// number the weather work exists to produce. Blank until an airport has
+// actually been disrupted, so a clear-weather world isn't full of 100%s.
 function airportsHtml(snap) {
-  const rows = Object.entries(snap.airports).map(([iata, a]) => `<tr>
-    <td>${esc(iata)}</td>
-    <td>${a.gates_used.toFixed(0)}/${a.gates_total}</td>
-    <td>${a.fuel_spot != null ? "$" + a.fuel_spot.toFixed(3) + "/L" : "—"}</td>
-  </tr>`).join("");
-  return `<table><thead><tr><th>IATA</th><th>Gates</th><th>Fuel spot</th></tr></thead>
-    <tbody>${rows || emptyRow(3)}</tbody></table>`;
+  const anyWx = Object.values(snap.airports).some(
+    (a) => (a.weather && a.weather.kind) || (a.reliability && a.reliability.disrupted_hours));
+  const rows = Object.entries(snap.airports).map(([iata, a]) => {
+    const wx = a.weather || {}, rel = a.reliability || {};
+    const now = wx.kind
+      ? `<span class="${wx.closed ? "bad" : "warn"}">${esc(wx.text || wx.kind)}</span>`
+      : "";
+    const rec = rel.reliability != null && rel.disrupted_hours
+      ? `${(rel.reliability * 100).toFixed(0)}%<span class="metric"> · ` +
+        `${rel.cancelled_flights.toFixed(0)} cx · ${money(rel.cost)}` +
+        (rel.worst && rel.worst !== "CLEAR"
+          ? ` · worst ${esc(rel.worst.replace(/_/g, " ").toLowerCase())}` : "") +
+        `</span>`
+      : "";
+    return `<tr>
+      <td>${esc(iata)}</td>
+      <td>${a.gates_used.toFixed(0)}/${a.gates_total}</td>
+      <td>${a.fuel_spot != null ? "$" + a.fuel_spot.toFixed(3) + "/L" : "—"}</td>
+      ${anyWx ? `<td>${now}</td><td>${rec}</td>` : ""}
+    </tr>`;
+  }).join("");
+  return `<table><thead><tr><th>IATA</th><th>Gates</th><th>Fuel spot</th>
+    ${anyWx ? `<th>Sky</th><th title="share of elapsed time this field has been
+      operating normally, with what the disruption has cost">Reliability</th>` : ""}
+  </tr></thead><tbody>${rows || emptyRow(anyWx ? 5 : 3)}</tbody></table>`;
 }
 
 function hubsHtml(snap) {
@@ -874,6 +945,8 @@ if ("serviceWorker" in navigator) {
 
 (async function boot() {
   await loadCatalog();
+  // after the catalog, because the map needs airport coordinates from it
+  await initMap();
   // the aircraft list only exists after the catalog loads, so the cabin
   // planner can't be primed until now
   acquirePlanner.setSpec(els.specSelect.value);

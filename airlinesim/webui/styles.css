@@ -147,6 +147,9 @@ tr:last-child td { border-bottom: none; }
   margin-bottom: 0.3rem;
 }
 .playerHead .name { font-weight: 600; }
+/* same colour the network map draws this carrier in */
+.playerHead .swatch { width: 0.7rem; height: 0.7rem; border-radius: 2px;
+                      display: inline-block; }
 .playerHead .tag {
   font-size: 0.65rem;
   color: var(--muted);
@@ -292,3 +295,32 @@ dialog h2 { margin-top: 0; }
 
 /* the hour beside the day in the topbar clock */
 .hour { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* --- network map ------------------------------------------------------- */
+#mapWrap { width: 100%; background: #071320; border: 1px solid var(--card-border);
+           border-radius: 0.5rem; overflow: hidden; }
+.mapSvg { display: block; width: 100%; height: auto; }
+.mapLand  { fill: #16232f; stroke: none; }
+.mapState { fill: none; stroke: #2f4a63; stroke-width: 0.7; }
+.mapLake  { fill: #0b1826; stroke: #2f4a63; stroke-width: 0.5; }
+.mapRiver { fill: none; stroke: #1f3d55; stroke-width: 0.5; }
+.mapRoad  { fill: none; stroke: #4a3722; stroke-width: 0.6; stroke-opacity: 0.9; }
+.mapRoute { cursor: pointer; }
+.mapRoute:hover { stroke-width: 3; stroke-opacity: 1; }
+.mapPlane { cursor: pointer; }
+.mapWx    { pointer-events: none; }
+.mapPortDot    { fill: #e2eefa; stroke: #071320; stroke-width: 0.8; }
+.mapPortClosed { fill: var(--bad); stroke: #071320; stroke-width: 0.8; }
+.mapLabel { fill: #9db2c6; font-size: 8px; font-family: ui-monospace, monospace;
+            pointer-events: none; }
+
+/* carrier colours and the weather kinds currently on the map */
+.mapLegend { display: flex; flex-wrap: wrap; gap: 0.15rem 0.9rem;
+             margin: 0.4rem 0 0.15rem; font-size: 0.78rem; }
+.mapLegend span { display: inline-flex; align-items: center; gap: 0.3rem; }
+.mapLegend span.wxKey { color: var(--muted); }
+.mapLegend i { width: 0.7rem; height: 0.7rem; border-radius: 2px; display: block; }
+.mapLegend span.wxKey i { border-radius: 50%; opacity: 0.6; }
+
+/* a row highlighted by a map selection */
+tr.selectedRow > td { background: rgba(46, 168, 255, 0.16); }

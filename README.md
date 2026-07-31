@@ -110,6 +110,14 @@ airlinesim run integration       # run a named scenario
 - **Hourly clock.** The engine's tick length is a resolution knob and the
   simulation is independent of it: a month of flying comes out the same
   stepped in 24-hour, 6-hour or 1-hour slices.
+- **A network map.** The browser GUI draws the whole game on a US map — state
+  lines, coast, lakes, rivers and Interstates from Natural Earth, in an Albers
+  equal-area projection — with each carrier in its own colour, routes as great
+  circles, aircraft as silhouettes by class, and weather systems at their real
+  size. Clicking an aircraft or a route highlights it in the Fleet and Routes
+  panels. A route that flew nothing this tick is drawn dashed with the reason
+  on its tooltip, so a crew-short carrier looks grounded instead of just
+  losing its icons.
 
 ## Architecture
 
@@ -141,6 +149,7 @@ competitor is adding a `Player`, not rewriting allocation logic.
 | `cabin`       | cabin geometry, seat fitting, and per-cabin fares            |
 | `weather`     | clock resolution, geographic weather, and the disruption chain |
 | `alliance`    | connecting feed, alliances, valuation, and mergers          |
+| `map`         | the committed base map, its clipping, and the map's data seam |
 | `btsdata`     | BTS ingest pipeline against committed fixtures (offline)    |
 | `routedata`   | the three-tier historic/comparable route lookup             |
 | `databuilt`   | the engine running on real BTS route data                   |
@@ -221,6 +230,13 @@ simplifications:
 - The bundled AI adjusts price/frequency but does not yet use route suitability
   to right-size equipment, and prices only the economy base fare — the premium
   cabins it installs sell at the default class multiple.
+- The network map is not radar. The engine models daily *frequency*, not
+  individual flights, so an aircraft's position along its leg is derived from
+  the clock — the count, the direction and the ground speed are real, the
+  aeroplane at a given point is not a simulated object. The base map is
+  geography, not shaded relief: relief needs an elevation raster and none is
+  committed. The window is the lower 48, and airports outside it (Alaska,
+  Hawaii, the territories) are named rather than plotted.
 - On the historic data specifically: the shipped corpus is built from T-100
   **Market**, which carries no seat counts, so demand equals passengers *flown*
   and is understated on full routes. Capacity, load factor and a measured seat

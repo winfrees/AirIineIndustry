@@ -34,7 +34,7 @@ SCRATCH = Path(tempfile.mkdtemp(prefix="airlinesim-smoke-"))
 
 # Every scenario that self-checks and is safe offline.
 CHECKED_SCENARIOS = ["integration", "routedata", "btsdata", "databuilt", "refresh_cx",
-                    "explorer", "cabin", "weather", "alliance"]
+                    "explorer", "cabin", "weather", "alliance", "map"]
 # These only print a report; the bar is "runs without raising".
 SMOKE_SCENARIOS = ["competitive", "crew", "deadhead", "roster", "route", "finance"]
 
@@ -153,6 +153,18 @@ def check_gui(base_cmd: list[str], fails: Failures) -> None:
         tree = json.loads(body) if status == 200 else None
         fails.check(isinstance(tree, dict) and tree.get("node_count", 0) >= 1,
                     "/api/explore/tree served a rooted tree")
+
+        # The network map is the other thing that lives on package data: map.js
+        # under webui/ and basemap.json under data/. Both have their own
+        # package-data glob, and a map with no land is exactly the kind of
+        # silent degradation this smoke test exists to catch.
+        status, body = get(f"{url}/map.js")
+        fails.check(status == 200 and len(body) > 0, "map.js served")
+
+        status, body = get(f"{url}/api/basemap")
+        bm = json.loads(body) if status == 200 else None
+        fails.check(isinstance(bm, dict) and bm.get("states") and bm.get("land"),
+                    "/api/basemap served the committed base map")
     finally:
         kill_tree(proc)
 

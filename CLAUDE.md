@@ -39,6 +39,10 @@ constraint enforcement — not partial stubs.
       routedata.py      # RUNTIME provider: 3-tier historic/comparable lookup
       databuilder.py    # build_world_from_data(): a world from the BTS corpus
       data/             # committed distilled snapshot (routes/airports/gravity)
+                        #   + basemap.json, the Natural Earth US base map
+      webui/            # the browser front ends: index.html/app.js (the game),
+                        #   explore.html/explore.js (the outcome explorer),
+                        #   map.js (the network map)
       btsdata/          # DEV-TIME BTS ingest (schema/download/readers/warehouse/
                         #   ingest/distill/discover/probe + fixtures). Never
                         #   imported at runtime.
@@ -46,6 +50,7 @@ constraint enforcement — not partial stubs.
     tools/              # DEV-TIME build tooling (never imported by the package):
                         #   build_windows_bundle.py  portable Windows build
                         #   smoke_windows_bundle.py  scenario/CLI/GUI smoke test
+                        #   build_basemap.py         Natural Earth -> basemap.json
     pyproject.toml      # pip-installable; console entry point `airlinesim`
 
 ## Core architecture (do not break these)
@@ -89,6 +94,7 @@ constraint enforcement — not partial stubs.
     airlinesim run cabin             # cabin geometry, seat fitting, per-cabin fares
     airlinesim run weather           # clock resolution, weather, disruption chain
     airlinesim run alliance          # feed, alliances, valuation, mergers
+    airlinesim run map               # base map, clipping, and the map's data seam
     airlinesim run session           # real-time clock guard + log rotation
     airlinesim gui                   # play it in a browser; defaults to --world data
     airlinesim gui --world demo      # the two-airport sandbox instead
@@ -341,6 +347,16 @@ touching `weather.py`, `disruption.py`, or anything that scales with `dt`.
   alternate routings. Listed with the other honest limits in the design doc,
   along with the big one: a cancelled flight leaves its aircraft in the right
   place anyway.
+- **All of it is now VISIBLE, which it wasn't for two releases.** Every figure
+  above was in `/api/state` and rendered nowhere: the weather work was
+  complete in the engine and invisible in the product. The Routes table has a
+  `Wx` column (sky, capacity lost, delay added, frequencies cancelled), the
+  Airports card shows the live sky and the cumulative RELIABILITY record with
+  what it has cost, each Carriers card shows its disruption tally, and the
+  network map draws the systems themselves. The reliability column is the
+  "this hub costs you every winter" number the whole feature exists to
+  produce — on a corpus world ORD lands around 68% after forty days. Don't
+  add a subsystem that computes something and stop at the snapshot.
 
 ## Alliances and consolidation
 
@@ -451,6 +467,63 @@ still answers "what is a seat in this class worth?". Keep that split.
   seats displace far more than 26 economy seats) — those aircraft flew with
   capacity that didn't exist. It goes through the fitter now; `airlinesim run
   cabin` pins the old arithmetic as over-capacity so it can't come back.
+
+## The network map (third front end)
+
+`webui/map.js` draws the game on a US map: `tools/build_basemap.py` distils
+Natural Earth into `airlinesim/data/basemap.json`, `server.py` serves it at
+`/api/basemap`, and `map.js` overlays routes, aircraft, airports and weather.
+`airlinesim run map` pins the corpus, the clipping and the data seam.
+
+- **The map is NOT radar, and the GUI says so in the panel.** The engine
+  models a daily FREQUENCY smeared across the tick — there is no aircraft
+  object with a departure time and a position. So the icon count, its
+  direction and its ground speed are real (one per operating route, phase =
+  sim clock modulo the leg's `block_h`, hence pixels-per-hour ∝ cruise
+  speed), but the aeroplane at a given point is a rendering of the schedule.
+  Presenting derived positions as tracked flights would be the most
+  misleading thing in the GUI; don't quietly drop the note.
+- **`eff_freq` in the op snapshot is what decides whether anything is drawn.**
+  It was missing at first, so `o.last_eff_freq === 0` compared against
+  `undefined`, never fired, and a crew-short carrier kept flying ghosts. A
+  route that operated nothing is now drawn DASHED and faint with the reason
+  on its tooltip — losing the icons silently just looked like a rendering
+  bug. `scenario_map` asserts both branches are reachable in a real run.
+- **Natural Earth is PUBLIC DOMAIN**, which is the only reason a vector base
+  map can be committed here at all. The attribution travels in the JSON and
+  the scenario checks it is still there.
+- **Rings must be CLIPPED to the window, not filtered by it.** Natural Earth
+  carries North America as one ring, so "keep the ring if any point is
+  inside" kept Canada and Mexico in full and drew them straight across the
+  frame. `clip_ring` (Sutherland-Hodgman) and `clip_line` fix it; simplify
+  runs BEFORE the clip so the frame edge stays exact and no sliver of
+  background shows along it. `scenario_map` asserts every layer is inside the
+  bbox — that check is what catches a rebuild that loses the clip.
+- **It is geography, NOT terrain relief.** Land, coast, lakes, rivers, state
+  lines and Interstates are all vectors. Shaded relief needs an elevation
+  raster (ETOPO/SRTM), tens of megabytes before it is an image, and none is
+  committed. The docstring, the README and the GUI note all say this; calling
+  a flat vector map "terrain" is exactly the overclaim this project's docs
+  exist to prevent.
+- **The window is the lower 48** (`BBOX`). The corpus has 29 airports outside
+  it — Alaska, Hawaii, Guam, Saipan, Puerto Rico. They are NAMED in the
+  legend ("off window: ANC HNL …") rather than projected somewhere wrong.
+  Note GUM and SPN are EAST longitude, so any "is this a US coordinate?"
+  test that assumes `lon < 0` is wrong.
+- **SVG, not canvas**, and the base map is drawn ONCE into a `<g>` that never
+  changes while only the live layer re-renders per snapshot. Click handling
+  then comes free, which is what makes aircraft and routes selectable without
+  hit-testing geometry by hand.
+- **Selection reaches the panels through `data-rowop` / `data-rowtail`** on
+  the Routes and Fleet rows. If you re-render those tables, keep the
+  attributes — the map is a control surface, and losing them turns it back
+  into a poster.
+- **Carrier colours are assigned by order of appearance** in `snap.players`,
+  and the same `carrierColor()` drives the legend AND the swatch on each
+  Carriers card, so the two views can't disagree.
+- Adding a column to the Routes table means updating `cabinFareRow`'s
+  `colspan` and `emptyRow`'s count in the same edit — the per-cabin fare row
+  spans the whole table and silently short-runs otherwise.
 
 ## AI carriers and the action layer
 

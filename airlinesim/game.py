@@ -449,6 +449,12 @@ class GameSession:
 
     def _check_game_over(self):
         human = self._human()
+        if human is None:
+            # A human_player_id that matches nobody is a caller error, but it
+            # must not raise INSIDE the tick loop: GameSession._loop holds the
+            # session lock for the whole burst, and an exception there used to
+            # leave a frozen-but-healthy GUI with the error nowhere.
+            return
         # Belt and braces: AI carriers are barred from acquiring the human
         # (see ai._merger_review), but if that ever changes, or a scenario
         # does it deliberately, the player must be TOLD rather than left
@@ -658,7 +664,11 @@ class GameSession:
                 "airports": [{"iata": s.iata, "display_name": s.display_name,
                               "runway_m": s.runway_length_m,
                               "has_mx": s.has_maintenance_facility,
-                              "hub_fee_per_day": s.hub_fee_per_day}
+                              "hub_fee_per_day": s.hub_fee_per_day,
+                              # the map needs geography; served once with the
+                              # catalog rather than per tick down the SSE stream
+                              "lat": s.lat, "lon": s.lon,
+                              "hub_rank": s.hub_rank}
                             for s in sorted(repo.all(AirportSpec),
                                             key=lambda s: s.iata)],
             }
@@ -879,6 +889,11 @@ class GameSession:
             "origin": o.spec.origin_iata, "dest": o.spec.dest_iata,
             "tail_number": o.plane.tail_number,
             "ticket_price": o.ticket_price, "daily_frequency": o.daily_frequency,
+            # frequencies actually operated after gates, crew and weather —
+            # the map draws an aircraft only where something flew.
+            "eff_freq": round(getattr(o, "last_eff_freq", 0.0), 3),
+            "distance_km": o.spec.distance_km,
+            "block_h": round(o.spec.distance_km / o.plane.spec.cruise_speed_kmh, 3),
             "load_factor": o.last_load_factor, "pax": o.last_pax,
             "revenue": o.last_revenue, "profit": o.last_profit,
             "suitable": o.suitable, "suitability_reasons": list(o.suitability_reasons),
