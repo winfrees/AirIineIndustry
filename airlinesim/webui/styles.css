@@ -93,10 +93,26 @@ main {
 /* 1x2 — full width. These hold the wide tables and the multi-control forms,
    which need the whole row to lay out without wrapping. */
 #startHint,
-#playersCard,
 #routesCard,
 #fleetCard,
 #logCard { grid-column: 1 / -1; }
+
+/* The map and the carrier list SHARE the top row, half and half. They pair
+   naturally: the map draws each carrier in the colour of the swatch on its
+   card, so reading one against the other is the point of putting them side
+   by side. */
+#mapCard,
+#playersCard { grid-column: span 1; }
+
+/* Grid items stretch to match their row, so the shorter of the two ends up
+   with slack. Give it to the MAP: the card is a column and the map box grows
+   into whatever height the row settles at, rather than sitting at its natural
+   size with dead space underneath. The SVG keeps a fixed viewBox and
+   preserveAspectRatio="xMidYMid meet", so a taller-than-wide box letterboxes
+   instead of distorting the projection — geometry is never stretched. */
+#mapCard { display: flex; flex-direction: column; }
+#mapCard #mapWrap { flex: 1 1 auto; min-height: 300px; }
+#mapCard .mapSvg { height: 100%; }
 
 #startHint { border-color: var(--accent); }
 #startHint ol { margin: 0.2rem 0 0.5rem; padding-left: 1.2rem; }
@@ -113,6 +129,11 @@ main {
   #crewCard,
   #hubsCard,
   #marketCard { grid-column: 1 / -1; }
+  /* Stacked, the map has no row to fill and no sibling to match, so give it
+     its natural aspect back — a stretched height in a full-width box would
+     letterbox the map down to a strip. */
+  #mapCard #mapWrap { flex: 0 0 auto; min-height: 0; }
+  #mapCard .mapSvg { height: auto; }
 }
 
 .card {
