@@ -32,7 +32,10 @@ where = ["."]
 include = ["airlinesim*"]
 
 [tool.setuptools.package-data]
-airlinesim = ["webui/**/*", "data/*.csv.gz", "data/*.json"]
+# data/*.cof is the World Magnetic Model the network map orients to. Without
+# the glob the wheel ships a geomag module with no coefficients and the map
+# silently falls back to true north.
+airlinesim = ["webui/**/*", "data/*.csv.gz", "data/*.json", "data/*.cof"]
 # btsdata is dev-time and never imported by runtime code, but `airlinesim run
 # btsdata` and `run refresh_cx` are shipped, listed by `airlinesim list`, and
 # read these fixtures. Without them an installed package crashes on both the

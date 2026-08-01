@@ -11,6 +11,10 @@ venv/
 # downloaded embeddable CPython for the Windows bundle (rebuildable)
 .embed-cache/
 
+# raw Natural Earth geojson pulled by tools/build_basemap.py (54 MB, and the
+# 140 KB distilled basemap.json in airlinesim/data IS committed)
+.basemap-cache/
+
 # BTS warehouse (derived, rebuildable from exports — never commit)
 *.sqlite
 *.sqlite-journal

@@ -23,6 +23,48 @@ from airlinesim.explorer import Mutation, ScenarioTree, linspace
 from airlinesim.game import GameSession, new_game
 
 WEBUI_DIR = Path(__file__).parent / "webui"
+BASEMAP_PATH = Path(__file__).parent / "data" / "basemap.json"
+_BASEMAP_CACHE: dict = {}
+
+
+def _basemap_bytes():
+    """Read the committed base map once. Absent is not an error the server
+    should die on — the map degrades to routes and airports with no land."""
+    if "bytes" not in _BASEMAP_CACHE:
+        _BASEMAP_CACHE["bytes"] = (BASEMAP_PATH.read_bytes()
+                                   if BASEMAP_PATH.is_file() else None)
+    return _BASEMAP_CACHE["bytes"]
+
+
+# The map can orient itself to MAGNETIC north, which is what a pilot's chart
+# does. Declination comes from the committed World Magnetic Model, and the
+# spread over the window travels with it because a continental map cannot be
+# magnetic-north-up everywhere — see airlinesim/geomag.py.
+_MAG_REF = (37.5, -96.0)          # the projection's own reference point
+
+
+def _magnetic() -> dict:
+    import datetime as _dt
+    from airlinesim import geomag
+    now = _dt.datetime.now(_dt.timezone.utc)
+    year = now.year + (now.timetuple().tm_yday - 1) / 365.25
+    lat, lon = _MAG_REF
+    try:
+        bbox = json.loads(BASEMAP_PATH.read_text())["bbox"] \
+            if BASEMAP_PATH.is_file() else [-125.0, 24.0, -66.5, 50.0]
+        lo, hi = geomag.declination_range(bbox, year)
+        return {
+            "reference": {"lat": lat, "lon": lon},
+            "declination": round(geomag.declination(lat, lon, year), 2),
+            "min": round(lo, 1), "max": round(hi, 1),
+            "model": geomag.model_name(), "year": round(year, 2),
+            "note": geomag.validity_note(year),
+        }
+    except Exception as exc:                       # never break the map for this
+        import logging
+        logging.getLogger("airlinesim").warning(
+            "magnetic model unavailable: %s", exc)
+        return {"error": str(exc), "declination": 0.0}
 DEFAULT_SAVE_PATH = str(Path.home() / ".airlinesim_save.pkl")
 
 COMMANDS = {
@@ -50,6 +92,15 @@ COMMANDS = {
         a["route_op_id"], a["tier"]),
     "close_route": lambda gs, a: gs.close_route(a["route_op_id"]),
     "set_hub": lambda gs, a: gs.set_hub(a["iata"], a.get("enabled", True)),
+    # --- alliances and consolidation ---
+    "form_alliance": lambda gs, a: gs.form_alliance(
+        a.get("name", "Alliance"), a.get("kind", "CODESHARE"), a.get("partners")),
+    "join_alliance": lambda gs, a: gs.join_alliance(a["alliance_id"]),
+    "leave_alliance": lambda gs, a: gs.leave_alliance(),
+    "set_no_compete_hub": lambda gs, a: gs.set_no_compete_hub(
+        a["iata"], a.get("enabled", True)),
+    "acquire_carrier": lambda gs, a: gs.acquire_carrier(
+        a["target_id"], a.get("force", False)),
     "hire_crew": lambda gs, a: gs.hire_crew(
         a["crew_type"], a["base_iata"], a["headcount"], a["cost_per_hour"],
         tuple(a.get("certs", ()))),
@@ -226,6 +277,16 @@ def make_handler(hub: Hub):
                 self._send_json(hub.session.snapshot())
             elif path == "/api/catalog":
                 self._send_json(hub.session.catalog())
+            elif path == "/api/magnetic":
+                self._send_json(_magnetic())
+            elif path == "/api/basemap":
+                # The committed Natural Earth base map (states, highways,
+                # coast, lakes, rivers). Static and ~140 KB, so it is read
+                # once, cached in memory, and served with a long cache header
+                # — it never changes within a run.
+                self._send_basemap()
+            elif path == "/api/mergers":
+                self._send_json(hub.session.merger_candidates())
             elif path == "/api/cabin":
                 self._send_json(self._cabin_fit(urlparse(self.path).query))
             elif path == "/api/events":
@@ -240,6 +301,19 @@ def make_handler(hub: Hub):
                 self._explore(lambda: hub.tree.node_detail(node_id))
             else:
                 self._serve_static(path)
+
+        def _send_basemap(self):
+            body = _basemap_bytes()
+            if body is None:
+                self._send_json({"error": "no basemap.json in airlinesim/data — "
+                                          "run tools/build_basemap.py"}, status=404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "max-age=86400")
+            self.end_headers()
+            self.wfile.write(body)
 
         def _cabin_fit(self, query: str) -> dict:
             """

@@ -32,6 +32,10 @@ const els = {
   formAcquire: document.getElementById("formAcquire"),
   formHire: document.getElementById("formHire"),
   formHub: document.getElementById("formHub"),
+  alliance: document.getElementById("alliance"),
+  mergers: document.getElementById("mergers"),
+  formAlliance: document.getElementById("formAlliance"),
+  alliancePartner: document.getElementById("alliancePartner"),
   acqPreset: document.getElementById("acqPreset"),
   acqCabin: document.getElementById("acqCabin"),
   recabinDlg: document.getElementById("recabinDlg"),
@@ -110,6 +114,134 @@ async function loadCatalog() {
     `<option value="${esc(ap.iata)}" label="${esc(ap.display_name)}` +
     `${ap.has_mx ? " · MX" : ""}"></option>`).join("");
 }
+
+// -- alliances and M&A -----------------------------------------------------
+// Both live behind GET /api/mergers, which is read-only and returns a fully
+// costed case per rival — rationale, price, synergies, payback, and the reason
+// a bid would be refused. Rejected candidates come back WITH their reason
+// rather than filtered out, because "why can't I buy them?" is the question
+// this panel exists to answer.
+let mergerData = null;
+
+async function refreshMergers() {
+  mergerData = await fetch("/api/mergers").then((r) => r.json()).catch(() => null);
+  renderAlliance();
+}
+
+const RATIONALE_HINT = {
+  HORIZONTAL: "overlapping networks — duplicate legs consolidate",
+  COMPLEMENTARY: "networks barely overlap — each becomes the other's feed",
+  SURVIVAL: "neither carrier can compete alone",
+  NONE: "no overlap and no new stations",
+};
+
+function renderAlliance() {
+  if (!mergerData) return;
+  const al = mergerData.alliance;
+  const partners = (al?.partners || []).map((id) => {
+    const p = latest?.players.find((x) => x.player_id === id);
+    return p ? p.name : id;
+  });
+  els.alliance.innerHTML = al
+    ? `<div class="metric"><span class="tag">${esc(al.kind)}</span>
+         <b>${esc(al.name)}</b> with ${partners.map(esc).join(", ") || "nobody"}
+         &middot; partner feed x${al.feed_efficiency}
+         &middot; dues ${money(al.dues_per_day)}/day</div>
+       <div class="metric">coordinated hubs:
+         ${al.no_compete_hubs.length ? al.no_compete_hubs.map(esc).join(", ") : "none"}
+         <input id="ncHub" placeholder="IATA" size="4" autocomplete="off">
+         <button class="btn small" data-act="addhub">Coordinate</button>
+         <button class="btn small warn" data-act="leave">Leave alliance</button></div>`
+    : `<div class="metric">Not in an alliance. Only your own onward flights
+         feed your connecting traffic.</div>`;
+
+  // The partner picker only offers carriers not already in an alliance.
+  const taken = new Set((mergerData.alliances || []).flatMap((a) => a.members));
+  const free = (mergerData.candidates || []).filter((c) => !taken.has(c.player_id));
+  els.alliancePartner.innerHTML = free.length
+    ? free.map((c) => `<option value="${esc(c.player_id)}">${esc(c.name)}</option>`).join("")
+    : `<option value="">no unallied carrier</option>`;
+
+  const pos = mergerData.cannot_compete_alone
+    ? `<div class="warn">You hold ${(mergerData.my_share * 100).toFixed(0)}% of
+         departures against a leader on ${(mergerData.leader_share * 100).toFixed(0)}% —
+         by the survival test you cannot compete alone.</div>`
+    : "";
+
+  const rows = (mergerData.candidates || []).map((c) => {
+    const pay = c.payback_years == null ? "never" : `${c.payback_years}y`;
+    const act = c.approved
+      ? `<button class="btn small" data-act="acquire" data-target="${esc(c.player_id)}">Acquire</button>`
+      : `<button class="btn small warn" data-act="force" data-target="${esc(c.player_id)}"
+                 title="the valuation says no — buy anyway">Override</button>`;
+    return `<tr>
+      <td>${esc(c.name)}</td>
+      <td>${c.fleet}/${c.routes}</td>
+      <td>${money(c.enterprise_value)}</td>
+      <td>${money(c.total_outlay)}</td>
+      <td>${money(c.annual_synergy)}/yr</td>
+      <td>${pay}</td>
+      <td><span class="tag" title="${esc(RATIONALE_HINT[c.rationale] || "")}">${esc(c.rationale)}</span></td>
+      <td class="${c.approved ? "good" : "warn"}">${esc(c.reason)}</td>
+      <td>${act}</td>
+    </tr>`;
+  }).join("");
+
+  els.mergers.innerHTML = `${pos}
+    <table><thead><tr>
+      <th>Carrier</th><th>Fleet/Routes</th><th>Value</th><th>Cost</th>
+      <th>Synergy</th><th>Payback</th><th>Rationale</th><th>Verdict</th><th></th>
+    </tr></thead><tbody>${rows || emptyRow(9)}</tbody></table>
+    <div class="metric">Cost is the price plus integration. You hold
+      ${money(mergerData.cash)}. A merger transfers fleet, routes, crews, hubs
+      <b>and debt</b>, and consolidates duplicated legs.</div>`;
+}
+
+els.alliance.addEventListener("click", async (e) => {
+  const b = e.target.closest("button[data-act]");
+  if (!b) return;
+  if (b.dataset.act === "leave") {
+    if (confirm("Leave the alliance? Your partners' onward flights stop feeding your routes.")) {
+      await sendCommand("leave_alliance", {});
+      refreshMergers();
+    }
+  } else if (b.dataset.act === "addhub") {
+    const iata = String(document.getElementById("ncHub").value || "").trim().toUpperCase();
+    if (!iata) return;
+    await sendCommand("set_no_compete_hub", { iata, enabled: true });
+    refreshMergers();
+  }
+});
+
+els.mergers.addEventListener("click", async (e) => {
+  const b = e.target.closest("button[data-act]");
+  if (!b) return;
+  const c = (mergerData?.candidates || []).find((x) => x.player_id === b.dataset.target);
+  if (!c) return;
+  const force = b.dataset.act === "force";
+  const warn = force
+    ? `\n\nThe valuation REJECTS this deal: ${c.reason}.\nBuy anyway?`
+    : "";
+  if (!confirm(`Acquire ${c.name} for ${money(c.total_outlay)}?\n\n` +
+               `${c.rationale} — ${c.reason}\n` +
+               `Synergy ${money(c.annual_synergy)}/yr, payback ` +
+               `${c.payback_years == null ? "never" : c.payback_years + "y"}.\n` +
+               `You take on ${money(c.debt)} of their debt.${warn}`)) return;
+  await sendCommand("acquire_carrier", { target_id: c.player_id, force });
+  refreshMergers();
+});
+
+els.formAlliance.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  const partner = String(f.get("partner") || "");
+  await sendCommand("form_alliance", {
+    name: f.get("name"), kind: f.get("kind"),
+    partners: partner ? [partner] : [],
+  });
+  e.target.reset();
+  refreshMergers();
+});
 
 // -- cabin planner ---------------------------------------------------------
 // Every seat-count field on the page is driven from here, and every number it
@@ -280,6 +412,11 @@ function render(snap) {
   els.airports.innerHTML = airportsHtml(snap);
   els.log.innerHTML = logHtml(snap);
 
+  if (typeof drawLive === "function" && MAP.svg) {
+    drawLive(snap);
+    applySelection();
+  }
+
   const human = snap.players.find((p) => p.player_id === snap.human_player_id);
   if (human) {
     populateSelect(els.tailSelect, human.fleet.filter((a) => !a.retired), "tail_number",
@@ -346,19 +483,41 @@ function renderPlayers(snap) {
             .map((m) => `<div class="logLine">${esc(m)}</div>`).join("")
         }</details>`
       : "";
+    // the swatch is the map's colour for this carrier, so the two views are
+    // reading the same key
+    const swatch = typeof carrierColor === "function"
+      ? `<i class="swatch" style="background:${carrierColor(snap, p.player_id)}"></i>` : "";
     return `
       <div class="playerBlock">
         <div class="playerHead">
-          <span class="name">${esc(p.name)}</span>
+          ${swatch}<span class="name">${esc(p.name)}</span>
           <span class="tag">${isHuman ? "YOU" : "AI"}</span>
         </div>
         <div class="metric">cash ${money(p.cash)} &middot; debt ${money(p.debt)} &middot;
           net worth <span class="${p.net_worth >= 0 ? "good" : "bad"}">${money(p.net_worth)}</span>
           &middot; ${p.fleet.length} aircraft &middot; ${p.route_ops.length} routes
           &middot; ${pax.toFixed(0)} px/day</div>
+        ${disruptionLine(p)}
         ${style}${moves}
       </div>`;
   }).join("");
+}
+
+// What the weather has cost this carrier, cumulatively. Everything here is a
+// real ledger entry the engine charged — hotels, meals, compensation and crew
+// hotels are separate lines in DisruptionCosts, not one lumped estimate.
+function disruptionLine(p) {
+  const d = p.disruption;
+  if (!d || (!d.cancelled_flights && !d.stranded_pax && !d.total_cost)) return "";
+  const parts = [];
+  if (d.cancelled_flights) parts.push(`${d.cancelled_flights.toFixed(0)} flights cancelled`);
+  if (d.delay_hours) parts.push(`${d.delay_hours.toFixed(0)}h delay`);
+  if (d.stranded_pax) {
+    parts.push(`${d.stranded_pax} stranded (${d.rebooked_pax} rebooked, ` +
+               `${d.refunded_pax} refunded)`);
+  }
+  if (d.total_cost) parts.push(`<span class="bad">${money(d.total_cost)}</span> disruption cost`);
+  return `<div class="metric">weather: ${parts.join(" &middot; ")}</div>`;
 }
 
 const TIER_LABEL = { 1: "Basic", 2: "Standard", 3: "Premium" };
@@ -383,7 +542,7 @@ function routesHtml(snap) {
             `<option value="${t}" ${t === o.service_tier ? "selected" : ""}>` +
             `${TIER_LABEL[t]}</option>`).join("") + `</select>`
         : TIER_LABEL[o.service_tier] || o.service_tier;
-      rows.push(`<tr>
+      rows.push(`<tr data-rowop="${o.route_op_id}" data-rowtail="${esc(o.tail_number)}">
         <td>${esc(p.name)}</td>
         <td>${o.origin}→${o.dest}${o.data_tier && o.data_tier !== "exact"
           ? ` <span class="metric" title="demand is a ${o.data_tier} estimate, not measured">~</span>` : ""}</td>
@@ -398,6 +557,7 @@ function routesHtml(snap) {
         <td>${(o.load_factor * 100).toFixed(0)}%</td>
         <td>${o.pax.toFixed(0)}</td>
         <td class="${o.profit >= 0 ? "good" : "bad"}">${money(o.profit)}</td>
+        <td>${weatherCell(o)}</td>
         <td>${isHuman
           ? `<button class="btn small warn" data-op="${o.route_op_id}" data-act="close">Close</button>`
           : ""}</td>
@@ -409,8 +569,28 @@ function routesHtml(snap) {
   }
   return `<table><thead><tr>
     <th>Carrier</th><th>Route</th><th>Tail</th><th>Price</th><th>Freq</th><th>Service</th>
-    <th>LF</th><th>Pax</th><th>Profit</th><th></th><th></th>
-  </tr></thead><tbody>${rows.join("") || emptyRow(11)}</tbody></table>`;
+    <th>LF</th><th>Pax</th><th>Profit</th>
+    <th title="what the weather is doing to this route right now">Wx</th>
+    <th></th><th></th>
+  </tr></thead><tbody>${rows.join("") || emptyRow(12)}</tbody></table>`;
+}
+
+// The map draws weather; this says what it COST. Capacity lost, delay added
+// and frequencies cancelled are all on the op — without them the map is
+// scenery and a route quietly under-performing has no visible cause.
+function weatherCell(o) {
+  const cap = o.weather_capacity == null ? 1 : o.weather_capacity;
+  const delay = o.weather_delay_h || 0;
+  const cancelled = o.weather_cancelled || 0;
+  if (!o.weather && cap >= 0.999 && delay <= 0.005 && cancelled <= 0.005) return "";
+  const bits = [];
+  if (cap < 0.999) bits.push(`cap ${(cap * 100).toFixed(0)}%`);
+  if (delay > 0.005) bits.push(`+${delay.toFixed(1)}h`);
+  if (cancelled > 0.005) bits.push(`${cancelled.toFixed(1)} cx`);
+  const bad = cap < 0.75 || cancelled > 0.005;
+  return `<span class="${bad ? "bad" : "warn"}" title="${esc(o.weather || "")}">` +
+         `${esc(o.weather || "weather")}</span>` +
+         (bits.length ? ` <span class="metric">${bits.join(" · ")}</span>` : "");
 }
 
 // Per-cabin pricing, for the cabins the ASSIGNED aircraft actually has. A
@@ -433,7 +613,9 @@ function cabinFareRow(o, isHuman) {
        <span class="metric">${c.seats}st &middot; ${lf}% &middot; ${money(c.revenue)}</span>
      </span>`;
   }).join("");
-  return `<tr class="cabinRow"><td></td><td colspan="10">${cells}</td></tr>`;
+  // spans every column but the carrier name — keep in step with routesHtml's
+  // header when a column is added
+  return `<tr class="cabinRow"><td></td><td colspan="11">${cells}</td></tr>`;
 }
 
 function fleetHtml(snap) {
@@ -450,7 +632,7 @@ function fleetHtml(snap) {
              ${a.owned ? "Sell" : "Return"}</button>
            <button class="btn small" data-tail="${esc(a.tail_number)}" data-act="recabin">Recabin</button>`
         : "";
-      rows.push(`<tr>
+      rows.push(`<tr data-rowtail="${esc(a.tail_number)}">
         <td>${esc(p.name)}</td>
         <td>${esc(a.tail_number)}</td>
         <td>${esc(a.display_name)}</td>
@@ -489,14 +671,35 @@ function crewHtml(snap) {
     </div>`).join("");
 }
 
+// Reliability is the cumulative record — the "this hub costs you every winter"
+// number the weather work exists to produce. Blank until an airport has
+// actually been disrupted, so a clear-weather world isn't full of 100%s.
 function airportsHtml(snap) {
-  const rows = Object.entries(snap.airports).map(([iata, a]) => `<tr>
-    <td>${esc(iata)}</td>
-    <td>${a.gates_used.toFixed(0)}/${a.gates_total}</td>
-    <td>${a.fuel_spot != null ? "$" + a.fuel_spot.toFixed(3) + "/L" : "—"}</td>
-  </tr>`).join("");
-  return `<table><thead><tr><th>IATA</th><th>Gates</th><th>Fuel spot</th></tr></thead>
-    <tbody>${rows || emptyRow(3)}</tbody></table>`;
+  const anyWx = Object.values(snap.airports).some(
+    (a) => (a.weather && a.weather.kind) || (a.reliability && a.reliability.disrupted_hours));
+  const rows = Object.entries(snap.airports).map(([iata, a]) => {
+    const wx = a.weather || {}, rel = a.reliability || {};
+    const now = wx.kind
+      ? `<span class="${wx.closed ? "bad" : "warn"}">${esc(wx.text || wx.kind)}</span>`
+      : "";
+    const rec = rel.reliability != null && rel.disrupted_hours
+      ? `${(rel.reliability * 100).toFixed(0)}%<span class="metric"> · ` +
+        `${rel.cancelled_flights.toFixed(0)} cx · ${money(rel.cost)}` +
+        (rel.worst && rel.worst !== "CLEAR"
+          ? ` · worst ${esc(rel.worst.replace(/_/g, " ").toLowerCase())}` : "") +
+        `</span>`
+      : "";
+    return `<tr>
+      <td>${esc(iata)}</td>
+      <td>${a.gates_used.toFixed(0)}/${a.gates_total}</td>
+      <td>${a.fuel_spot != null ? "$" + a.fuel_spot.toFixed(3) + "/L" : "—"}</td>
+      ${anyWx ? `<td>${now}</td><td>${rec}</td>` : ""}
+    </tr>`;
+  }).join("");
+  return `<table><thead><tr><th>IATA</th><th>Gates</th><th>Fuel spot</th>
+    ${anyWx ? `<th>Sky</th><th title="share of elapsed time this field has been
+      operating normally, with what the disruption has cost">Reliability</th>` : ""}
+  </tr></thead><tbody>${rows || emptyRow(anyWx ? 5 : 3)}</tbody></table>`;
 }
 
 function hubsHtml(snap) {
@@ -742,10 +945,16 @@ if ("serviceWorker" in navigator) {
 
 (async function boot() {
   await loadCatalog();
+  // after the catalog, because the map needs airport coordinates from it
+  await initMap();
   // the aircraft list only exists after the catalog loads, so the cabin
   // planner can't be primed until now
   acquirePlanner.setSpec(els.specSelect.value);
   const state = await fetch("/api/state").then((r) => r.json());
   render(state);
+  // Valuations move as the sim runs, but not fast enough to justify a fetch
+  // per tick — the SSE snapshot stays lean and this polls beside it.
+  refreshMergers();
+  setInterval(refreshMergers, 15000);
   connect();
 })();

@@ -101,9 +101,26 @@ airlinesim run integration       # run a named scenario
   Each new game draws its own season; the outcome explorer can switch weather
   off or on at any node and stage named events — a blizzard at your hub in
   week three — to compare against a sibling branch that didn't get one.
+- **Alliances and consolidation.** Connecting demand has to be *fed*: a leg is
+  worth more when something departs its destination, your own metal counts in
+  full, a partner's counts at the alliance tier's efficiency, and a stranger's
+  counts for nothing. Mergers run off an itemised valuation with three stated
+  rationales — horizontal, complementary, or survival when neither carrier can
+  compete alone.
 - **Hourly clock.** The engine's tick length is a resolution knob and the
   simulation is independent of it: a month of flying comes out the same
   stepped in 24-hour, 6-hour or 1-hour slices.
+- **A network map.** The browser GUI draws the whole game on a US map — state
+  lines, coast, lakes, rivers and Interstates from Natural Earth, in an Albers
+  equal-area projection — with each carrier in its own colour, routes as great
+  circles, aircraft as silhouettes by class, and weather systems at their real
+  size. Clicking an aircraft or a route highlights it in the Fleet and Routes
+  panels. A route that flew nothing this tick is drawn dashed with the reason
+  on its tooltip, so a crew-short carrier looks grounded instead of just
+  losing its icons. It can be oriented to **true or magnetic north**, with
+  declination taken from the committed World Magnetic Model — and it says
+  plainly that variation spans some 33° across the lower 48, so magnetic-north-up
+  can only ever be exact on one reference meridian.
 
 ## Architecture
 
@@ -134,6 +151,8 @@ competitor is adding a `Player`, not rewriting allocation logic.
 | `finance`     | buy vs finance vs lease, with depreciation                  |
 | `cabin`       | cabin geometry, seat fitting, and per-cabin fares            |
 | `weather`     | clock resolution, geographic weather, and the disruption chain |
+| `alliance`    | connecting feed, alliances, valuation, and mergers          |
+| `map`         | the committed base map, its clipping, and the map's data seam |
 | `btsdata`     | BTS ingest pipeline against committed fixtures (offline)    |
 | `routedata`   | the three-tier historic/comparable route lookup             |
 | `databuilt`   | the engine running on real BTS route data                   |
@@ -202,7 +221,16 @@ simplifications:
   so that an all-economy layout comes to exactly `max_seats`. Pitch tables are
   industry-shaped, not certified.
 - Crew positioning deadheads direct-to-base only; multi-hop routing and ferry
-  (positioning) flights are not yet implemented.
+  (positioning) flights are not yet implemented. A consequence worth knowing:
+  a route opened in one direction only strands its crew at the far end, so
+  routes are opened as out-and-back rotations.
+- Crew rest is `min_rest_hours` of *consecutive* time, which a coarse tick
+  cannot represent — a 24-hour tick grants a whole day where ten hours were
+  required, so a daily-resolution run is slightly optimistic about crew
+  availability. Carriage differs by a few percent between 24-hour and 1-hour
+  resolution for that reason alone; everything else in the engine is
+  resolution-independent to well under a percent, and `airlinesim run weather`
+  demonstrates the split rather than asserting it.
 - Weather is a probabilistic model whose climate comes from each airport's real
   coordinates, but every frequency, size and impact figure in it is a
   climate-*shaped* heuristic — no weather record is committed to this repo.
@@ -214,6 +242,17 @@ simplifications:
 - The bundled AI adjusts price/frequency but does not yet use route suitability
   to right-size equipment, and prices only the economy base fare — the premium
   cabins it installs sell at the default class multiple.
+- The network map is not radar. The engine models daily *frequency*, not
+  individual flights, so an aircraft's position along its leg is derived from
+  the clock — the count, the direction and the ground speed are real, the
+  aeroplane at a given point is not a simulated object. The base map is
+  geography, not shaded relief: relief needs an elevation raster and none is
+  committed. The window is the lower 48, and airports outside it (Alaska,
+  Hawaii, the territories) are named rather than plotted.
+- The bundled magnetic model is **WMM-2020, valid 2020.0–2025.0**. Past that
+  its secular-variation term is an extrapolation worth a few tenths of a
+  degree over the US — fine for orienting a map, not for navigation. Dropping
+  a newer `.COF` into `airlinesim/data/` is the whole upgrade.
 - On the historic data specifically: the shipped corpus is built from T-100
   **Market**, which carries no seat counts, so demand equals passengers *flown*
   and is understated on full routes. Capacity, load factor and a measured seat

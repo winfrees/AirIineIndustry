@@ -364,6 +364,14 @@ class RouteOp:
     # written by DisruptionSubsystem after Operations
     last_weather_cancelled: float = 0.0
     last_weather_cost: float = 0.0
+    # --- connectivity, written by AllianceSubsystem before Operations ---
+    # feed_factor >= 1.0 scales how attractive this op is to connecting
+    # traffic, given what departs its destination and whether the passenger
+    # could buy the through journey. connect_discount is what a connecting
+    # seat is worth against a local one. Defaults mean "no alliance subsystem
+    # attached", so a world without one behaves exactly as before.
+    feed_factor: float = 1.0
+    connect_discount: float = 1.0
 
     def effective_layout(self):
         """The cabin this op sells: its own override, else the airframe's."""
@@ -1326,8 +1334,20 @@ class OperationsSubsystem(Subsystem):
                 return repo.get(AirportSpec, iata).access_index
             except KeyError:
                 return 1.0
-        return service_desirability(op.service_tier, access(op.spec.origin_iata),
+        base = service_desirability(op.service_tier, access(op.spec.origin_iata),
                                     access(op.spec.dest_iata))
+        # CONNECTIVITY. Written by AllianceSubsystem: how much onward flying
+        # this op feeds into at its destination, counting a partner's metal at
+        # the alliance's efficiency and a stranger's at nothing. 1.0 when no
+        # alliance subsystem is attached, so a world without one is unchanged.
+        #
+        # Applied to the whole op rather than only to its connecting seats,
+        # because the arbiter's pools are per CABIN and connecting traffic
+        # feeds economy alongside local leisure — there is no separate claim to
+        # attach it to. That makes this a connectivity INDEX rather than an
+        # itinerary ledger, and it is the honest limit of the mechanism (see
+        # airlinesim/alliance.py).
+        return base * getattr(op, "feed_factor", 1.0)
 
     # landing fees are weight-based in reality; a class multiplier stands in.
     _LANDING_CLASS_MULT = {

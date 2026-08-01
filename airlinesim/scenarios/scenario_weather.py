@@ -45,11 +45,17 @@ def check(label, ok, detail=""):
         print(f"         {detail}")
 
 
-def _run(dt, days, weather=False, seed=42):
+def _run(dt, days, weather=False, seed=42, unlimited_duty=False):
     world, engine = build_demo_world()
     engine.dt = dt
     if weather:
         attach_weather(world, engine, seed=seed)
+    if unlimited_duty:
+        # Used only to separate crew-rest quantisation from a real dt leak.
+        from airlinesim.crew import GROUND_DUTY_LIMITS
+        for p in engine.players:
+            for c in list(p.cockpit_pool) + list(p.cabin_pool) + list(p.crews):
+                c.limits = GROUND_DUTY_LIMITS
     ctx = {"market": MarketConditions()}
     pax = 0.0
     for _ in range(int(days * 24 / dt)):
@@ -70,9 +76,32 @@ def check_clock():
     base_pax, base_cash, _ = results[24.0]
     spread_pax = max(abs(v[0] - base_pax) / base_pax for v in results.values())
     spread_cash = max(abs(v[1] - base_cash) / abs(base_cash) for v in results.values())
+    # CREW REST IS THE ONE THING A COARSE TICK GENUINELY CANNOT REPRESENT, and
+    # the tolerance here says so rather than pretending otherwise. Rest is
+    # `min_rest_hours` of CONSECUTIVE wall-clock time; a 24-hour tick has no
+    # way to grant ten hours, so it grants twenty-four and the daily run is
+    # slightly optimistic about how much crew is available. Everything else in
+    # the engine is resolution-independent to well under a percent, which is
+    # what the next check demonstrates by taking duty limits away.
     check("a simulated month is the same at 24h, 6h and 1h resolution",
-          spread_pax < 0.01 and spread_cash < 0.02,
-          "  ".join(f"dt={k}: {v[0]:,.0f}px ${v[1]:,.0f}" for k, v in results.items()))
+          spread_pax < 0.05 and spread_cash < 0.02,
+          "  ".join(f"dt={k}: {v[0]:,.0f}px ${v[1]:,.0f}" for k, v in results.items())
+          + f"   (spread {spread_pax * 100:.1f}% pax / {spread_cash * 100:.1f}% cash)")
+
+    # ...and prove the residual is ONLY rest quantisation. With a permissive
+    # duty envelope the three resolutions converge to a fraction of a percent,
+    # so any future drift in this number is a real dt leak somewhere else and
+    # not the crew model — which is exactly the distinction that made the
+    # deadhead duty bug (a whole leg's duty logged per TICK) hard to see.
+    free = {}
+    for dt in (24.0, 1.0):
+        _w, e, pax = _run(dt, 30, unlimited_duty=True)
+        free[dt] = (pax, e.players[0].ledger.cash)
+    dev = abs(free[1.0][0] - free[24.0][0]) / free[24.0][0]
+    check("with duty limits removed, the resolutions agree to <0.5%", dev < 0.005,
+          f"dt=24: {free[24.0][0]:,.0f}px   dt=1: {free[1.0][0]:,.0f}px "
+          f"({dev * 100:.2f}%) — so the spread above is crew rest, nothing else")
+
     check("every resolution lands on the same simulated time",
           len({round(v[2], 6) for v in results.values()}) == 1,
           f"sim_time {sorted({v[2] for v in results.values()})}")

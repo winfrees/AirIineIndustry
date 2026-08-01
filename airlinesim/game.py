@@ -221,6 +221,12 @@ def new_game(human_name: str = "You", ai_name: str = "SkyRival",
         model = attach_weather(w, engine, seed=weather_seed)
         log.info("weather attached (seed=%d) over %d airports",
                  model.seed, len(model.climates))
+    # Alliances are always on in a played game. Unlike weather there is no
+    # reason to switch them off: with no alliance formed the subsystem only
+    # computes each op's own-network feed, which is a property of the network
+    # the player built and not an extra rule imposed on them.
+    from airlinesim.alliance import attach_alliances
+    attach_alliances(w, engine)
     return GameSession(w, engine, human_player_id=human_id)
 
 
@@ -255,6 +261,10 @@ class GameSession:
         # the world's shared lender — AI carriers borrow from the same bank,
         # under the same leverage cap, with globally unique loan/lease ids
         self.bank = actions.bank_for(world)
+        # Whether the human has ever held a fleet or a route. A data world
+        # starts them with neither, so 'lost everything' can only be judged
+        # against having had something. See _check_game_over.
+        self._had_assets = False
         self._init_runtime()
 
     # -- runtime state that can't (and shouldn't) be pickled --------------
@@ -439,6 +449,33 @@ class GameSession:
 
     def _check_game_over(self):
         human = self._human()
+        if human is None:
+            # A human_player_id that matches nobody is a caller error, but it
+            # must not raise INSIDE the tick loop: GameSession._loop holds the
+            # session lock for the whole burst, and an exception there used to
+            # leave a frozen-but-healthy GUI with the error nowhere.
+            return
+        # Belt and braces: AI carriers are barred from acquiring the human
+        # (see ai._merger_review), but if that ever changes, or a scenario
+        # does it deliberately, the player must be TOLD rather than left
+        # staring at an empty airline with no explanation.
+        #
+        # Gated on having HAD assets, not on having none: a data-world game
+        # deliberately starts the human with cash and nothing else, so a bare
+        # "no fleet and no routes" test would declare game over on the first
+        # tick of every new game.
+        has_assets = bool(human.fleet or human.route_ops)
+        if has_assets:
+            self._had_assets = True
+        elif getattr(self, "_had_assets", False):
+            if not self.game_over:
+                self.game_over = True
+                self.paused = True
+                self.game_over_reason = ("no fleet and no routes left — "
+                                         "the airline is gone")
+                log.warning("game over on day %d — %s",
+                            int(self.world.sim_time // 24), self.game_over_reason)
+            return
         nw = self._net_worth(human)
         if nw < self.bankruptcy_floor:
             self.game_over = True
@@ -547,6 +584,46 @@ class GameSession:
     def set_hub(self, iata: str, enabled: bool = True):
         return self._do(actions.set_hub, iata, enabled)
 
+    # -- alliances and consolidation -------------------------------------
+    def form_alliance(self, name: str, kind: str = "CODESHARE", partners=None):
+        return self._do(actions.form_alliance, name, kind, partners)
+
+    def join_alliance(self, alliance_id: str):
+        return self._do(actions.join_alliance, alliance_id)
+
+    def leave_alliance(self):
+        return self._do(actions.leave_alliance)
+
+    def set_no_compete_hub(self, iata: str, enabled: bool = True):
+        return self._do(actions.set_no_compete_hub, iata, enabled)
+
+    def acquire_carrier(self, target_id: str, force: bool = False):
+        """
+        Buy a rival outright. Cash flow for both sides comes from the AI
+        subsystem's own smoothed figures where they exist, so a human's bid is
+        priced off exactly the numbers an AI bidder would use — neither side
+        gets a better valuation than the other.
+        """
+        with self.lock:
+            return actions.acquire_carrier(
+                self.world, self._human(), target_id,
+                acquirer_cf=self._cash_flow_of(self.human_player_id),
+                target_cf=self._cash_flow_of(target_id), force=force)
+
+    def _cash_flow_of(self, player_id: str) -> float:
+        """
+        A carrier's smoothed operating cash flow, from the AI subsystem's
+        memory if it tracks that carrier. The human is not tracked there, so
+        it falls back to the ledger trend — see merger_candidates().
+        """
+        from airlinesim.ai import AICarrierSubsystem
+        for s in self.engine.subsystems:
+            if isinstance(s, AICarrierSubsystem):
+                mem = s.memory.get(player_id)
+                if mem is not None:
+                    return mem.cash_flow_per_day
+        return 0.0
+
     def hire_crew(self, crew_type: str, base_iata: str, headcount: int,
                   cost_per_hour: float, certs: tuple = ()):
         return self._do(actions.hire_crew, crew_type, base_iata, headcount,
@@ -587,9 +664,89 @@ class GameSession:
                 "airports": [{"iata": s.iata, "display_name": s.display_name,
                               "runway_m": s.runway_length_m,
                               "has_mx": s.has_maintenance_facility,
-                              "hub_fee_per_day": s.hub_fee_per_day}
+                              "hub_fee_per_day": s.hub_fee_per_day,
+                              # the map needs geography; served once with the
+                              # catalog rather than per tick down the SSE stream
+                              "lat": s.lat, "lon": s.lon,
+                              "hub_rank": s.hub_rank}
                             for s in sorted(repo.all(AirportSpec),
                                             key=lambda s: s.iata)],
+            }
+
+    def merger_candidates(self) -> dict:
+        """
+        Every rival the human could bid for, each with its itemised valuation
+        and a fully costed case: rationale, price, integration cost, synergies,
+        payback, and the reason it would or wouldn't be approved.
+
+        Read-only — this is the "should I?" screen, and nothing here commits.
+        Rejected candidates are returned WITH their reason rather than filtered
+        out, because "why can't I buy them?" is the question the screen exists
+        to answer.
+        """
+        from airlinesim.alliance import alliance_snapshot
+        from airlinesim.merger import (competitive_position, merger_case,
+                                       value_carrier)
+        with self.lock:
+            me = self._human()
+            players = list(self.engine.players)
+            my_cf = self._cash_flow_of(self.human_player_id)
+            my_pos = competitive_position(self.world, players, me, my_cf)
+            out = []
+            for other in players:
+                if other.player_id == self.human_player_id:
+                    continue
+                if not other.fleet and not other.route_ops:
+                    continue
+                cf = self._cash_flow_of(other.player_id)
+                val = value_carrier(self.world, other, cf)
+                case = merger_case(self.world, players, me, other, my_cf, cf)
+                pos = competitive_position(self.world, players, other, cf)
+                payback = case.payback_years()
+                out.append({
+                    "player_id": other.player_id, "name": other.name,
+                    "fleet": len([a for a in other.fleet if not a.retired]),
+                    "routes": len(other.route_ops),
+                    "enterprise_value": round(val.enterprise_value()),
+                    "liquidation_value": round(val.liquidation_value()),
+                    "cash": round(val.cash), "fleet_value": round(val.fleet_value),
+                    "debt": round(val.debt),
+                    "lease_obligations": round(val.lease_obligations),
+                    "going_concern": round(val.going_concern),
+                    "network_value": round(val.network_value),
+                    "reputation": round(val.reputation, 3),
+                    "rationale": case.rationale.name,
+                    "price": round(case.price),
+                    "integration_cost": round(case.integration_cost),
+                    "total_outlay": round(case.total_outlay()),
+                    "annual_synergy": round(case.annual_synergy()),
+                    "overlap_routes": case.overlap_routes,
+                    "complementary_stations": case.complementary_stations,
+                    "fleet_commonality": round(case.fleet_commonality, 3),
+                    # inf doesn't survive JSON; None reads as "never pays back"
+                    "payback_years": (round(payback, 1)
+                                      if payback != float("inf") else None),
+                    "approved": case.verdict,
+                    "reason": case.reason,
+                    "affordable": me.ledger.cash >= case.total_outlay(),
+                    "cannot_compete_alone": pos.cannot_compete_alone(),
+                    "share": round(pos.share, 4),
+                    "alliance": alliance_snapshot(self.world, other.player_id),
+                })
+            out.sort(key=lambda c: (not c["approved"],
+                                    c["payback_years"] if c["payback_years"]
+                                    is not None else 1e9))
+            return {
+                "cash": round(me.ledger.cash),
+                "my_share": round(my_pos.share, 4),
+                "leader_share": round(my_pos.leader_share, 4),
+                "cannot_compete_alone": my_pos.cannot_compete_alone(),
+                "alliance": alliance_snapshot(self.world, self.human_player_id),
+                "alliances": [
+                    {"alliance_id": a.alliance_id, "name": a.name,
+                     "kind": a.kind.name, "members": list(a.members)}
+                    for a in getattr(self.world, "alliances", [])],
+                "candidates": out,
             }
 
     def cabin_fit(self, spec_id: str, seats: Optional[dict] = None) -> dict:
@@ -732,6 +889,11 @@ class GameSession:
             "origin": o.spec.origin_iata, "dest": o.spec.dest_iata,
             "tail_number": o.plane.tail_number,
             "ticket_price": o.ticket_price, "daily_frequency": o.daily_frequency,
+            # frequencies actually operated after gates, crew and weather —
+            # the map draws an aircraft only where something flew.
+            "eff_freq": round(getattr(o, "last_eff_freq", 0.0), 3),
+            "distance_km": o.spec.distance_km,
+            "block_h": round(o.spec.distance_km / o.plane.spec.cruise_speed_kmh, 3),
             "load_factor": o.last_load_factor, "pax": o.last_pax,
             "revenue": o.last_revenue, "profit": o.last_profit,
             "suitable": o.suitable, "suitability_reasons": list(o.suitability_reasons),
