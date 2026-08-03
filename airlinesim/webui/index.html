@@ -56,7 +56,10 @@
   <section class="card hidden" id="startHint"></section>
 
   <section class="card" id="mapCard">
-    <h2>Network Map</h2>
+    <h2>Network Map
+      <button id="btnMapAbout" class="btn small" type="button"
+              title="what this map is, and what it isn't">About</button>
+    </h2>
     <div id="mapWrap"></div>
     <div id="mapLegend" class="mapLegend"></div>
     <div class="mapControls">
@@ -66,18 +69,8 @@
           <option value="true">true</option>
         </select>
       </label>
-      <span id="mapNorth" class="metric"></span>
+      <span id="mapSel" class="metric"></span>
     </div>
-    <div id="mapSel" class="metric"></div>
-    <div id="mapNote" class="metric">An aircraft is drawn for every route that
-      actually operated this tick, and it moves at its type's cruise speed —
-      but its position along the leg is DERIVED from the clock, not simulated:
-      the engine models daily frequency, not individual flights. Route
-      endpoints, carriers, frequencies, airport conditions and weather systems
-      are read straight from the model. Base map: Natural Earth (public
-      domain) — coast, state lines, lakes, rivers and Interstates. It is
-      geography, not shaded relief; there is no elevation data in this repo.
-      The window is the lower 48.</div>
   </section>
 
   <section class="card" id="playersCard">
@@ -211,6 +204,33 @@
     <div id="log"></div>
   </section>
 </main>
+
+<!-- What the map is and isn't. This lives behind a button rather than under
+     the map because it is five lines of prose that only needs reading once —
+     but it is NOT optional text: the claim that aircraft positions are
+     derived rather than tracked is the one thing a viewer could otherwise
+     reasonably get wrong, so it stays one click away and `scenario_map`
+     asserts both the button and the note are still here. -->
+<dialog id="mapAboutDlg">
+  <form method="dialog">
+    <h2>About the network map</h2>
+    <div id="mapNorth" class="metric"></div>
+    <div id="mapNote" class="metric">An aircraft is drawn for every route that
+      actually operated this tick, and it moves at its type's cruise speed —
+      but its position along the leg is DERIVED from the clock, not simulated:
+      the engine models daily frequency, not individual flights. Route
+      endpoints, carriers, frequencies, airport conditions and weather systems
+      are read straight from the model. Base map: Natural Earth (public
+      domain) — coast, state lines, lakes, rivers and Interstates. It is
+      geography, not shaded relief; there is no elevation data in this repo.
+      The window is the lower 48.</div>
+    <div class="metric">Click an aircraft or a route to highlight it in the
+      Fleet and Routes panels; click empty map to clear.</div>
+    <div class="form">
+      <button class="btn" value="close">Close</button>
+    </div>
+  </form>
+</dialog>
 
 <!-- Recabin uses the SAME planner as acquisition: same fields, same preview,
      same server-side fitter. A cabin you can plan when you buy the aircraft

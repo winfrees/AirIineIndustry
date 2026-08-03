@@ -153,13 +153,27 @@ def check_wiring():
     check("the GUI says aircraft positions are DERIVED",
           "DERIVED" in html and "not simulated" in html)
 
+    # ...and it now lives in an About dialog rather than under the map, so
+    # "present in the file" is no longer the same as "reachable by a player".
+    # Pin the whole path: a button, a dialog holding the note, and the click
+    # handler that opens it. Any one of the three missing and the honesty note
+    # is dead text in the HTML.
+    app = (WEBUI_DIR / "app.js").read_text()
+    dlg = html.split('<dialog id="mapAboutDlg">')[-1].split("</dialog>")[0] \
+        if 'id="mapAboutDlg"' in html else ""
+    check("the map's About button exists and opens a dialog",
+          'id="btnMapAbout"' in html and 'id="mapAboutDlg"' in html
+          and "btnMapAbout" in app and "showModal" in app)
+    check("the honesty note lives INSIDE that dialog, not just in the file",
+          "DERIVED" in dlg and 'id="mapNote"' in dlg and 'id="mapNorth"' in dlg,
+          f"{len(dlg)} chars of dialog content" if dlg else "no dialog found")
+
     if js.is_file():
         j = js.read_text()
         check("the map reads eff_freq before drawing an aircraft",
               "eff_freq" in j)
         check("selection reaches the panels through data-rowop/data-rowtail",
               "data-rowop" in j and "data-rowtail" in j)
-        app = (WEBUI_DIR / "app.js").read_text()
         check("the panels emit the rows the map selects",
               'data-rowop="' in app and 'data-rowtail="' in app)
         check("the panels render the weather the map draws",

@@ -91,27 +91,39 @@ main {
 }
 
 /* 1x2 — full width. These hold the wide tables and the multi-control forms,
-   which need the whole row to lay out without wrapping. */
+   which need the whole row to lay out without wrapping.
+
+   The MAP leads the page on its own full row: it is the one block that reads
+   better the more width it gets, and every airport label and route it draws
+   competes for the same pixels.
+
+   ALLIANCES is here because its content is prose, not a table — a merger case
+   carries a rationale, a price, an integration cost and the reason it would or
+   wouldn't be approved. In one column those wrapped into an unreadable
+   ribbon. */
 #startHint,
+#mapCard,
+#playersCard,
+#allianceCard,
 #routesCard,
 #fleetCard,
 #logCard { grid-column: 1 / -1; }
 
-/* The map and the carrier list SHARE the top row, half and half. They pair
-   naturally: the map draws each carrier in the colour of the swatch on its
-   card, so reading one against the other is the point of putting them side
-   by side. */
-#mapCard,
-#playersCard { grid-column: span 1; }
+/* Full width, the map is alone in its row with nothing to match heights to,
+   so it keeps the projection's own aspect and simply takes the width.
 
-/* Grid items stretch to match their row, so the shorter of the two ends up
-   with slack. Give it to the MAP: the card is a column and the map box grows
-   into whatever height the row settles at, rather than sitting at its natural
-   size with dead space underneath. The SVG keeps a fixed viewBox and
-   preserveAspectRatio="xMidYMid meet", so a taller-than-wide box letterboxes
-   instead of distorting the projection — geometry is never stretched. */
-#mapCard { display: flex; flex-direction: column; }
-#mapCard #mapWrap { flex: 1 1 auto; min-height: 300px; }
+   The height needs a cap — at 1500px the natural height is ~900px and a map
+   taller than the viewport buries every other panel under it. But capping
+   HEIGHT alone makes the box wider than the projection, and the SVG then
+   letterboxes with dead bands down both sides: the lower 48 in Albers is
+   about 1.6:1 and no box shape changes that. So the max-width is derived from
+   the same cap, and the whole box shrinks together and centres — width
+   follows height, aspect never changes, nothing is cropped or stretched. */
+#mapCard #mapWrap {
+  aspect-ratio: 1000 / 620;
+  max-width: calc(78vh * 1000 / 620);
+  margin-inline: auto;
+}
 #mapCard .mapSvg { height: 100%; }
 
 #startHint { border-color: var(--accent); }
@@ -129,11 +141,9 @@ main {
   #crewCard,
   #hubsCard,
   #marketCard { grid-column: 1 / -1; }
-  /* Stacked, the map has no row to fill and no sibling to match, so give it
-     its natural aspect back — a stretched height in a full-width box would
-     letterbox the map down to a strip. */
-  #mapCard #mapWrap { flex: 0 0 auto; min-height: 0; }
-  #mapCard .mapSvg { height: auto; }
+  /* A phone is tall and narrow: the width is already the binding constraint,
+     so the viewport-height cap would only shrink the map for no reason. */
+  #mapCard #mapWrap { max-width: none; }
 }
 
 .card {
@@ -148,7 +158,12 @@ main {
   color: var(--muted);
   text-transform: uppercase;
   letter-spacing: 0.06em;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
 }
+/* a button in a card heading keeps the heading's baseline, not its casing */
+.card h2 .btn { text-transform: none; letter-spacing: normal; }
 
 /* Tables are wide (Routes is 9 columns). Scroll them inside their block so a
    narrow viewport never gives the whole page a horizontal scrollbar. */

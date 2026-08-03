@@ -585,6 +585,28 @@ Natural Earth into `airlinesim/data/basemap.json`, `server.py` serves it at
   changes while only the live layer re-renders per snapshot. Click handling
   then comes free, which is what makes aircraft and routes selectable without
   hit-testing geometry by hand.
+- **The map is a FULL-WIDTH row and leads the page.** It is the one block
+  that reads better the more width it gets. Its height is capped at 78vh — a
+  map taller than the viewport buries every panel under it — but the cap is
+  applied to `max-width` DERIVED from that height, not to `max-height`.
+  Capping height alone leaves the box wider than the projection and the SVG
+  letterboxes with dead bands down both sides: the lower 48 in Albers is about
+  1.6:1 and no box shape changes that. Width follows height, aspect never
+  changes, nothing is cropped or stretched.
+- **The prose lives in an About dialog, not under the map.** Five lines of
+  explanation under every render is what the button exists to absorb. But the
+  note is NOT optional: "aircraft positions are DERIVED" is the one thing a
+  viewer could reasonably get wrong. `scenario_map` therefore pins the whole
+  reachability path — the button, the dialog containing the note, and the
+  click handler in app.js — because "the string is in index.html" stopped
+  being evidence that a player can read it.
+- **`#mapSel` is live state only.** Selecting shows what is selected; nothing
+  selected shows nothing. The "click an aircraft to highlight it" instruction
+  is in About.
+- **Alliances & Consolidation is full width too.** Its content is prose, not a
+  table — a merger case carries a rationale, a price, an integration cost and
+  the reason it would or wouldn't be approved. In one column those wrap into
+  an unreadable ribbon.
 - **Selection reaches the panels through `data-rowop` / `data-rowtail`** on
   the Routes and Fleet rows. If you re-render those tables, keep the
   attributes — the map is a control surface, and losing them turns it back
