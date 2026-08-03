@@ -885,6 +885,15 @@ gravity coefficients, and de-censoring where capacity exists.
 - Explorer: persist a tree to disk (it is in-memory and dies with the server),
   and let a derivation *drive* expansion — branch only where it holds, so the
   search follows the interesting frontier instead of the full cross product.
+- **A standalone iOS build.** `docs/ios-port-design.md` measures the port
+  surface and costs four paths. The short version: ~9,300 LOC of the package
+  is platform-free, there are ZERO non-stdlib imports, and `actions.py` +
+  `snapshot()` already form the model layer an app needs — so this is a port,
+  not a rewrite. Two things must be fixed first regardless of path: **saves
+  are 5.5 MB pickles** bound to the Python version and the class layout (an
+  app update would orphan them), and the **desktop-shaped UI** — a 12-column
+  Routes table and a 300-airport datalist reflow narrow but were not designed
+  for touch.
 
 ## Suggested first task for a new session
 
