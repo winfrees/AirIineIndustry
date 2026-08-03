@@ -429,11 +429,15 @@ function applySelection() {
     const isTail = sel && sel.kind === "plane" && el.dataset.rowtail === sel.id;
     el.classList.toggle("selectedRow", !!(isOp || isTail));
   });
+  // Live state only. The "click an aircraft to highlight it" instruction moved
+  // into the About dialog — under the map it was a permanent line of prose
+  // saying the same thing every tick, which is what the About button exists to
+  // absorb. When something IS selected this line is genuinely status.
   const label = document.getElementById("mapSel");
   if (label) {
     label.textContent = sel
       ? `selected ${sel.kind}: ${sel.id}  (click empty map to clear)`
-      : "click an aircraft or a route to highlight it in the panels";
+      : "";
   }
 }
 

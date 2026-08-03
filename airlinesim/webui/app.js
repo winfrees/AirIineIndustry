@@ -38,6 +38,8 @@ const els = {
   alliancePartner: document.getElementById("alliancePartner"),
   acqPreset: document.getElementById("acqPreset"),
   acqCabin: document.getElementById("acqCabin"),
+  btnMapAbout: document.getElementById("btnMapAbout"),
+  mapAboutDlg: document.getElementById("mapAboutDlg"),
   recabinDlg: document.getElementById("recabinDlg"),
   formRecabin: document.getElementById("formRecabin"),
   recabinTail: document.getElementById("recabinTail"),
@@ -776,6 +778,12 @@ els.btnNew.addEventListener("click", async () => {
   await loadCatalog();
   toast("new game started");
 });
+
+// What the map is and isn't — one click away rather than five lines of prose
+// under it. The orientation line inside is written by map.js's northNote().
+if (els.btnMapAbout && els.mapAboutDlg) {
+  els.btnMapAbout.addEventListener("click", () => els.mapAboutDlg.showModal());
+}
 
 els.routes.addEventListener("change", (e) => {
   const t = e.target;
