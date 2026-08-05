@@ -204,6 +204,35 @@
   </section>
 </main>
 
+<!-- New Game is the only moment starting cash can be set, so it gets a dialog
+     rather than a confirm(). Blank means AUTO-SIZE — the builder sizes the
+     opening balance off the down payments the starting fleet actually needs,
+     which is the right default on a corpus whose aircraft prices vary 10x. -->
+<dialog id="newGameDlg">
+  <form method="dialog" id="formNewGame">
+    <h2>New game</h2>
+    <div class="metric">Current progress is lost unless you saved it.</div>
+    <div class="form">
+      <label>your cash
+        <input id="ngCash" type="number" min="0" step="1000000"
+               placeholder="auto" title="leave blank to size it off the starting fleet">
+      </label>
+      <label>each rival's cash
+        <input id="ngAiCash" type="number" min="0" step="1000000"
+               placeholder="same as yours" title="leave blank to match your own">
+      </label>
+    </div>
+    <div class="metric">Figures are dollars. Giving the rivals more or less
+      runway than you is the difficulty dial — it changes how long they can
+      spend building a network before shareholder discipline bites, without
+      changing a single rule.</div>
+    <div class="form">
+      <button class="btn" value="cancel">Cancel</button>
+      <button class="btn warn" id="ngGo" value="go">Start new game</button>
+    </div>
+  </form>
+</dialog>
+
 <!-- What the map is and isn't. This lives behind a button rather than under
      the map because it is five lines of prose that only needs reading once —
      but it is NOT optional text: the claim that aircraft positions are

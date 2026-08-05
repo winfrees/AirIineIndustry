@@ -325,7 +325,8 @@ def _with_return_legs(chosen, ops_plan):
 def build_world_from_data(hub: str = "ORD", n_destinations: int = 4,
                           provider=None, cash: float = 0.0, ai_profiles=None,
                           verbose: bool = True, human_routes: Optional[int] = None,
-                          ai_routes: Optional[int] = None):
+                          ai_routes: Optional[int] = None,
+                          ai_cash: Optional[float] = None):
     """
     Return (world, engine, report). Picks the busiest routes out of `hub` from
     the corpus, builds both directions of each, and stands up two competing
@@ -334,6 +335,15 @@ def build_world_from_data(hub: str = "ORD", n_destinations: int = 4,
 
     `report` carries per-route provenance (which tier each spec came from) plus
     the corpus gaps, so a caller can see what is measured and what is not.
+
+    STARTING CASH is two knobs, not one. `cash` is what the HUMAN starts with
+    and `ai_cash` what each RIVAL does; `ai_cash=None` means "same as the
+    human", which is the symmetric game and the previous behaviour exactly.
+    Splitting them is the difficulty dial: the human is the only carrier whose
+    opening decisions are made by a person, so handing the rivals more or less
+    runway is the cleanest way to make the market harder or gentler without
+    touching a single rule. Both default to 0, which still means AUTO-SIZE off
+    the chosen fleet's down payments (see below) rather than "broke".
     """
     provider = provider or load_provider()
     if provider is None:
@@ -427,9 +437,16 @@ def build_world_from_data(hub: str = "ORD", n_destinations: int = 4,
     # needs, plus working capital. A fixed figure silently under-funds a
     # widebody-heavy corpus, and the financing carrier then flies routes on
     # aircraft it never bought.
+    auto_cash = max(40_000_000.0,
+                    sum(ac.list_price * 0.20 for _, ac in ops_plan) * 1.35)
     if cash <= 0:
-        down = sum(ac.list_price * 0.20 for _, ac in ops_plan)
-        cash = max(40_000_000, down * 1.35)
+        cash = auto_cash
+    # A rival with no figure of its own gets THE HUMAN'S, so the default game
+    # stays symmetric and every existing caller behaves exactly as before.
+    # An explicit 0 or less means "auto-size me too" rather than "broke".
+    ai_cash = cash if ai_cash is None else float(ai_cash)
+    if ai_cash <= 0:
+        ai_cash = auto_cash
 
     bank = Bank(max_debt_to_cash=6.0)
     loan = FinancingTerms("LOAN", AcquisitionMethod.FINANCE, 0.20, 0.06, 120)
@@ -477,7 +494,8 @@ def build_world_from_data(hub: str = "ORD", n_destinations: int = 4,
         else:
             plan = list(ops_plan)
         engine.add_player(_carrier(world, bank, pid, name, method, terms,
-                                   plan[:n], codes, premium, cash, provider,
+                                   plan[:n], codes, premium,
+                                   ai_cash if is_ai else cash, provider,
                                    pricing.reference_price))
     if ai_profiles:
         for p in engine.players:
@@ -488,6 +506,7 @@ def build_world_from_data(hub: str = "ORD", n_destinations: int = 4,
         "destinations": destinations,
         "vintage": provider.vintage,
         "starting_cash": cash,
+        "starting_cash_ai": ai_cash,
         # Routes a carrier planned but couldn't fund — the bank's leverage cap
         # biting is legitimate simulation behaviour, but it must be visible here
         # rather than buried in a player log.
