@@ -140,7 +140,8 @@ _TERMS_BY_METHOD = {
 
 def build_game_world(human_name: str = "You", ai_name: str = "SkyRival",
                      ai_step_frac: float = 0.03, world: str = "demo",
-                     ai_profiles=None, hub: str = "ORD", n_destinations: int = 5):
+                     ai_profiles=None, hub: str = "ORD", n_destinations: int = 5,
+                     cash: float = 0.0, ai_cash=None):
     """
     Build the two-carrier game world and return (world, engine, human_player_id)
     WITHOUT wrapping it in a GameSession.
@@ -160,7 +161,7 @@ def build_game_world(human_name: str = "You", ai_name: str = "SkyRival",
                                    "RGN": "Regional"}
         w, engine, _report = build_world_from_data(
             hub=hub, n_destinations=n_destinations, verbose=False,
-            ai_profiles=profiles)
+            ai_profiles=profiles, cash=cash, ai_cash=ai_cash)
         human = next(p for p in engine.players if p.player_id not in profiles)
         human.name = human_name
         for p in engine.players:
@@ -174,6 +175,13 @@ def build_game_world(human_name: str = "You", ai_name: str = "SkyRival",
     human.name = human_name
     ai.name = ai_name
     ai.is_ai = True
+    # The sandbox has no fleet plan to size cash off, so it ships with whatever
+    # build_demo_world chose. Honour an explicit figure anyway, so the same two
+    # knobs mean the same thing in both worlds.
+    if cash and cash > 0:
+        human.ledger.cash = float(cash)
+    if ai_cash is not None and float(ai_cash) > 0:
+        ai.ledger.cash = float(ai_cash)
     # AIStrategySubsystem's docstring: "Runs BEFORE Operations so changes
     # take effect now" — the same ordering scenarios/competitive.py uses.
     ops_idx = next(i for i, s in enumerate(engine.subsystems)
@@ -188,7 +196,8 @@ def new_game(human_name: str = "You", ai_name: str = "SkyRival",
              n_destinations: int = 5,
              tick_hours: float = DEFAULT_TICK_HOURS,
              weather: bool = True,
-             weather_seed=DEFAULT_WEATHER_SEED) -> "GameSession":
+             weather_seed=DEFAULT_WEATHER_SEED,
+             cash: float = 0.0, ai_cash=None) -> "GameSession":
     """
     Build a ready-to-play game.
 
@@ -202,10 +211,15 @@ def new_game(human_name: str = "You", ai_name: str = "SkyRival",
     weather, delays and duty timeouts land at a time of day; the scenarios keep
     the engine's 24-hour default, where a day is the smallest interesting unit
     and 24x the ticks would buy nothing.
+
+    `cash` is the HUMAN's opening balance and `ai_cash` each rival's; both
+    default to auto-sizing off the starting fleet, and `ai_cash=None` means
+    "same as the human". Setting them apart is the difficulty dial.
     """
     w, engine, human_id = build_game_world(human_name, ai_name, ai_step_frac,
                                            world=world, ai_profiles=ai_profiles,
-                                           hub=hub, n_destinations=n_destinations)
+                                           hub=hub, n_destinations=n_destinations,
+                                           cash=cash, ai_cash=ai_cash)
     log.info("new game: world=%s hub=%s dests=%d human=%s profiles=%s",
              world, hub, n_destinations, human_id, ai_profiles or {})
     for p in engine.players:
@@ -644,6 +658,10 @@ class GameSession:
                               "max_range_km": s.max_range_km,
                               "takeoff_runway_m": s.takeoff_runway_m,
                               "type_rating": s.type_rating,
+                              # published dimensions — the map derives each
+                              # type's plan-view silhouette from these
+                              "length_m": s.length_m,
+                              "wingspan_m": s.wingspan_m,
                               "reconfig_cost": s.reconfig_cost_per_slot
                                                * cabin_slots_for(s.max_seats),
                               "reconfig_days": s.reconfig_days,

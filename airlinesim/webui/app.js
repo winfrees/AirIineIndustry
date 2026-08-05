@@ -40,6 +40,9 @@ const els = {
   acqCabin: document.getElementById("acqCabin"),
   btnMapAbout: document.getElementById("btnMapAbout"),
   mapAboutDlg: document.getElementById("mapAboutDlg"),
+  newGameDlg: document.getElementById("newGameDlg"),
+  ngCash: document.getElementById("ngCash"),
+  ngAiCash: document.getElementById("ngAiCash"),
   recabinDlg: document.getElementById("recabinDlg"),
   formRecabin: document.getElementById("formRecabin"),
   recabinTail: document.getElementById("recabinTail"),
@@ -771,9 +774,17 @@ els.btnLoad.addEventListener("click", async () => {
   if (res.state) render(res.state);
   toast(res.ok ? "loaded" : (res.message || "load failed"), !res.ok);
 });
-els.btnNew.addEventListener("click", async () => {
-  if (!confirm("Start a new game? Current progress will be lost unless saved.")) return;
-  const res = await postJSON("/api/game/new", {});
+els.btnNew.addEventListener("click", () => els.newGameDlg.showModal());
+
+// Blank stays BLANK on the wire — the server reads "" as "auto-size" and
+// drops the kwarg, so the builder's own sizing runs. Sending 0 instead would
+// look like a deliberate choice of zero.
+els.newGameDlg.addEventListener("close", async () => {
+  if (els.newGameDlg.returnValue !== "go") return;
+  const res = await postJSON("/api/game/new", {
+    cash: els.ngCash.value,
+    ai_cash: els.ngAiCash.value,
+  });
   if (res.state) render(res.state);
   await loadCatalog();
   toast("new game started");

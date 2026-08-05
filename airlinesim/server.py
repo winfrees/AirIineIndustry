@@ -145,14 +145,18 @@ class Hub:
     callback and stops the old session's background thread."""
 
     def __init__(self, session: GameSession, world: str = "demo",
-                 hub_iata: str = "ORD"):
+                 hub_iata: str = "ORD", cash: float = 0.0, ai_cash=None):
         self._lock = threading.Lock()
         self._clients: list = []
         self.session: GameSession = None
         # what "New Game" should rebuild — the world this server was started
-        # with, not new_game()'s defaults
+        # with, not new_game()'s defaults. Starting cash belongs here for the
+        # same reason: a server launched with a difficulty setting must keep
+        # it across New Game, or the setting silently lasts one game.
         self.world_kind = world
         self.hub_iata = hub_iata
+        self.start_cash = cash
+        self.start_cash_ai = ai_cash
         self._set_session(session)
         # The scenario tree is independent of the live game — it has its own
         # root world and is never ticked by the real-time loop. Built lazily so
@@ -187,6 +191,12 @@ class Hub:
     def new_game(self, **kwargs):
         kwargs.setdefault("world", self.world_kind)
         kwargs.setdefault("hub", self.hub_iata)
+        kwargs.setdefault("cash", self.start_cash)
+        kwargs.setdefault("ai_cash", self.start_cash_ai)
+        # Whatever the dialog last asked for becomes the new default, so a
+        # second New Game keeps the difficulty the player just chose.
+        self.start_cash = kwargs["cash"]
+        self.start_cash_ai = kwargs["ai_cash"]
         with self._lock:
             self._set_session(new_game(**kwargs))
 
@@ -380,8 +390,19 @@ def make_handler(hub: Hub):
                 except FileNotFoundError:
                     self._send_json({"ok": False, "message": "save file not found"}, status=404)
             elif path == "/api/game/new":
+                # Every field the New Game dialog sends has to be listed here.
+                # This is the same hand-written argument mapping that dropped
+                # `seats` from acquisition and `service_tier` from route
+                # opening — a field left out is simply ignored, silently,
+                # because the callee just takes its default.
                 kwargs = {k: v for k, v in body.items()
-                         if k in ("human_name", "ai_name", "ai_step_frac")}
+                          if k in ("human_name", "ai_name", "ai_step_frac",
+                                   "cash", "ai_cash")}
+                for k in ("cash", "ai_cash"):
+                    if kwargs.get(k) in ("", None):
+                        kwargs.pop(k, None)      # blank means "auto-size"
+                    elif k in kwargs:
+                        kwargs[k] = float(kwargs[k])
                 hub.new_game(**kwargs)
                 self._send_json({"ok": True, "state": hub.session.snapshot()})
             elif path.startswith("/api/explore/"):
@@ -479,10 +500,13 @@ def make_handler(hub: Hub):
 
 
 def run_server(host: str = "0.0.0.0", port: int = 8765, session: GameSession = None,
-               world: str = "demo", hub_iata: str = "ORD"):
+               world: str = "demo", hub_iata: str = "ORD",
+               cash: float = 0.0, ai_cash=None):
     """Build and return (httpd, hub); caller owns calling serve_forever()."""
-    session = session or new_game(world=world, hub=hub_iata)
-    hub = Hub(session, world=world, hub_iata=hub_iata)
+    session = session or new_game(world=world, hub=hub_iata,
+                                  cash=cash, ai_cash=ai_cash)
+    hub = Hub(session, world=world, hub_iata=hub_iata,
+              cash=cash, ai_cash=ai_cash)
     httpd = ThreadingHTTPServer((host, port), make_handler(hub))
     httpd.daemon_threads = True
     return httpd, hub

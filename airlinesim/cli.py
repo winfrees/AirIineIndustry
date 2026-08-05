@@ -93,7 +93,9 @@ def cmd_gui(args, landing: str = "/", what: str = "GUI"):
     # browser, so both screens are always reachable from either command.
     httpd, hub = run_server(host="0.0.0.0", port=args.port,
                             world=getattr(args, "world", "demo"),
-                            hub_iata=getattr(args, "hub", "ORD"))
+                            hub_iata=getattr(args, "hub", "ORD"),
+                            cash=getattr(args, "cash", 0.0) or 0.0,
+                            ai_cash=getattr(args, "ai_cash", None))
     page = landing.lstrip("/")
     local = f"http://127.0.0.1:{args.port}/{page}"
     print(f"AirlineSim {what} serving at:\n  {local}\n"
@@ -160,6 +162,12 @@ def main(argv=None):
                      help="the BTS-corpus network with network-planning AI "
                           "(default), or the two-airport demo sandbox")
     pg.add_argument("--hub", default="ORD", help="hub airport for --world data")
+    # Starting cash is the difficulty dial: same rules, different runway.
+    # Omitted, both auto-size off the down payments the starting fleet needs.
+    pg.add_argument("--cash", type=float, default=0.0,
+                    help="your starting cash in dollars (default: auto-size)")
+    pg.add_argument("--ai-cash", type=float, default=None, dest="ai_cash",
+                    help="each rival's starting cash (default: same as yours)")
     pg.set_defaults(func=cmd_gui)
 
     pe = sub.add_parser("explore",
