@@ -290,6 +290,13 @@ class KindProfile:
     cap_floor: float
     delay_h: float
     closes: bool = False       # can shut a field outright at high intensity
+    # Degrees per hour the track bearing rotates CLOCKWISE as the system ages.
+    # 0 = a straight line, which is right for everything that simply rides the
+    # westerlies. A tropical cyclone does not: it runs west-northwest under
+    # the subtropical ridge for days and then RECURVES north and northeast.
+    # Modelling that as one constant bearing was a real bug — see the hurricane
+    # entry below.
+    curve_deg_per_h: float = 0.0
 
 
 KIND_PROFILE = {
@@ -302,10 +309,42 @@ KIND_PROFILE = {
     WeatherKind.SNOW:           KindProfile(380, 50, 16, 85, 0.55, 1.10),
     WeatherKind.ICING:          KindProfile(220, 40, 12, 85, 0.30, 2.10, True),
     WeatherKind.BLIZZARD:       KindProfile(420, 45, 22, 85, 0.12, 3.20, True),
-    WeatherKind.HURRICANE:      KindProfile(520, 22, 72, 45, 0.05, 6.00, True),
+    # HURRICANES RECURVE, and modelling that as one constant bearing meant
+    # none of them ever reached the United States. At bearing 45 (north-east)
+    # every storm left its genesis point heading away from the continent: born
+    # at 15.9N 81.8W it died three days later at 24.7N 69.4W, out in the open
+    # Atlantic. Ten a year spawned and zero were ever felt at an airport, so
+    # the kind existed in the enum, in the profile table and in the seasonal
+    # gate while being, in play, entirely absent.
+    #
+    # Real Atlantic tracks run WEST-NORTHWEST under the subtropical ridge for
+    # days and then recurve north and north-east. So: an initial bearing of
+    # 300 (WNW), a clockwise recurve, and a life long enough to cross the
+    # basin. Storms born in the west Caribbean now make the Gulf coast; those
+    # born far east recurve out to sea and miss, which is also what happens.
+    WeatherKind.HURRICANE:      KindProfile(520, 24, 120, 300, 0.05, 6.00, True,
+                                            curve_deg_per_h=0.42),
     WeatherKind.WILDFIRE_SMOKE: KindProfile(340, 25, 40, 75, 0.70, 0.55),
     WeatherKind.VOLCANIC_ASH:   KindProfile(450, 60, 30, 80, 0.02, 8.00, True),
 }
+
+
+# Track integration step. Three hours is far finer than any system's life and
+# keeps a 120-hour hurricane to forty steps; the midpoint rule in position()
+# makes the answer insensitive to it anyway.
+_TRACK_STEP_H = 3.0
+
+
+def _advance(lat: float, lon: float, bearing_deg: float, km: float) -> tuple:
+    """Great-circle dead reckoning: `km` along `bearing_deg` from (lat, lon)."""
+    d = km / 6371.0
+    br = math.radians(bearing_deg)
+    la1, lo1 = math.radians(lat), math.radians(lon)
+    la2 = math.asin(math.sin(la1) * math.cos(d)
+                    + math.cos(la1) * math.sin(d) * math.cos(br))
+    lo2 = lo1 + math.atan2(math.sin(br) * math.sin(d) * math.cos(la1),
+                           math.cos(d) - math.sin(la1) * math.sin(la2))
+    return math.degrees(la2), math.degrees(lo2)
 
 
 @dataclass
@@ -325,6 +364,8 @@ class WeatherSystem:
     speed_kmh: float
     radius_km: float
     peak_intensity: float       # 0..1 for a natural system; may exceed 1 if forced
+    curve_deg_per_h: float = 0.0    # see KindProfile.curve_deg_per_h
+    _pos_cache: object = None       # (now, (lat, lon)) memo for curved tracks
     # A STAGED event (WeatherModel.inject) rather than one the process rolled.
     # Forced systems answer to geography but not to the calendar — see
     # WeatherModel._susceptibility.
@@ -337,15 +378,33 @@ class WeatherSystem:
         return 0.0 <= self.age(now) <= self.life_h
 
     def position(self, now: float) -> tuple:
-        """Great-circle dead reckoning from birth point along a fixed bearing."""
-        km = self.speed_kmh * max(0.0, self.age(now))
-        d = km / 6371.0
-        br = math.radians(self.bearing_deg)
-        la1, lo1 = math.radians(self.lat0), math.radians(self.lon0)
-        la2 = math.asin(math.sin(la1) * math.cos(d) + math.cos(la1) * math.sin(d) * math.cos(br))
-        lo2 = lo1 + math.atan2(math.sin(br) * math.sin(d) * math.cos(la1),
-                               math.cos(d) - math.sin(la1) * math.sin(la2))
-        return math.degrees(la2), math.degrees(lo2)
+        """
+        Where the centre is. Great-circle dead reckoning from the birth point;
+        a straight line when `curve_deg_per_h` is 0, an integrated curve when
+        it is not.
+
+        Still a pure function of age, so the whole field regenerates
+        deterministically from the clock — which is what the explorer's
+        "identical branches produce identical outcomes" check depends on.
+        """
+        age = max(0.0, self.age(now))
+        if not self.curve_deg_per_h:
+            return _advance(self.lat0, self.lon0, self.bearing_deg,
+                            self.speed_kmh * age)
+        # Cached because `at()` asks every system for its position once per
+        # airport, and the answer only depends on `now`.
+        if self._pos_cache is not None and self._pos_cache[0] == now:
+            return self._pos_cache[1]
+        la, lo, t = self.lat0, self.lon0, 0.0
+        while t < age - 1e-9:
+            step = min(_TRACK_STEP_H, age - t)
+            # bearing at the MIDPOINT of the step: a midpoint rule keeps the
+            # integrated track independent of the step size to first order
+            br = self.bearing_deg + self.curve_deg_per_h * (t + 0.5 * step)
+            la, lo = _advance(la, lo, br, self.speed_kmh * step)
+            t += step
+        self._pos_cache = (now, (la, lo))
+        return la, lo
 
     def intensity(self, now: float) -> float:
         """
@@ -586,7 +645,10 @@ class WeatherModel:
             bearing_deg=prof.bearing_deg + r.uniform(-25, 25),
             speed_kmh=prof.speed_kmh * r.uniform(0.7, 1.35),
             radius_km=prof.radius_km * r.uniform(0.65, 1.4),
-            peak_intensity=r.uniform(0.35, 1.0))
+            peak_intensity=r.uniform(0.35, 1.0),
+            # Recurve rate varies too, which is what decides whether a given
+            # storm turns early and misses or runs west far enough to land.
+            curve_deg_per_h=prof.curve_deg_per_h * r.uniform(0.6, 1.5))
 
     def inject(self, kind, iata: str, now: float, intensity: float = 0.9,
                life_h: Optional[float] = None) -> Optional[WeatherSystem]:
