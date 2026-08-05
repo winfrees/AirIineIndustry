@@ -480,7 +480,7 @@ function drawLive(snap) {
         }
         svgEl("title", {}, g).textContent =
           `${plane.tail_number} · ${plane.display_name} · ${p.name}\n` +
-          `${o.origin}→${o.dest} · ${o.pax.toFixed(0)} pax` +
+          `${o.origin}→${o.dest} · ${o.pax_per_day.toFixed(0)} pax/day` +
           (MAP.timetable
             ? `\n${(f * 100).toFixed(0)}% of the leg flown, `
               + `${((1 - f) * (o.block_h || 0)).toFixed(1)}h to run`

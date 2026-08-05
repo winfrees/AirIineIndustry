@@ -902,6 +902,21 @@ class GameSession:
         }
 
     def _op_snapshot(self, o: RouteOp) -> dict:
+        # RATE FIELDS ARE NORMALISED TO PER DAY, and named so.
+        #
+        # `last_pax`, `last_revenue`, `last_profit` and `last_fees` on RouteOp
+        # are PER TICK — whatever happened in the interval just stepped. That
+        # is the right unit inside the engine and the wrong one in a table: at
+        # 1-hour detail a route reads 27 passengers, at 1-day detail the SAME
+        # route reads 1,300, and the column sits beside a per-DAY frequency
+        # with no unit on it. A player reads 27 as a day's traffic and
+        # concludes a full A321 flying three times daily is nearly empty.
+        #
+        # The engine is dt-independent — a simulated month gives the same
+        # carriage and cash at 24 h, 6 h or 1 h — so it was only the DISPLAY
+        # that changed units under the reader. Dividing by the tick's share of
+        # a day restores that here too.
+        day = 24.0 / max(1e-9, self.engine.dt)
         return {
             "route_op_id": self._op_id(o),
             "origin": o.spec.origin_iata, "dest": o.spec.dest_iata,
@@ -912,13 +927,15 @@ class GameSession:
             "eff_freq": round(getattr(o, "last_eff_freq", 0.0), 3),
             "distance_km": o.spec.distance_km,
             "block_h": round(o.spec.distance_km / o.plane.spec.cruise_speed_kmh, 3),
-            "load_factor": o.last_load_factor, "pax": o.last_pax,
-            "revenue": o.last_revenue, "profit": o.last_profit,
+            "load_factor": o.last_load_factor,
+            "pax_per_day": o.last_pax * day,
+            "revenue_per_day": o.last_revenue * day,
+            "profit_per_day": o.last_profit * day,
             "suitable": o.suitable, "suitability_reasons": list(o.suitability_reasons),
             "crew_block": o.last_crew_block,
             "has_cockpit": o.cockpit is not None, "has_cabin": o.cabin is not None,
             "service_tier": getattr(o, "service_tier", 2),
-            "fees": getattr(o, "last_fees", 0.0),
+            "fees_per_day": getattr(o, "last_fees", 0.0) * day,
             "data_tier": getattr(o.spec, "data_tier", ""),
             # what the weather is doing to THIS route right now
             "weather": getattr(o, "weather_text", ""),
@@ -936,6 +953,9 @@ class GameSession:
     def _cabin_snapshot(self, o: RouteOp) -> list:
         layout = o.effective_layout()
         overrides = getattr(o, "cabin_prices", None) or {}
+        # per-day for the same reason as _op_snapshot; `seats` stays an
+        # INSTALLED count and `load_factor` a ratio, so neither is a rate.
+        day = 24.0 / max(1e-9, self.engine.dt)
         out = []
         for cc in CABIN_ORDER:
             seats = layout.seats_of(cc)
@@ -949,8 +969,9 @@ class GameSession:
                 "fare": o.fare_for(cc),
                 "priced": cc in overrides,
                 "default_fare": o.ticket_price * DEFAULT_SEAT_CLASSES[cc].price_multiplier,
-                "pax": pax,
-                "revenue": (getattr(o, "last_class_revenue", None) or {}).get(cc.name, 0.0),
+                "pax_per_day": pax * day,
+                "revenue_per_day":
+                    (getattr(o, "last_class_revenue", None) or {}).get(cc.name, 0.0) * day,
                 "load_factor": (pax / offered) if offered > 1e-6 else 0.0,
             })
         return out

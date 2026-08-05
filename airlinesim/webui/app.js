@@ -465,7 +465,7 @@ function renderStart(snap) {
 function renderPlayers(snap) {
   els.players.innerHTML = snap.players.map((p) => {
     const isHuman = p.player_id === snap.human_player_id;
-    const pax = p.route_ops.reduce((s, o) => s + o.pax, 0);
+    const pax = p.route_ops.reduce((s, o) => s + o.pax_per_day, 0);
     const ai = p.ai_profile;
     // Show a rival's strategy and its latest moves: an opponent whose style
     // you can read is one you can actually plan against.
@@ -560,8 +560,8 @@ function routesHtml(snap) {
           : o.daily_frequency}</td>
         <td>${tierCell}</td>
         <td>${(o.load_factor * 100).toFixed(0)}%</td>
-        <td>${o.pax.toFixed(0)}</td>
-        <td class="${o.profit >= 0 ? "good" : "bad"}">${money(o.profit)}</td>
+        <td>${o.pax_per_day.toFixed(0)}</td>
+        <td class="${o.profit_per_day >= 0 ? "good" : "bad"}">${money(o.profit_per_day)}</td>
         <td>${weatherCell(o)}</td>
         <td>${isHuman
           ? `<button class="btn small warn" data-op="${o.route_op_id}" data-act="close">Close</button>`
@@ -574,7 +574,9 @@ function routesHtml(snap) {
   }
   return `<table><thead><tr>
     <th>Carrier</th><th>Route</th><th>Tail</th><th>Price</th><th>Freq</th><th>Service</th>
-    <th>LF</th><th>Pax</th><th>Profit</th>
+    <th>LF</th>
+    <th title="passengers a day — the same number whatever the detail setting">Pax/day</th>
+    <th title="contribution margin a day: revenue less this flight's fuel, crew and fees. Excludes lease rent, loan service, payroll and hub overhead">Profit/day</th>
     <th title="what the weather is doing to this route right now">Wx</th>
     <th></th><th></th>
   </tr></thead><tbody>${rows.join("") || emptyRow(12)}</tbody></table>`;
@@ -615,7 +617,7 @@ function cabinFareRow(o, isHuman) {
       : `$${c.fare.toFixed(0)}`;
     return `<span class="cabinFare ${c.priced ? "priced" : ""}">
        <b>${CABIN_SHORT[c.cabin] || c.cabin[0]}</b> ${fare}
-       <span class="metric">${c.seats}st &middot; ${lf}% &middot; ${money(c.revenue)}</span>
+       <span class="metric">${c.seats}st &middot; ${lf}% &middot; ${money(c.revenue_per_day)}/d</span>
      </span>`;
   }).join("");
   // spans every column but the carrier name — keep in step with routesHtml's
