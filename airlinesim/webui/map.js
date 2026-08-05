@@ -393,15 +393,28 @@ function drawLive(snap) {
 // A colour with no key is decoration. The legend names the carriers and the
 // weather kinds actually on the map right now, so nothing needs a tooltip to
 // be identified — and it names any airport in play that the window can't show.
+//
+// TWO GROUPS, PINNED TO OPPOSITE ENDS: carriers left, weather right. They are
+// different kinds of thing — one is who you are competing with, the other is
+// what the sky is doing — and in a single run-on row the boundary between
+// them moved every tick as carriers entered or a storm cleared, so neither
+// list had a stable place to look. The off-window note rides with the weather
+// group: like the sky it is a property of the map, not of a carrier.
 function drawLegend(snap, offscreen) {
   const box = document.getElementById("mapLegend");
   if (!box) return;
   box.innerHTML = "";
+  const left = document.createElement("div");
+  left.className = "legendGroup";
+  const right = document.createElement("div");
+  right.className = "legendGroup";
+  box.append(left, right);
+
   for (const p of snap.players) {
     const s = document.createElement("span");
     s.innerHTML = `<i style="background:${carrierColor(snap, p.player_id)}"></i>` +
                   `${p.name}${p.is_ai ? "" : " (you)"}`;
-    box.appendChild(s);
+    left.appendChild(s);
   }
   const kinds = [...new Set((snap.weather_systems || []).map((w) => w.kind))].sort();
   for (const k of kinds) {
@@ -409,13 +422,13 @@ function drawLegend(snap, offscreen) {
     s.className = "wxKey";
     s.innerHTML = `<i style="background:${WX_COLOR[k] || "#88a"}"></i>` +
                   k.replace(/_/g, " ").toLowerCase();
-    box.appendChild(s);
+    right.appendChild(s);
   }
   if (offscreen && offscreen.length) {
     const s = document.createElement("span");
     s.className = "wxKey";
     s.textContent = `off window: ${offscreen.sort().join(" ")}`;
-    box.appendChild(s);
+    right.appendChild(s);
   }
 }
 
