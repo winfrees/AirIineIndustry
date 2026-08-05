@@ -104,9 +104,10 @@ main {
 #startHint,
 #mapCard,
 #playersCard,
-#allianceCard,
 #routesCard,
 #fleetCard,
+#crewCard,
+#allianceCard,
 #logCard { grid-column: 1 / -1; }
 
 /* Full width, the map is alone in its row with nothing to match heights to,
@@ -130,15 +131,17 @@ main {
 #startHint ol { margin: 0.2rem 0 0.5rem; padding-left: 1.2rem; }
 #startHint li { margin-bottom: 0.35rem; font-size: 0.88rem; }
 
-/* 1x1 blocks flow two per row. */
-#crewCard,
+/* 1x1 blocks flow two per row. Hubs and Airports are the pair: both are
+   airport-scoped and short, and reading the hub fee against the gate ledger
+   and fuel spot at the same field is the reason to see them together. They
+   are ADJACENT IN THE DOM so they land on one row — a full-width card between
+   them would push Airports onto a row of its own. */
 #hubsCard,
 #marketCard { grid-column: span 1; }
 
 /* Below two usable columns, every block becomes full width. */
 @media (max-width: 720px) {
   main { grid-template-columns: minmax(0, 1fr); }
-  #crewCard,
   #hubsCard,
   #marketCard { grid-column: 1 / -1; }
   /* A phone is tall and narrow: the width is already the binding constraint,
@@ -174,8 +177,24 @@ th, td { text-align: left; padding: 0.35rem 0.4rem; border-bottom: 1px solid var
 th { color: var(--muted); font-weight: 500; }
 tr:last-child td { border-bottom: none; }
 
-.playerBlock { margin-bottom: 0.9rem; }
-.playerBlock:last-child { margin-bottom: 0; }
+/* Carriers fill the full-width card two abreast. A GRID, not CSS `columns`:
+   column flow would break a carrier's block across the column boundary, so a
+   name could sit at the foot of the left column with its cash flow at the
+   head of the right one. Grid keeps each block whole. */
+#players {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.6rem 1.6rem;
+  align-items: start;
+}
+/* One per row once there is only one column to give it. This override has to
+   sit AFTER the rule above: both are ID selectors, so specificity ties and
+   source order decides — declared earlier (up with the other breakpoints) it
+   loses, and carriers stay two-abreast on a phone. */
+@media (max-width: 720px) {
+  #players { grid-template-columns: minmax(0, 1fr); }
+}
+.playerBlock { margin-bottom: 0; }
 .playerHead {
   display: flex;
   align-items: baseline;
@@ -364,8 +383,14 @@ dialog h2 { margin-top: 0; }
                      align-items: center; gap: 0.3rem; }
 
 /* carrier colours and the weather kinds currently on the map */
-.mapLegend { display: flex; flex-wrap: wrap; gap: 0.15rem 0.9rem;
+/* Carriers pinned left, weather pinned right — see drawLegend(). space-between
+   on two groups keeps each list anchored to its own end, so a carrier joining
+   or a storm clearing can't shift the other list along the row. */
+.mapLegend { display: flex; flex-wrap: wrap; justify-content: space-between;
+             align-items: baseline; gap: 0.15rem 1.4rem;
              margin: 0.4rem 0 0.15rem; font-size: 0.78rem; }
+.legendGroup { display: flex; flex-wrap: wrap; gap: 0.15rem 0.9rem;
+               align-items: baseline; }
 .mapLegend span { display: inline-flex; align-items: center; gap: 0.3rem; }
 .mapLegend span.wxKey { color: var(--muted); }
 .mapLegend i { width: 0.7rem; height: 0.7rem; border-radius: 2px; display: block; }
