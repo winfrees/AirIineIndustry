@@ -658,6 +658,10 @@ class GameSession:
                               "max_range_km": s.max_range_km,
                               "takeoff_runway_m": s.takeoff_runway_m,
                               "type_rating": s.type_rating,
+                              # published dimensions — the map derives each
+                              # type's plan-view silhouette from these
+                              "length_m": s.length_m,
+                              "wingspan_m": s.wingspan_m,
                               "reconfig_cost": s.reconfig_cost_per_slot
                                                * cabin_slots_for(s.max_seats),
                               "reconfig_days": s.reconfig_days,

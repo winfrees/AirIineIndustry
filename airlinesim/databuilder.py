@@ -78,6 +78,12 @@ FLEET_CATALOG = (
     # a 9-abreast 787. Cabin LENGTH is derived from max_seats at economy
     # pitch, not taken from a fuselage drawing.
     #
+    # `length_m` / `wingspan_m` ARE fuselage dimensions — published
+    # manufacturer figures, and the second measured input here. Nothing in
+    # the simulation reads them; the network map derives each type's
+    # plan-view icon from the pair, so the shapes differ because the
+    # aeroplanes do.
+    #
     # `list_price` MUST BE ONE MEASURE ACROSS THE WHOLE TABLE. It drives the
     # purchase price, the financed amount, lease rent, depreciation and book
     # value, and the AI expenses ownership as a fraction of it — so any type
@@ -104,6 +110,7 @@ FLEET_CATALOG = (
          cruise_speed_kmh=797, fuel_burn_lph=1300, maint_cost_per_hour=700,
          takeoff_runway_m=1700, type_rating="E170",
          cabin_abreast=4,
+         length_m=31.68, wingspan_m=28.72,
          reconfig_cost_per_slot=9_000, reconfig_days=10, scale=0.55),
     dict(spec_id="CRJ900", display_name="CRJ900", manufacturer="Bombardier",
          plane_class=PlaneClass.REGIONAL if hasattr(PlaneClass, "REGIONAL")
@@ -112,6 +119,7 @@ FLEET_CATALOG = (
          cruise_speed_kmh=829, fuel_burn_lph=1450, maint_cost_per_hour=760,
          takeoff_runway_m=1900, type_rating="CRJ",
          cabin_abreast=4,
+         length_m=36.24, wingspan_m=24.85,
          reconfig_cost_per_slot=8_500, reconfig_days=9, scale=0.55),
     dict(spec_id="A220", display_name="A220-300", manufacturer="Airbus",
          plane_class=PlaneClass.NARROWBODY,
@@ -119,6 +127,7 @@ FLEET_CATALOG = (
          cruise_speed_kmh=829, fuel_burn_lph=1900, maint_cost_per_hour=900,
          takeoff_runway_m=1900, type_rating="A220",
          cabin_abreast=5,
+         length_m=38.71, wingspan_m=35.1,
          reconfig_cost_per_slot=12_000, reconfig_days=12, scale=0.8),
     dict(spec_id="A319", display_name="A319neo", manufacturer="Airbus",
          plane_class=PlaneClass.NARROWBODY,
@@ -126,6 +135,7 @@ FLEET_CATALOG = (
          cruise_speed_kmh=833, fuel_burn_lph=2200, maint_cost_per_hour=1000,
          takeoff_runway_m=2000, type_rating="A320",
          cabin_abreast=6,
+         length_m=33.84, wingspan_m=35.8,
          reconfig_cost_per_slot=13_000, reconfig_days=13, scale=0.9),
     dict(spec_id="A320", display_name="A320neo", manufacturer="Airbus",
          plane_class=PlaneClass.NARROWBODY,
@@ -133,6 +143,7 @@ FLEET_CATALOG = (
          cruise_speed_kmh=833, fuel_burn_lph=2400, maint_cost_per_hour=1100,
          takeoff_runway_m=2100, type_rating="A320",
          cabin_abreast=6,
+         length_m=37.57, wingspan_m=35.8,
          reconfig_cost_per_slot=14_000, reconfig_days=14, scale=1.0),
     dict(spec_id="A321", display_name="A321neo", manufacturer="Airbus",
          plane_class=PlaneClass.NARROWBODY,
@@ -140,6 +151,7 @@ FLEET_CATALOG = (
          cruise_speed_kmh=833, fuel_burn_lph=2750, maint_cost_per_hour=1250,
          takeoff_runway_m=2300, type_rating="A320",
          cabin_abreast=6,
+         length_m=44.51, wingspan_m=35.8,
          reconfig_cost_per_slot=16_000, reconfig_days=16, scale=1.15),
     dict(spec_id="B738", display_name="737-800", manufacturer="Boeing",
          plane_class=PlaneClass.NARROWBODY,
@@ -147,6 +159,7 @@ FLEET_CATALOG = (
          cruise_speed_kmh=840, fuel_burn_lph=2600, maint_cost_per_hour=1150,
          takeoff_runway_m=2300, type_rating="B737",
          cabin_abreast=6,
+         length_m=39.47, wingspan_m=35.79,
          reconfig_cost_per_slot=14_000, reconfig_days=14, scale=1.0),
     dict(spec_id="B38M", display_name="737 MAX 8", manufacturer="Boeing",
          plane_class=PlaneClass.NARROWBODY,
@@ -154,6 +167,7 @@ FLEET_CATALOG = (
          cruise_speed_kmh=839, fuel_burn_lph=2350, maint_cost_per_hour=1080,
          takeoff_runway_m=2200, type_rating="B737",
          cabin_abreast=6,
+         length_m=39.52, wingspan_m=35.92,
          reconfig_cost_per_slot=14_500, reconfig_days=14, scale=1.0),
     dict(spec_id="B39M", display_name="737 MAX 9", manufacturer="Boeing",
          plane_class=PlaneClass.NARROWBODY,
@@ -161,6 +175,7 @@ FLEET_CATALOG = (
          cruise_speed_kmh=839, fuel_burn_lph=2500, maint_cost_per_hour=1180,
          takeoff_runway_m=2400, type_rating="B737",
          cabin_abreast=6,
+         length_m=42.16, wingspan_m=35.92,
          reconfig_cost_per_slot=15_500, reconfig_days=15, scale=1.1),
     # equivalent capital value, not a historic list price — see the note above
     dict(spec_id="B752", display_name="757-200", manufacturer="Boeing",
@@ -169,6 +184,7 @@ FLEET_CATALOG = (
          cruise_speed_kmh=850, fuel_burn_lph=3400, maint_cost_per_hour=1600,
          takeoff_runway_m=2100, type_rating="B757",
          cabin_abreast=6,
+         length_m=47.3, wingspan_m=38.05,
          reconfig_cost_per_slot=13_000, reconfig_days=16, scale=1.3),
     # equivalent capital value, not a historic list price — see the note above
     dict(spec_id="B763", display_name="767-300ER", manufacturer="Boeing",
@@ -177,6 +193,7 @@ FLEET_CATALOG = (
          cruise_speed_kmh=851, fuel_burn_lph=4400, maint_cost_per_hour=2100,
          takeoff_runway_m=2600, type_rating="B757",
          cabin_abreast=7,
+         length_m=54.94, wingspan_m=47.57,
          reconfig_cost_per_slot=20_000, reconfig_days=22, scale=1.9),
     dict(spec_id="B788", display_name="787-8", manufacturer="Boeing",
          plane_class=PlaneClass.WIDEBODY,
@@ -184,6 +201,7 @@ FLEET_CATALOG = (
          cruise_speed_kmh=903, fuel_burn_lph=5000, maint_cost_per_hour=2400,
          takeoff_runway_m=2600, type_rating="B787",
          cabin_abreast=9,
+         length_m=56.72, wingspan_m=60.12,
          reconfig_cost_per_slot=24_000, reconfig_days=26, scale=2.2),
     dict(spec_id="B789", display_name="787-9", manufacturer="Boeing",
          plane_class=PlaneClass.WIDEBODY,
@@ -191,6 +209,7 @@ FLEET_CATALOG = (
          cruise_speed_kmh=903, fuel_burn_lph=5600, maint_cost_per_hour=2600,
          takeoff_runway_m=2800, type_rating="B787",
          cabin_abreast=9,
+         length_m=62.81, wingspan_m=60.12,
          reconfig_cost_per_slot=26_000, reconfig_days=28, scale=2.4),
     dict(spec_id="A339", display_name="A330-900", manufacturer="Airbus",
          plane_class=PlaneClass.WIDEBODY,
@@ -198,6 +217,7 @@ FLEET_CATALOG = (
          cruise_speed_kmh=871, fuel_burn_lph=5700, maint_cost_per_hour=2650,
          takeoff_runway_m=2700, type_rating="A330",
          cabin_abreast=8,
+         length_m=63.66, wingspan_m=64.0,
          reconfig_cost_per_slot=26_000, reconfig_days=28, scale=2.4),
     dict(spec_id="A359", display_name="A350-900", manufacturer="Airbus",
          plane_class=PlaneClass.WIDEBODY,
@@ -205,6 +225,7 @@ FLEET_CATALOG = (
          cruise_speed_kmh=903, fuel_burn_lph=5800, maint_cost_per_hour=2700,
          takeoff_runway_m=2700, type_rating="A350",
          cabin_abreast=9,
+         length_m=66.8, wingspan_m=64.75,
          reconfig_cost_per_slot=28_000, reconfig_days=30, scale=2.6),
     dict(spec_id="B77W", display_name="777-300ER", manufacturer="Boeing",
          plane_class=PlaneClass.WIDEBODY,
@@ -212,6 +233,7 @@ FLEET_CATALOG = (
          cruise_speed_kmh=896, fuel_burn_lph=7500, maint_cost_per_hour=3300,
          takeoff_runway_m=3100, type_rating="B777",
          cabin_abreast=10,
+         length_m=73.86, wingspan_m=64.8,
          reconfig_cost_per_slot=32_000, reconfig_days=34, scale=3.1),
 )
 

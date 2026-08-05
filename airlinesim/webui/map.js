@@ -13,19 +13,24 @@
 // daily FREQUENCY smeared across the tick (see the weather design doc), so
 // there is no aircraft with a departure time and a position to read off.
 //
-// Aircraft positions here are therefore DERIVED FOR DISPLAY: an icon is drawn
-// for every route op that ACTUALLY OPERATED this tick (eff_freq > 0, i.e. after
-// gates, crew and weather have had their say), and its phase along the great
-// circle is the sim clock modulo the leg's own block time. So the count is
-// real, the direction is real, and the ground speed is proportional to the
-// type's cruise speed — but the specific aeroplane at a specific point is a
-// rendering of the schedule, not a simulated object. The panel says so,
-// because a map that looks like live radar and isn't would be the most
-// misleading thing in the GUI.
+// So there are TWO DRAWINGS, and the map says which one you are looking at.
 //
-// One consequence worth knowing: the phase is sampled once per tick, so at
-// "1 day" detail an aircraft can land on a similar phase each look and appear
-// parked. Run the sim at 1 h detail (the default) and it moves.
+//   TIMETABLE (detail <= 1 h). A derived schedule spreads each route's
+//   OPERATED frequency across a service window, and an icon is drawn for every
+//   flight actually in the air at this moment. The count, the direction, the
+//   ground speed and how far along each leg is are all real consequences of
+//   what the model flew. The one invention is the time of day a flight leaves,
+//   because the engine schedules no departures. See "the timetable" below.
+//
+//   SCHEMATIC (coarser detail). One icon per operating route, phase from the
+//   clock. A 24-hour tick cannot say where in the day it is, so a timetable
+//   drawn against it would be precision the model does not have; at that
+//   resolution the engine's own unit IS the day and the single icon standing
+//   for a day's flying is the honest picture.
+//
+// Either way the aeroplane at a specific point is a rendering of the schedule,
+// not a simulated object — a map that looks like live radar and isn't would be
+// the most misleading thing in the GUI.
 //
 // Everything else is read straight from the model: route endpoints and
 // frequencies, which carrier owns what, weather system positions and radii,
@@ -195,16 +200,66 @@ function pointOn(path, f) {
 // from a narrowbody from a widebody, not a 737 from an A320 — sixteen hand
 // drawn type silhouettes would be a different kind of project. The tail
 // number and type are on the tooltip and in the panel on selection.
-function planeIcon(planeClass, seats) {
-  const k = planeClass === "WIDEBODY" ? 1.35
-          : planeClass === "REGIONAL" ? 0.75 : 1.0;
-  const s = k * (0.85 + Math.min(0.5, (seats || 150) / 700));
-  const wing = planeClass === "WIDEBODY" ? 9 : planeClass === "REGIONAL" ? 6 : 7.5;
-  // nose right; rotated to the track angle by the caller
-  const body = `M9,0 L2,2 L-7,2.4 L-9,1 L-7,0 L-9,-1 L-7,-2.4 L2,-2 Z`;
-  const wings = `M1,0 L-4,${wing} L-1.5,${wing} L3,0.6 Z M1,0 L-4,${-wing} L-1.5,${-wing} L3,-0.6 Z`;
-  const tail = `M-7,0 L-9.5,4 L-7.5,4 L-5.5,0.6 Z M-7,0 L-9.5,-4 L-7.5,-4 L-5.5,-0.6 Z`;
-  return { d: body + wings + tail, scale: s };
+// A PLAN VIEW per type, DERIVED from the type's published length and wingspan
+// rather than drawn by hand. `length_m` and `wingspan_m` are measured figures
+// on AircraftSpec that nothing in the simulation reads — they exist to make
+// this drawing honest.
+//
+// What that buys: the icon's proportions are the aeroplane's proportions. A
+// CRJ900 is long and narrow-winged (24.9 m span on 36.2 m of fuselage, ratio
+// 0.69); a 787 is the opposite (60.1 on 56.7, ratio 1.06) and its wings reach
+// wider than it is long. An A321 is visibly a stretched A319 because they
+// share a span and differ by eleven metres of fuselage. None of that is a
+// judgement call in this file — it falls out of two numbers per type.
+//
+// Absolute size is COMPRESSED on purpose: a 777 really is 2.3x an E175 by
+// length, which at map scale would be a blob beside a speck, so screen size
+// goes as length^0.6 — the ordering survives and both stay legible.
+const ICON_HALF_LEN = 10;        // drawing units; scale is applied by the caller
+const ICON_REF_LEN_M = 40.0;     // a mid-size narrowbody sits at scale 1
+
+function planeIcon(spec) {
+  // Unpublished dimensions fall back to a band off plane_class, the same way
+  // cabin.py bands an unpublished abreast.
+  const cls = spec.plane_class;
+  const L = spec.length_m || (cls === "WIDEBODY" ? 60 : cls === "REGIONAL" ? 34 : 38);
+  const S = spec.wingspan_m || (cls === "WIDEBODY" ? 60 : cls === "REGIONAL" ? 26 : 35);
+
+  const hl = ICON_HALF_LEN;
+  const hs = hl * (S / L);         // half-span, TRUE to the real ratio
+  const fw = hl * 0.105;           // fuselage half-width
+  const r = (v) => v.toFixed(2);
+
+  // fuselage: pointed nose at +x, squared tail at -x
+  const body =
+    `M${r(hl)},0 L${r(hl * 0.62)},${r(fw)} L${r(-hl * 0.78)},${r(fw)} ` +
+    `L${r(-hl)},${r(fw * 0.42)} L${r(-hl)},${r(-fw * 0.42)} ` +
+    `L${r(-hl * 0.78)},${r(-fw)} L${r(hl * 0.62)},${r(-fw)} Z`;
+
+  const wLE = hl * 0.20, wRoot = hl * 0.52, wSweep = hl * 0.46, wTip = hl * 0.15;
+  const halfWing = (g) =>
+    `M${r(wLE)},${r(g * fw)} L${r(wLE - wSweep)},${r(g * hs)} ` +
+    `L${r(wLE - wSweep - wTip)},${r(g * hs)} L${r(wLE - wRoot)},${r(g * fw)} Z`;
+
+  const tLE = -hl * 0.70, tSpan = hs * 0.38, tRoot = hl * 0.24,
+        tSweep = hl * 0.22, tTip = hl * 0.09;
+  const halfTail = (g) =>
+    `M${r(tLE)},${r(g * fw * 0.8)} L${r(tLE - tSweep)},${r(g * tSpan)} ` +
+    `L${r(tLE - tSweep - tTip)},${r(g * tSpan)} L${r(tLE - tRoot)},${r(g * fw * 0.8)} Z`;
+
+  const eY = hs * 0.36, eX = wLE - wSweep * 0.36, eLen = hl * 0.30, eW = hl * 0.055;
+  const nacelle = (g) =>
+    `M${r(eX + eLen * 0.55)},${r(g * eY - eW)} L${r(eX - eLen * 0.45)},${r(g * eY - eW)} ` +
+    `L${r(eX - eLen * 0.45)},${r(g * eY + eW)} L${r(eX + eLen * 0.55)},${r(g * eY + eW)} Z`;
+
+  return {
+    parts: [
+      { d: halfWing(1) + halfWing(-1) + halfTail(1) + halfTail(-1), fill: "body" },
+      { d: nacelle(1) + nacelle(-1), fill: "shade" },
+      { d: body, fill: "body" },
+    ],
+    scale: Math.pow(L / ICON_REF_LEN_M, 0.6),
+  };
 }
 
 // -- weather ----------------------------------------------------------------
@@ -213,6 +268,69 @@ const WX_COLOR = {
   ICING: "#7fd8e8", BLIZZARD: "#e6f2ff", HURRICANE: "#ff4d6d",
   WILDFIRE_SMOKE: "#d98032", VOLCANIC_ASH: "#8d8d8d",
 };
+
+// -- the timetable ----------------------------------------------------------
+// THE ENGINE HAS NO DEPARTURE TIMES. It models a daily FREQUENCY, deliberately
+// — so a per-flight position has to come from somewhere, and it comes from
+// here: a DERIVED TIMETABLE built from what the route actually operated
+// (`eff_freq`), how long the leg takes (`block_h`) and the clock.
+//
+// This is a real schedule, not the placeholder it replaces. The old drawing
+// put ONE icon on a route however many times a day it flew, at a phase taken
+// from a hash of the op id. Now the number in the air at any moment is the
+// number the schedule puts there, an aircraft is airborne only between its own
+// departure and arrival, and a route with eight daily frequencies looks eight
+// times busier than one with one — because it is.
+//
+// ROTATIONS, NOT LEGS. A tail flies out and back, so both legs of a market
+// share one base offset and the return is phased by the outbound's block time
+// plus a turnaround. You watch an aircraft go out, turn, and come home, which
+// is what the fleet is actually doing.
+//
+// WHAT IS STILL INVENTED, and must not be presented otherwise: the time of day
+// each flight leaves. The engine schedules no departures, so the service
+// window and the even spacing inside it are this file's invention. Everything
+// else — how many flew, how long they take, which aircraft, which route — is
+// read from the model.
+const SERVICE_START_H = 6.0;    // first departure of the day, sim clock
+const SERVICE_END_H = 22.0;     // last departure
+const TURN_H = 0.75;            // ground time before the return leg
+
+// Real per-flight positions need to know WHERE IN THE DAY it is, and a tick
+// coarser than an hour cannot say. At 24-hour resolution the engine's own unit
+// IS the day, so the schematic single-icon drawing is the honest picture there.
+const TIMETABLE_MAX_TICK_H = 1.0;
+
+function opOffset(key) {
+  return [...key].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 997, 7) / 997;
+}
+
+// Flights of this op IN THE AIR at `now`, as fractions along the leg. Returns
+// [] when nothing is airborne — a schedule has gaps, and an empty sky between
+// banks is a true statement about the timetable, not a missing icon.
+function airborneOn(op, now) {
+  const n = Math.max(0, Math.round(op.eff_freq || 0));
+  if (!n) return [];
+  const block = Math.max(0.25, op.block_h || 2.0);
+  const market = [op.origin, op.dest].sort().join("-") + ":" + op.tail_number;
+  const isReturn = op.origin > op.dest;
+  const window = Math.max(1.0, SERVICE_END_H - SERVICE_START_H);
+  const spacing = window / n;
+  const base = SERVICE_START_H + opOffset(market) * spacing
+             + (isReturn ? block + TURN_H : 0);
+  const clock = ((now % 24) + 24) % 24;
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const dep = base + i * spacing;
+    // check yesterday's departures too, so a leg crossing midnight is still
+    // airborne at 01:00 rather than vanishing at the date line
+    for (const shift of (dep + block > 24 ? [0, 24] : [0])) {
+      const t = clock + shift;
+      if (t >= dep && t < dep + block) out.push((t - dep) / block);
+    }
+  }
+  return out;
+}
 
 // -- rendering --------------------------------------------------------------
 function svgEl(tag, attrs, parent) {
@@ -265,6 +383,7 @@ function offWindow(a) {
 
 function drawLive(snap) {
   if (!MAP.live) return;
+  MAP.timetable = (snap.tick_hours || 24) <= TIMETABLE_MAX_TICK_H;
   const ap = airportsByCode();
   MAP.live.innerHTML = "";
   const sel = MAP.selection;
@@ -332,29 +451,41 @@ function drawLive(snap) {
       const plane = p.fleet.find((f) => f.tail_number === o.tail_number);
       if (!plane || plane.retired) continue;
       const spec = specs[plane.spec_id] || {};
-      // phase from the clock over the leg's own block time, so pixels-per-hour
-      // tracks cruise speed. A stable per-op offset keeps two aircraft on the
-      // same city pair from sitting on top of each other.
-      const off = [...o.route_op_id].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 997, 7) / 997;
-      const block = Math.max(0.5, o.block_h || 2.0);
-      const f = ((snap.sim_time_hours / block) + off) % 1;
-      const [x, y, ang] = pointOn(gc, f);
-      const icon = planeIcon(spec.plane_class, spec.max_seats);
       const on = sel && ((sel.kind === "plane" && sel.id === o.tail_number) ||
                          (sel.kind === "route" && sel.id === o.route_op_id));
       const dim = sel && !on;
-      const g = svgEl("g", {
-        transform: `translate(${x.toFixed(1)},${y.toFixed(1)}) rotate(${ang.toFixed(1)}) scale(${icon.scale.toFixed(2)})`,
-        class: "mapPlane", "data-tail": o.tail_number, "data-op": o.route_op_id,
-        opacity: dim ? 0.2 : 1,
-      }, MAP.live);
-      svgEl("path", {
-        d: icon.d, fill: color, stroke: on ? "#fff" : "rgba(0,0,0,.55)",
-        "stroke-width": on ? 1.4 : 0.7,
-      }, g);
-      svgEl("title", {}, g).textContent =
-        `${plane.tail_number} · ${plane.display_name} · ${p.name}\n` +
-        `${o.origin}→${o.dest} · ${o.pax.toFixed(0)} pax`;
+      const icon = planeIcon(spec);
+
+      // TIMETABLE at the finest resolution; the schematic phase otherwise.
+      const fracs = MAP.timetable
+        ? airborneOn(o, snap.sim_time_hours)
+        : [((snap.sim_time_hours / Math.max(0.5, o.block_h || 2.0))
+            + opOffset(o.route_op_id)) % 1];
+
+      for (const f of fracs) {
+        const [x, y, ang] = pointOn(gc, f);
+        const g = svgEl("g", {
+          transform: `translate(${x.toFixed(1)},${y.toFixed(1)}) `
+                   + `rotate(${ang.toFixed(1)}) scale(${icon.scale.toFixed(2)})`,
+          class: "mapPlane", "data-tail": o.tail_number, "data-op": o.route_op_id,
+          opacity: dim ? 0.2 : 1,
+        }, MAP.live);
+        for (const part of icon.parts) {
+          svgEl("path", {
+            d: part.d, fill: part.fill === "body" ? color : "#0a1622",
+            "fill-opacity": part.fill === "body" ? 1 : 0.75,
+            stroke: on ? "#fff" : "rgba(0,0,0,.55)",
+            "stroke-width": on ? 1.1 : 0.5,
+          }, g);
+        }
+        svgEl("title", {}, g).textContent =
+          `${plane.tail_number} · ${plane.display_name} · ${p.name}\n` +
+          `${o.origin}→${o.dest} · ${o.pax.toFixed(0)} pax` +
+          (MAP.timetable
+            ? `\n${(f * 100).toFixed(0)}% of the leg flown, `
+              + `${((1 - f) * (o.block_h || 0)).toFixed(1)}h to run`
+            : "");
+      }
     }
   }
 
@@ -430,6 +561,17 @@ function drawLegend(snap, offscreen) {
     s.textContent = `off window: ${offscreen.sort().join(" ")}`;
     right.appendChild(s);
   }
+
+  // WHICH DRAWING the viewer is looking at. "These are the flights the
+  // schedule has airborne right now" and "this icon stands for the route's
+  // daily flying" are materially different claims, so the map says which one
+  // it is making rather than leaving the viewer to assume the stronger.
+  const mode = document.createElement("span");
+  mode.className = "wxKey";
+  mode.textContent = MAP.timetable
+    ? `timetable · ${document.querySelectorAll(".mapPlane").length} airborne`
+    : "schematic · set detail to 1 h for the timetable";
+  left.appendChild(mode);
 }
 
 // -- selection --------------------------------------------------------------

@@ -123,6 +123,15 @@ class AircraftSpec(SpecBase):
     # pitch, so an all-economy cabin holds exactly max_seats by construction.
     cabin_abreast: int = 0
     cabin_length_m: float = 0.0
+    # --- external dimensions (MEASURED: published length and wingspan) ---
+    # Used only to DRAW the type: the network map derives a plan-view
+    # silhouette from the two, so an A321 is visibly longer than an A319 and a
+    # 787 visibly wider-winged than a 757 because they are, not because
+    # someone drew sixteen icons by hand. Nothing in the simulation reads
+    # them. 0 = unpublished, which falls back to a banded estimate off
+    # plane_class the same way cabin_abreast does.
+    length_m: float = 0.0
+    wingspan_m: float = 0.0
 
 
 @dataclass(frozen=True)
