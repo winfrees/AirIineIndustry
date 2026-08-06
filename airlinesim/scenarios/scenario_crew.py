@@ -110,11 +110,211 @@ def run(label, two_crews):
     print(f"  final cash ${p.ledger.cash:,.0f}")
 
 
+# ==================================================================
+# CREW DISTRIBUTION — the panel, and the arithmetic behind it
+#
+# A crew shortage is nearly always a DISTRIBUTION problem rather than a
+# headcount one: positioning is direct-to-base only, so an airline can hold
+# fifty idle crew at its hub and still cancel a departure at a station where
+# it based nobody. The old panel printed one line of "ORD:12 DFW:8" per crew
+# type, which showed the headcount and hid the shortage.
+#
+# These checks pin the aggregation AND the path from it to the browser,
+# because a panel only this scenario can reach is not delivered.
+# ==================================================================
+CHECKS = []
+
+
+def check(label, ok, detail=""):
+    CHECKS.append((label, bool(ok)))
+    print(f"  [{'PASS' if ok else 'FAIL'}] {label}")
+    if detail:
+        print(f"         {detail}")
+
+
+_STATES = ("flying", "resting", "capped", "away", "ready")
+
+
+def check_distribution():
+    from airlinesim.game import UNBASED, NOMINAL_LEG_H, new_game
+    from airlinesim.crew import is_legal_for_flight
+
+    print("\n=== CREW DISTRIBUTION ACROSS BASES ===")
+    session = new_game(world="data", ai_profiles={"LSE": "Low-Cost",
+                                                  "CRW": "Legacy"})
+    session.pause()
+    session.advance_days(60)
+    snap = session.snapshot()
+    session.stop()
+
+    players = snap["players"]
+    check("every carrier gets a crew_bases projection",
+          all("crew_bases" in p for p in players))
+
+    # A carrier with real flying to look at. The human starts with nothing on
+    # a data world, so the interesting one is an AI that has built a network.
+    p = max(players, key=lambda x: sum(b["headcount"]
+                                       for b in x["crew_bases"].values()))
+    bases = p["crew_bases"]
+    print(f"  {p['name']}: {len(bases)} stations, "
+          f"{sum(b['headcount'] for b in bases.values())} crew")
+    for iata, b in sorted(bases.items(), key=lambda kv: -kv[1]["headcount"])[:8]:
+        print(f"    {iata:9} based {b['headcount']:4d}  here {b['present']:4d}  "
+              f"fly {b['flying']:3d} rdy {b['ready']:3d} rest {b['resting']:3d} "
+              f"cap {b['capped']:3d} away {b['away']:3d}   "
+              f"dep {b['demand']:2d} blocked {b['blocked']:2d}")
+
+    # The five states are MUTUALLY EXCLUSIVE and exhaustive. If they ever
+    # stop summing to the headcount, the bar in the GUI is drawing widths
+    # that don't add to 100% and quietly under- or over-reports the payroll.
+    bad = [(i, b["headcount"], sum(b[s] for s in _STATES))
+           for i, b in bases.items()
+           if sum(b[s] for s in _STATES) != b["headcount"]]
+    check("the crew states partition the headcount exactly", not bad,
+          f"mismatched: {bad[:3]}" if bad else
+          f"{len(bases)} stations, all states sum to headcount")
+
+    # Per-type must partition the same way, or hovering a base reports a
+    # different airline from the bar above it.
+    bad_t = [(i, t) for i, b in bases.items() for t, v in b["by_type"].items()
+             if sum(v[s] for s in _STATES) != v["headcount"]]
+    check("the per-type breakdown partitions the same way", not bad_t,
+          f"mismatched: {bad_t[:3]}" if bad_t else "cockpit/cabin/ground agree")
+
+    # Availability must come from the ROSTER'S OWN GATE rather than a second
+    # implementation of the duty rules, or the panel and the roster can
+    # disagree about who is available — the panel saying "34 ready" while the
+    # roster refuses all 34. Recount the pools independently against
+    # `is_legal_for_flight` and require the totals to match the projection.
+    now = session.world.sim_time
+    mismatch = []
+    for pl, pl_snap in zip(session.engine.players, players):
+        assigned = {id(c) for op in pl.route_ops for c in (op.cockpit, op.cabin)
+                    if c is not None}
+        tally: dict = {}
+        for pool in (pl.cockpit_pool, pl.cabin_pool, pl.crews):
+            for c in pool:
+                home = c.home_iata or c.location_iata or UNBASED
+                legal, why = is_legal_for_flight(c, now, NOMINAL_LEG_H, c.limits)
+                if id(c) in assigned:
+                    s = "flying"
+                elif not legal:
+                    s = "resting" if why.startswith("resting") else "capped"
+                elif home != UNBASED and c.location_iata != home:
+                    s = "away"
+                else:
+                    s = "ready"
+                tally.setdefault(home, dict.fromkeys(_STATES, 0))[s] += c.headcount
+        for home, want in tally.items():
+            got = pl_snap["crew_bases"].get(home)
+            for s in _STATES:
+                if got is None or got[s] != want[s]:
+                    mismatch.append((pl.player_id, home, s,
+                                     want[s], got[s] if got else None))
+    check("availability is read off the roster's own legality gate",
+          not mismatch and "is_legal_for_flight" in _game_source(),
+          f"{len(mismatch)} disagreements, e.g. {mismatch[:2]}" if mismatch else
+          "independent recount agrees with the projection at every base")
+
+    # 'capped' has to be its own state. Folding it into 'ready' reported
+    # crew as available at a base that could not crew its own departures —
+    # the panel said "34 ready" beside "2 of 4 departures uncrewed".
+    capped = sum(b["capped"] for b in bases.values())
+    ready = sum(b["ready"] for b in bases.values())
+    check("crew out of duty hours are counted apart from available crew",
+          capped >= 0 and (capped + ready) > 0,
+          f"{ready} available, {capped} out of hours across {p['name']}'s network")
+
+    # `present` is the other half of the distribution question. It must count
+    # every crew somewhere, and only differ from `headcount` when crew are
+    # genuinely out of position.
+    total_based = sum(b["headcount"] for b in bases.values())
+    total_present = sum(b["present"] for b in bases.values())
+    unbased = bases.get(UNBASED, {}).get("headcount", 0)
+    check("crew are counted once as based and once as located",
+          total_present == total_based - unbased,
+          f"{total_based} based ({unbased} unbased) vs {total_present} located")
+
+    # The failure the panel exists to surface has to be REACHABLE in a real
+    # run, or the whole card is decoration.
+    stations = [b for b in bases.values() if not b["headcount"] and b["demand"]]
+    with_crew = [b for b in bases.values() if b["headcount"]]
+    check("a real run produces stations that are flown but not based",
+          bool(stations),
+          "  ".join(f"{b['iata']}({b['demand']}dep,{b['present']}here)"
+                    for b in stations[:6]) or "none — panel would be empty")
+    check("a real run produces bases with crew to distribute",
+          len(with_crew) >= 1,
+          "  ".join(f"{b['iata']}:{b['headcount']}" for b in with_crew[:6]))
+
+    # Hubs must appear whether or not anyone is based at them yet — a hub you
+    # just opened and haven't staffed is exactly what you need to see.
+    for pl_snap in players:
+        missing = [h for h in pl_snap["hubs"] if h not in pl_snap["crew_bases"]]
+        if missing:
+            break
+    else:
+        missing = []
+    check("every declared hub appears in the panel, staffed or not",
+          not missing, f"missing: {missing}" if missing else "")
+
+    # Maintenance staff are hired with no home station. They have no base to
+    # be away from, so they must not read as a permanent positioning failure.
+    unb = bases.get(UNBASED)
+    check("crew with no home base don't read as out of position",
+          unb is None or unb["away"] == 0,
+          f"{unb['headcount']} unbased, {unb['away']} counted away" if unb else
+          "no unbased crew in this run")
+
+
+def _game_source():
+    from pathlib import Path
+    import airlinesim.game as g
+    return Path(g.__file__).read_text(encoding="utf-8")
+
+
+def check_gui_wiring():
+    """
+    The panel has to be reachable by a player, not just by this scenario.
+    `attach_alliances` shipped once with the actions written, the AI using
+    them and NOTHING reachable from the GUI; this pins the whole chain so
+    the crew card cannot go the same way.
+    """
+    from pathlib import Path
+    import airlinesim.server as server_mod
+
+    print("\n=== GUI WIRING ===")
+    webui = Path(server_mod.WEBUI_DIR)
+    html = (webui / "index.html").read_text(encoding="utf-8")
+    app = (webui / "app.js").read_text(encoding="utf-8")
+    css = (webui / "styles.css").read_text(encoding="utf-8")
+
+    check("the crew card exists in the page", 'id="crewCard"' in html
+          and 'id="crew"' in html)
+    check("the renderer reads crew_bases from the snapshot",
+          "crew_bases" in app and "crewBaseRow" in app)
+    check("every crew state the projection emits is rendered",
+          all(f'"{s}"' in app for s in _STATES),
+          " ".join(_STATES))
+    check("the bar has a fill colour for every state",
+          all(f".crewSeg.{s}" in css for s in _STATES))
+    check("stations flown but not based get their own line",
+          "crewStations" in app and ".crewStations" in css)
+    check("the per-type split is reachable from the bar",
+          "crewTypeLines" in app and "by_type" in app)
+
+
 def main():
     print("CREW DUTY/REST DEMONSTRATION")
     print("FAR Part 117-shaped limits: 9h/day, 60h/7d, 10h min rest")
     run("ONE crew set, aggressive 4x schedule", two_crews=False)
     run("TWO crew sets splitting the same 4x schedule", two_crews=True)
+    check_distribution()
+    check_gui_wiring()
+    passed = sum(1 for _, ok in CHECKS if ok)
+    print("\n" + "=" * 70)
+    print(f"{passed}/{len(CHECKS)} checks passed — "
+          f"{'ALL CHECKS PASS' if passed == len(CHECKS) else 'FAILURES ABOVE'}")
 
 
 if __name__ == "__main__":

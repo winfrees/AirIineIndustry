@@ -70,13 +70,18 @@ def main():
         "weather_thunderstorm": "HUB", "weather_snow": "HUB",
         "weather_icing": "HUB", "weather_blizzard": "HUB",
         "weather_wildfire_smoke": "ORG", "weather_volcanic_ash": "ORG",
-        # The sandbox is continental, so nowhere in it gets a hurricane. That
-        # is a correct refusal rather than a dead knob, and it is asserted
-        # separately below instead of probed for sensitivity here.
     }
+    # Three kinds have no sandbox target their geography can produce, so they
+    # are asserted as REFUSALS below rather than probed for sensitivity here.
+    # The sandbox is two airports sitting on Chicago's and Denver's
+    # coordinates: neither gets a hurricane, neither is on the Eastern
+    # Seaboard, and Chicago is UPWIND of Lake Michigan — which is the very
+    # directionality that makes lake effect a real phenomenon rather than a
+    # distance-to-water one.
+    ungeographic = {"weather_hurricane", "weather_noreaster", "weather_lake_effect"}
     for kind, target in event_targets.items():
         probes[kind] = (target, 0.05, 0.95)
-    unprobed = set(MUTATION_KINDS) - set(probes) - {"weather_hurricane"}
+    unprobed = set(MUTATION_KINDS) - set(probes) - ungeographic
     assert not unprobed, f"probe list drifted from MUTATION_KINDS: {unprobed}"
     for kind, (target, lo, hi) in probes.items():
         # A staged event needs a sky to be staged into, and the tree roots on a
@@ -92,16 +97,20 @@ def main():
 
     # A staged event the geography cannot produce is REFUSED with a reason,
     # not silently staged as a no-op the user would have to diagnose from an
-    # unchanged number. The sandbox is continental, so it gets no hurricanes.
-    refused = False
-    try:
-        tree.branch(tree.root_id,
-                    (Mutation("weather", "*", 1),
-                     Mutation("weather_hurricane", "HUB", 0.9)), cycles=2)
-    except ValueError as e:
-        refused = "hurricane" in str(e).lower()
-    checks.append(("an impossible weather event is refused, not staged as a no-op",
-                   refused))
+    # unchanged number. Every regional kind gets the same treatment, and each
+    # is refused for its own reason: the sandbox is continental (no
+    # hurricanes), inland of the Atlantic (no nor'easters), and its northern
+    # field sits UPWIND of Lake Michigan (no lake-effect band).
+    for kind in sorted(ungeographic):
+        refused = False
+        try:
+            tree.branch(tree.root_id,
+                        (Mutation("weather", "*", 1),
+                         Mutation(kind, "HUB", 0.9)), cycles=2)
+        except ValueError as e:
+            refused = kind.split("_", 1)[1].replace("_", " ") in str(e).lower()
+        checks.append((f"'{kind}' is refused where the geography can't "
+                       f"produce it, not staged as a no-op", refused))
 
     # -- 4. sweeps and the node cap -------------------------------------
     small = ScenarioTree(max_nodes=8)

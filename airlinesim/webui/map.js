@@ -42,7 +42,7 @@
 // without hit-testing geometry by hand.
 
 const MAP = {
-  svg: null, base: null, live: null, wrap: null,
+  svg: null, view: null, base: null, live: null, wrap: null,
   basemap: null,
   W: 1000, H: 620,
   selection: null,      // {kind: "route"|"plane", id}
@@ -50,6 +50,88 @@ const MAP = {
   declination: null,    // deg east at the projection's reference point
   magnetic: null,       // the whole /api/magnetic payload, for the note
 };
+
+// -- zoom and pan -----------------------------------------------------------
+// The lower 48 at 1000x620 gives the Northeast about forty pixels to fit BOS,
+// PVD, BDL, HPN, LGA, JFK and EWR into — the densest market in the country
+// rendered as one smudge. So the map zooms.
+//
+// This is a TRANSFORM on a group rather than a viewBox change, because the
+// compass has to stay put: it is chrome, not geography, and a compass that
+// slides off the corner when you pan is worse than none. Base and live move
+// together inside MAP.view; the compass is its own sibling.
+//
+// Two classes of thing scale differently, and getting that wrong is what
+// makes a zoomable map unreadable:
+//   GEOGRAPHY scales — a coastline, a route, a weather system 300 km across
+//     is 300 km across at any zoom. Their STROKES don't (non-scaling-stroke
+//     in the stylesheet), or the coast turns into a ribbon at 8x.
+//   POINT FEATURES don't — an airport dot, its label and an aircraft icon are
+//     symbols, not footprints. They carry a counter-scale so they stay the
+//     same size on screen, which is the entire reason to zoom into a dense
+//     market: to read the labels.
+// Max 8x is where the base map runs out, not an arbitrary stop. Natural Earth
+// is simplified for a continental frame and the corpus has 300 airports, so
+// past about 8x you are looking at open water between two labels with no
+// coastline detail to place them against. 8x puts the whole New York/New
+// England cluster in one readable frame, which is the case that motivated it.
+const ZOOM = { k: 1, x: 0, y: 0, min: 1, max: 8, step: 1.5 };
+// Below this the pointer is still a click, above it a drag. Without it, any
+// tremor between mousedown and mouseup cleared the selection instead of
+// making it — the map is a control surface as well as a picture.
+const DRAG_SLOP_PX = 4;
+
+function zoomTransform() {
+  return `translate(${ZOOM.x.toFixed(2)},${ZOOM.y.toFixed(2)}) `
+       + `scale(${ZOOM.k.toFixed(4)})`;
+}
+
+// Pan is clamped so the frame is always full of map. There is no background
+// worth showing, and being able to drag the country off the edge is the
+// fastest way to get lost with no obvious way back.
+function clampPan() {
+  ZOOM.x = Math.min(0, Math.max(MAP.W * (1 - ZOOM.k), ZOOM.x));
+  ZOOM.y = Math.min(0, Math.max(MAP.H * (1 - ZOOM.k), ZOOM.y));
+}
+
+function applyZoom(redraw = true) {
+  clampPan();
+  if (MAP.view) MAP.view.setAttribute("transform", zoomTransform());
+  const out = document.getElementById("mapZoomLevel");
+  if (out) out.textContent = ZOOM.k > 1.005 ? `${ZOOM.k.toFixed(1)}x` : "fit";
+  const reset = document.getElementById("btnMapReset");
+  if (reset) reset.disabled = ZOOM.k <= 1.005;
+  // Point features carry the counter-scale, so they have to be redrawn when
+  // it changes. drawLive already runs every tick; this covers a zoom while
+  // the game is PAUSED, which is exactly when someone studies a busy market.
+  if (redraw && latest) drawLive(latest);
+}
+
+// Zoom about a fixed point, so the thing under the cursor stays under it.
+// Zooming about the centre instead makes you chase your target across the
+// screen, which is the difference between a usable map and a fight.
+function zoomAbout(px, py, factor) {
+  const k0 = ZOOM.k;
+  const k = Math.min(ZOOM.max, Math.max(ZOOM.min, k0 * factor));
+  if (k === k0) return;
+  ZOOM.x = px - ((px - ZOOM.x) * k) / k0;
+  ZOOM.y = py - ((py - ZOOM.y) * k) / k0;
+  ZOOM.k = k;
+  applyZoom();
+}
+
+// Client coordinates -> the SVG's own user units. getScreenCTM() is exact
+// whatever the element's size, aspect or letterboxing, which a
+// rect-proportion calculation is not.
+function svgPoint(evt) {
+  const ctm = MAP.svg && MAP.svg.getScreenCTM();
+  if (!ctm) return { x: MAP.W / 2, y: MAP.H / 2 };
+  const p = MAP.svg.createSVGPoint();
+  p.x = evt.clientX;
+  p.y = evt.clientY;
+  const q = p.matrixTransform(ctm.inverse());
+  return { x: q.x, y: q.y };
+}
 
 // Carrier colours, assigned by order of appearance so they're stable within a
 // game. Chosen to stay distinguishable on a dark map and against each other.
@@ -266,6 +348,7 @@ function planeIcon(spec) {
 const WX_COLOR = {
   RAIN: "#4a90d9", FOG: "#9bb0c4", THUNDERSTORM: "#8a5cf6", SNOW: "#cfe8ff",
   ICING: "#7fd8e8", BLIZZARD: "#e6f2ff", HURRICANE: "#ff4d6d",
+  NOREASTER: "#6f8cff", LAKE_EFFECT: "#a8e6ff",
   WILDFIRE_SMOKE: "#d98032", VOLCANIC_ASH: "#8d8d8d",
 };
 
@@ -395,9 +478,15 @@ function drawLive(snap) {
     // drawn at its real size rather than a fixed blob
     const [x2] = project(w.lon + w.radius_km / 88.0, w.lat);
     const color = WX_COLOR[w.kind] || "#88a";
+    // A weather system is geography, so it scales — but the FILL is a
+    // whole-map signal ("there is a storm here, this big, this bad"), and
+    // once you have zoomed inside one it is a uniform wash over the airports
+    // you zoomed in to read. It fades with zoom; the outline doesn't, so the
+    // system's edge stays visible and you can still see you are under it.
+    const wash = 1 / Math.sqrt(ZOOM.k);
     const c = svgEl("circle", {
       cx: x.toFixed(1), cy: y.toFixed(1), r: Math.abs(x2 - x).toFixed(1),
-      fill: color, "fill-opacity": (0.07 + 0.22 * w.intensity).toFixed(3),
+      fill: color, "fill-opacity": ((0.07 + 0.22 * w.intensity) * wash).toFixed(3),
       stroke: color, "stroke-opacity": 0.35, class: "mapWx",
     }, MAP.live);
     svgEl("title", {}, c).textContent =
@@ -464,9 +553,12 @@ function drawLive(snap) {
 
       for (const f of fracs) {
         const [x, y, ang] = pointOn(gc, f);
+        // An aircraft icon is a SYMBOL, not a footprint — a 737 is not 200 km
+        // long — so it holds its screen size as the map zooms.
+        const s = icon.scale / ZOOM.k;
         const g = svgEl("g", {
           transform: `translate(${x.toFixed(1)},${y.toFixed(1)}) `
-                   + `rotate(${ang.toFixed(1)}) scale(${icon.scale.toFixed(2)})`,
+                   + `rotate(${ang.toFixed(1)}) scale(${s.toFixed(3)})`,
           class: "mapPlane", "data-tail": o.tail_number, "data-op": o.route_op_id,
           opacity: dim ? 0.2 : 1,
         }, MAP.live);
@@ -480,7 +572,7 @@ function drawLive(snap) {
         }
         svgEl("title", {}, g).textContent =
           `${plane.tail_number} · ${plane.display_name} · ${p.name}\n` +
-          `${o.origin}→${o.dest} · ${o.pax.toFixed(0)} pax` +
+          `${o.origin}→${o.dest} · ${o.pax_per_day.toFixed(0)} pax/day` +
           (MAP.timetable
             ? `\n${(f * 100).toFixed(0)}% of the leg flown, `
               + `${((1 - f) * (o.block_h || 0)).toFixed(1)}h to run`
@@ -504,13 +596,21 @@ function drawLive(snap) {
     const info = snap.airports[iata] || {};
     const wx = info.weather || {};
     const isHub = snap.players.some((p) => p.hubs.includes(iata));
-    const g = svgEl("g", { class: "mapPort", "data-iata": iata }, MAP.live);
+    // Dot and label are symbols too: they hold their screen size, which is
+    // the whole reason to zoom into the Northeast — so BOS, PVD, BDL, HPN,
+    // LGA, JFK and EWR separate into seven readable labels instead of one
+    // smudge. Translate first, THEN counter-scale, so the marker stays
+    // pinned to its coordinates while its size stays constant.
+    const g = svgEl("g", {
+      class: "mapPort", "data-iata": iata,
+      transform: `translate(${x.toFixed(1)},${y.toFixed(1)}) `
+               + `scale(${(1 / ZOOM.k).toFixed(4)})`,
+    }, MAP.live);
     svgEl("circle", {
-      cx: x.toFixed(1), cy: y.toFixed(1), r: isHub ? 4.5 : 2.6,
+      cx: 0, cy: 0, r: isHub ? 4.5 : 2.6,
       class: wx.closed ? "mapPortClosed" : "mapPortDot",
     }, g);
-    svgEl("text", { x: (x + 6).toFixed(1), y: (y + 3).toFixed(1), class: "mapLabel" },
-          g).textContent = iata;
+    svgEl("text", { x: 6, y: 3, class: "mapLabel" }, g).textContent = iata;
     svgEl("title", {}, g).textContent =
       `${iata} — ${a.display_name}${isHub ? " (hub)" : ""}` +
       (wx.text ? `\n${wx.text}` : "") +
@@ -611,8 +711,12 @@ async function initMap() {
     viewBox: `0 0 ${MAP.W} ${MAP.H}`, class: "mapSvg",
     preserveAspectRatio: "xMidYMid meet",
   }, MAP.wrap);
-  MAP.base = svgEl("g", {}, MAP.svg);
-  MAP.live = svgEl("g", {}, MAP.svg);
+  // Base and live ride together inside the zoom group; the compass is added
+  // to the SVG afterwards, so it is a SIBLING and stays put while the map
+  // moves under it.
+  MAP.view = svgEl("g", { class: "mapView" }, MAP.svg);
+  MAP.base = svgEl("g", {}, MAP.view);
+  MAP.live = svgEl("g", {}, MAP.view);
 
   const [basemap, magnetic] = await Promise.all([
     fetch("/api/basemap").then((r) => r.json()).catch(() => null),
@@ -639,8 +743,12 @@ async function initMap() {
   }
   drawCompass();
   wireNorthToggle();
+  wireZoomPan();
+  applyZoom(false);
 
   MAP.svg.addEventListener("click", (e) => {
+    // A drag that ends over an aircraft is not a click on it.
+    if (PAN.dragged) return;
     const plane = e.target.closest(".mapPlane");
     if (plane) return selectOn("plane", plane.dataset.tail);
     const route = e.target.closest(".mapRoute");
@@ -648,6 +756,119 @@ async function initMap() {
     if (MAP.selection) { MAP.selection = null; if (latest) drawLive(latest); applySelection(); }
   });
   applySelection();
+}
+
+// -- zoom/pan input ---------------------------------------------------------
+// Pointer events throughout, so mouse, trackpad, pen and touch are ONE code
+// path — including pinch, which is just "two active pointers" rather than a
+// separate touch API with its own coordinate conventions to get wrong.
+const PAN = { pointers: new Map(), dragged: false, start: null, pinch: 0 };
+
+function wireZoomPan() {
+  const svg = MAP.svg;
+  if (!svg) return;
+
+  svg.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const p = svgPoint(e);
+    // deltaMode 1 is lines, 2 is pages; normalise so a trackpad and a notched
+    // wheel feel like the same gesture instead of one of them being unusable.
+    const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? MAP.H : 1;
+    zoomAbout(p.x, p.y, Math.exp((-e.deltaY * unit) / 420));
+  }, { passive: false });
+
+  svg.addEventListener("pointerdown", (e) => {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    svg.setPointerCapture(e.pointerId);
+    PAN.pointers.set(e.pointerId, svgPoint(e));
+    PAN.dragged = false;
+    if (PAN.pointers.size === 1) {
+      PAN.start = { cx: e.clientX, cy: e.clientY, x: ZOOM.x, y: ZOOM.y };
+    } else if (PAN.pointers.size === 2) {
+      PAN.pinch = pinchSpan();
+      // Any second finger means a pinch, never a tap — otherwise letting go
+      // of a two-finger zoom lands as a click and clears the selection.
+      PAN.dragged = true;
+    }
+  });
+
+  svg.addEventListener("pointermove", (e) => {
+    if (!PAN.pointers.has(e.pointerId)) return;
+    const pts = PAN.pointers;
+    if (pts.size >= 2) {
+      // PINCH. Scale by the change in finger separation, about the midpoint
+      // between them — the same "keep what you grabbed under your fingers"
+      // rule the wheel follows.
+      const before = midpoint();
+      pts.set(e.pointerId, svgPoint(e));
+      const span = pinchSpan();
+      if (PAN.pinch > 0.001 && span > 0.001) {
+        const k0 = ZOOM.k;
+        const k = Math.min(ZOOM.max, Math.max(ZOOM.min, k0 * (span / PAN.pinch)));
+        ZOOM.x = before.x - ((before.x - ZOOM.x) * k) / k0;
+        ZOOM.y = before.y - ((before.y - ZOOM.y) * k) / k0;
+        ZOOM.k = k;
+        const after = midpoint();
+        ZOOM.x += (after.x - before.x) * ZOOM.k;
+        ZOOM.y += (after.y - before.y) * ZOOM.k;
+        applyZoom();
+      }
+      PAN.pinch = span;
+      return;
+    }
+    if (!PAN.start) return;
+    const dx = e.clientX - PAN.start.cx, dy = e.clientY - PAN.start.cy;
+    if (!PAN.dragged && Math.hypot(dx, dy) < DRAG_SLOP_PX) return;
+    PAN.dragged = true;
+    svg.classList.add("panning");
+    // The pointer delta is in CLIENT pixels; the transform is in user units,
+    // so it has to go through the same CTM the hit-testing does or the map
+    // slides at the wrong rate whenever the card isn't exactly 1000px wide.
+    const ctm = svg.getScreenCTM();
+    const sx = ctm ? ctm.a : 1, sy = ctm ? ctm.d : 1;
+    ZOOM.x = PAN.start.x + dx / (sx || 1);
+    ZOOM.y = PAN.start.y + dy / (sy || 1);
+    applyZoom(false);
+  });
+
+  const release = (e) => {
+    PAN.pointers.delete(e.pointerId);
+    if (PAN.pointers.size < 2) PAN.pinch = 0;
+    if (PAN.pointers.size === 0) {
+      PAN.start = null;
+      svg.classList.remove("panning");
+      // Clear the drag flag AFTER the click event that follows pointerup.
+      setTimeout(() => { PAN.dragged = false; }, 0);
+      if (latest) drawLive(latest);   // repaint point features at final zoom
+    }
+  };
+  svg.addEventListener("pointerup", release);
+  svg.addEventListener("pointercancel", release);
+
+  svg.addEventListener("dblclick", (e) => {
+    e.preventDefault();
+    const p = svgPoint(e);
+    zoomAbout(p.x, p.y, e.shiftKey ? 1 / ZOOM.step : ZOOM.step);
+  });
+
+  const btn = (id, fn) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("click", fn);
+  };
+  btn("btnMapZoomIn", () => zoomAbout(MAP.W / 2, MAP.H / 2, ZOOM.step));
+  btn("btnMapZoomOut", () => zoomAbout(MAP.W / 2, MAP.H / 2, 1 / ZOOM.step));
+  btn("btnMapReset", () => { ZOOM.k = 1; ZOOM.x = 0; ZOOM.y = 0; applyZoom(); });
+}
+
+function pinchSpan() {
+  const [a, b] = [...PAN.pointers.values()];
+  return a && b ? Math.hypot(a.x - b.x, a.y - b.y) : 0;
+}
+
+function midpoint() {
+  const pts = [...PAN.pointers.values()];
+  if (pts.length < 2) return { x: MAP.W / 2, y: MAP.H / 2 };
+  return { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
 }
 
 // -- north reference: compass, toggle, and the caveat -----------------------

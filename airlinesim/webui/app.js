@@ -465,7 +465,7 @@ function renderStart(snap) {
 function renderPlayers(snap) {
   els.players.innerHTML = snap.players.map((p) => {
     const isHuman = p.player_id === snap.human_player_id;
-    const pax = p.route_ops.reduce((s, o) => s + o.pax, 0);
+    const pax = p.route_ops.reduce((s, o) => s + o.pax_per_day, 0);
     const ai = p.ai_profile;
     // Show a rival's strategy and its latest moves: an opponent whose style
     // you can read is one you can actually plan against.
@@ -560,8 +560,8 @@ function routesHtml(snap) {
           : o.daily_frequency}</td>
         <td>${tierCell}</td>
         <td>${(o.load_factor * 100).toFixed(0)}%</td>
-        <td>${o.pax.toFixed(0)}</td>
-        <td class="${o.profit >= 0 ? "good" : "bad"}">${money(o.profit)}</td>
+        <td>${o.pax_per_day.toFixed(0)}</td>
+        <td class="${o.profit_per_day >= 0 ? "good" : "bad"}">${money(o.profit_per_day)}</td>
         <td>${weatherCell(o)}</td>
         <td>${isHuman
           ? `<button class="btn small warn" data-op="${o.route_op_id}" data-act="close">Close</button>`
@@ -574,7 +574,9 @@ function routesHtml(snap) {
   }
   return `<table><thead><tr>
     <th>Carrier</th><th>Route</th><th>Tail</th><th>Price</th><th>Freq</th><th>Service</th>
-    <th>LF</th><th>Pax</th><th>Profit</th>
+    <th>LF</th>
+    <th title="passengers a day — the same number whatever the detail setting">Pax/day</th>
+    <th title="contribution margin a day: revenue less this flight's fuel, crew and fees. Excludes lease rent, loan service, payroll and hub overhead">Profit/day</th>
     <th title="what the weather is doing to this route right now">Wx</th>
     <th></th><th></th>
   </tr></thead><tbody>${rows.join("") || emptyRow(12)}</tbody></table>`;
@@ -615,7 +617,7 @@ function cabinFareRow(o, isHuman) {
       : `$${c.fare.toFixed(0)}`;
     return `<span class="cabinFare ${c.priced ? "priced" : ""}">
        <b>${CABIN_SHORT[c.cabin] || c.cabin[0]}</b> ${fare}
-       <span class="metric">${c.seats}st &middot; ${lf}% &middot; ${money(c.revenue)}</span>
+       <span class="metric">${c.seats}st &middot; ${lf}% &middot; ${money(c.revenue_per_day)}/d</span>
      </span>`;
   }).join("");
   // spans every column but the carrier name — keep in step with routesHtml's
@@ -656,24 +658,131 @@ function fleetHtml(snap) {
   </tr></thead><tbody>${rows.join("") || emptyRow(10)}</tbody></table>`;
 }
 
-function crewGroupHtml(label, units) {
-  if (!units.length) return "";
-  const total = units.reduce((s, c) => s + c.headcount, 0);
-  const resting = units.filter((c) => c.resting).reduce((s, c) => s + c.headcount, 0);
-  const locs = {};
-  for (const c of units) locs[c.location_iata] = (locs[c.location_iata] || 0) + c.headcount;
-  const locStr = Object.entries(locs).map(([k, v]) => `${k}:${v}`).join(" ");
-  return `<div class="metric">${label}: ${total} (${resting} resting) — ${locStr}</div>`;
+// Crew states, in the order they stack in the bar. Ordered by operational
+// salience rather than alphabetically: what a player needs to see first is
+// how much of the payroll is working, and how much is stuck somewhere useless.
+const CREW_STATES = [
+  ["flying", "flying", "crew rostered to a departure this tick"],
+  ["ready", "ready", "at base, rested, in hours, unassigned — available now"],
+  ["resting", "resting", "mid-rest: illegal to assign until the rest is banked"],
+  ["capped", "out of hours", "at work but out of duty hours — the daily, 7-day "
+    + "or 28-day cap. Hiring more crew is the only fix; rest won't clear it today"],
+  ["away", "away", "at another airport with nothing to do — positioning is "
+    + "direct-to-base only, so these are idle until they deadhead home"],
+];
+
+// The panel exists because a crew shortage is nearly always a DISTRIBUTION
+// problem, not a headcount one: an airline can hold fifty idle crew at its
+// hub and still cancel a departure at a station where it based nobody. The
+// old panel printed one line of "ORD:12 DFW:8" per crew type, which showed
+// the headcount and hid the shortage. This shows both, and puts the bases
+// that cannot crew their own flying at the top.
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+// Cockpit and cabin are rostered independently, so a base can be flush with
+// one and short of the other — and a departure needs both. That split doesn't
+// deserve its own bar, but it is exactly what you want when you hover the one
+// base that is failing.
+function crewTypeLines(b) {
+  return Object.entries(b.by_type || {}).map(([t, v]) => {
+    const parts = CREW_STATES.filter(([k]) => v[k])
+      .map(([k, label]) => `${v[k]} ${label}`).join(", ");
+    return `${t}: ${v.headcount} — ${parts}`;
+  }).join("\n");
+}
+
+function crewBaseRow(b) {
+  const hc = b.headcount;
+  const seg = CREW_STATES.map(([k, label, tip]) => {
+    if (!b[k]) return "";
+    const pct = (100 * b[k]) / hc;
+    return `<span class="crewSeg ${k}" style="width:${pct.toFixed(2)}%"
+                  title="${b[k]} ${label} — ${esc(tip)}"></span>`;
+  }).join("");
+  const counts = CREW_STATES.filter(([k]) => b[k])
+    .map(([k, label]) => `<span class="${k}">${b[k]} ${label}</span>`).join(" · ");
+  // A blocked departure is the failure this panel is for, and the diagnosis
+  // differs: crew sitting idle on the field means the legality gate refused
+  // them, no crew present means the station was never staffed or positioned.
+  let flag = "";
+  if (b.blocked) {
+    flag = b.present
+      ? `<span class="bad" title="crew are on this field but none could be legally rostered — check rest and duty">
+           ${b.blocked}/${b.demand} departures uncrewed, ${b.present} on the field</span>`
+      : `<span class="bad" title="nobody is at this airport to fly them">
+           ${b.blocked}/${b.demand} departures uncrewed, nobody here</span>`;
+  }
+  const rest = b.resting
+    ? `<span class="metric" title="mean progress through the mandatory rest">
+         rest ${Math.round(100 * b.rest_frac)}%</span>` : "";
+  // "based" and "here" are the two halves of the distribution question, so
+  // they sit side by side — and only differ when crew are out of position.
+  // Unbased crew (maintenance) are at no airport by definition, so showing
+  // them "0 here" would read as a positioning failure they can't have.
+  const unbased = b.iata === "(unbased)";
+  const here = (!unbased && b.present !== hc)
+    ? `<span class="metric" title="crew physically at this airport right now, whoever they are based with">
+         · ${b.present} here</span>` : "";
+  return `<div class="crewBase">
+    <div class="crewBaseHead">
+      <span class="iata">${esc(b.iata)}</span>
+      ${b.is_hub ? '<span class="tag">hub</span>' : ""}
+      <span class="metric">${hc} ${unbased ? "crew" : "based"}</span>${here}
+      ${b.demand ? `<span class="metric">· ${b.demand} dep/day</span>` : ""}
+      ${rest}${flag}
+    </div>
+    <div class="crewBar" title="${hc} crew based at ${esc(b.iata)}
+${crewTypeLines(b)}">${seg}</div>
+    <div class="crewCounts">${counts}</div>
+  </div>`;
+}
+
+// Stations the airline FLIES from but bases nobody at. Normal for an
+// out-and-back — the crew arrives, turns and goes home — so these are one
+// compact line rather than a card each, and only the ones that actually
+// failed to crew a departure are called out.
+function crewStationsHtml(stations) {
+  if (!stations.length) return "";
+  const bits = stations.map((b) => {
+    const cls = b.blocked ? "bad" : "metric";
+    const mark = b.blocked ? `${b.blocked} uncrewed` : `${b.present} here`;
+    return `<span class="${cls}"
+      title="${esc(b.iata)}: ${plural(b.demand, "departure")} a day, no crew based here — ${mark}"
+      >${esc(b.iata)} <span class="metric">${mark}</span></span>`;
+  }).join(" · ");
+  return `<div class="crewStations metric" title="stations flown from with no crew based there">
+    flown, not based: ${bits}</div>`;
 }
 
 function crewHtml(snap) {
-  return snap.players.map((p) => `
-    <div class="playerBlock">
-      <div class="playerHead"><span class="name">${esc(p.name)}</span></div>
-      ${crewGroupHtml("Cockpit", p.cockpit_pool)}
-      ${crewGroupHtml("Cabin", p.cabin_pool)}
-      ${crewGroupHtml("Ground/MX", p.crews)}
-    </div>`).join("");
+  return snap.players.map((p) => {
+    const all = Object.values(p.crew_bases || {});
+    if (!all.length) {
+      return `<div class="playerBlock">
+        <div class="playerHead"><span class="name">${esc(p.name)}</span></div>
+        <div class="metric">No crew employed.</div></div>`;
+    }
+    const bases = all.filter((b) => b.headcount > 0);
+    const stations = all.filter((b) => !b.headcount);
+    // Uncrewed departures first, then by headcount, so the row you need to
+    // act on is never below the fold.
+    bases.sort((a, b) => (b.blocked - a.blocked) || (b.headcount - a.headcount));
+    stations.sort((a, b) => (b.blocked - a.blocked) || (b.demand - a.demand));
+    const tot = bases.reduce((s, b) => s + b.headcount, 0);
+    const idle = bases.reduce((s, b) => s + b.ready + b.away, 0);
+    const away = bases.reduce((s, b) => s + b.away, 0);
+    const blocked = all.reduce((s, b) => s + b.blocked, 0);
+    return `<div class="playerBlock">
+      <div class="playerHead">
+        <span class="name">${esc(p.name)}</span>
+        <span class="metric">${tot} crew across ${plural(bases.length, "base")}
+          · ${idle} idle${away ? `, ${away} out of position` : ""}${blocked
+            ? ` · <span class="bad">${plural(blocked, "uncrewed departure")}</span>` : ""}</span>
+      </div>
+      <div class="crewGrid">${bases.map(crewBaseRow).join("")}</div>
+      ${crewStationsHtml(stations)}
+    </div>`;
+  }).join("");
 }
 
 // Reliability is the cumulative record — the "this hub costs you every winter"

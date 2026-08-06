@@ -69,6 +69,17 @@
           <option value="true">true</option>
         </select>
       </label>
+      <!-- The lower 48 in one frame gives the Northeast about forty pixels to
+           fit BOS/PVD/BDL/HPN/LGA/JFK/EWR into. Scroll, drag or pinch the map
+           itself; these are the keyboard-and-mouse fallback for the same. -->
+      <span class="zoomControls" title="scroll or pinch on the map to zoom, drag to pan">
+        zoom
+        <button id="btnMapZoomOut" class="btn small" type="button" title="zoom out">&minus;</button>
+        <span id="mapZoomLevel" class="metric">fit</span>
+        <button id="btnMapZoomIn" class="btn small" type="button" title="zoom in">+</button>
+        <button id="btnMapReset" class="btn small" type="button"
+                title="back to the whole window" disabled>Reset</button>
+      </span>
       <span id="mapSel" class="metric"></span>
     </div>
   </section>
@@ -254,6 +265,13 @@
       The window is the lower 48.</div>
     <div class="metric">Click an aircraft or a route to highlight it in the
       Fleet and Routes panels; click empty map to clear.</div>
+    <div id="mapZoomNote" class="metric">Scroll or pinch to zoom, drag to pan,
+      double-click to zoom in (shift to zoom out). The whole lower 48 in one
+      frame gives the Northeast about forty pixels to fit BOS, PVD, BDL, HPN,
+      LGA, JFK and EWR into, so a busy market needs zooming into. Airport dots,
+      their labels and the aircraft hold their size as you zoom — they're
+      symbols, not footprints — while coastlines, routes and weather systems
+      are drawn at their real extent and grow with the map.</div>
     <div class="form">
       <button class="btn" value="close">Close</button>
     </div>

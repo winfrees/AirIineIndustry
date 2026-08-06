@@ -33,6 +33,7 @@ from airlinesim.engine import (
     CrewType,
 )
 from airlinesim.cabin import CABIN_ORDER, fit_report, geometry_for, presets_for
+from airlinesim.crew import is_legal_for_flight
 from airlinesim.disruption import airport_reliability, disruption_snapshot
 from airlinesim.finance_cabin import (
     DEFAULT_SEAT_CLASSES, cabin_slots_for,
@@ -77,6 +78,18 @@ MAX_CATCHUP_S = 16.0
 # Hard ceiling on ticks per wake regardless of speed: the session lock is held
 # for the whole burst, so an unbounded loop makes the UI unresponsive.
 MAX_TICKS_PER_WAKE = 64
+
+
+# Bucket for crew hired with no home station — maintenance staff are certified
+# on aircraft types rather than based at a field. They have no base to be away
+# from, so they get their own row instead of reading as a positioning failure.
+UNBASED = "(unbased)"
+
+# Flight hours the crew panel asks the legality gate about. It is a NOMINAL
+# short leg rather than zero: with zero added hours a crew sitting exactly on
+# its daily cap still passes the test, and would be reported as available at a
+# base that cannot actually crew a departure.
+NOMINAL_LEG_H = 0.5
 
 
 def route_op_id(op: RouteOp) -> str:
@@ -869,6 +882,7 @@ class GameSession:
                        "months_elapsed": l.months_elapsed, "term_months": l.term_months}
                       for l in p.leases],
             "hubs": list(getattr(p, "hub_iatas", [])),
+            "crew_bases": self._crew_bases(p),
             "log": list(p.log[-20:]),
             "ai_profile": self._ai_profile(p),
             "disruption": disruption_snapshot(self.world, p),
@@ -902,6 +916,21 @@ class GameSession:
         }
 
     def _op_snapshot(self, o: RouteOp) -> dict:
+        # RATE FIELDS ARE NORMALISED TO PER DAY, and named so.
+        #
+        # `last_pax`, `last_revenue`, `last_profit` and `last_fees` on RouteOp
+        # are PER TICK — whatever happened in the interval just stepped. That
+        # is the right unit inside the engine and the wrong one in a table: at
+        # 1-hour detail a route reads 27 passengers, at 1-day detail the SAME
+        # route reads 1,300, and the column sits beside a per-DAY frequency
+        # with no unit on it. A player reads 27 as a day's traffic and
+        # concludes a full A321 flying three times daily is nearly empty.
+        #
+        # The engine is dt-independent — a simulated month gives the same
+        # carriage and cash at 24 h, 6 h or 1 h — so it was only the DISPLAY
+        # that changed units under the reader. Dividing by the tick's share of
+        # a day restores that here too.
+        day = 24.0 / max(1e-9, self.engine.dt)
         return {
             "route_op_id": self._op_id(o),
             "origin": o.spec.origin_iata, "dest": o.spec.dest_iata,
@@ -912,13 +941,15 @@ class GameSession:
             "eff_freq": round(getattr(o, "last_eff_freq", 0.0), 3),
             "distance_km": o.spec.distance_km,
             "block_h": round(o.spec.distance_km / o.plane.spec.cruise_speed_kmh, 3),
-            "load_factor": o.last_load_factor, "pax": o.last_pax,
-            "revenue": o.last_revenue, "profit": o.last_profit,
+            "load_factor": o.last_load_factor,
+            "pax_per_day": o.last_pax * day,
+            "revenue_per_day": o.last_revenue * day,
+            "profit_per_day": o.last_profit * day,
             "suitable": o.suitable, "suitability_reasons": list(o.suitability_reasons),
             "crew_block": o.last_crew_block,
             "has_cockpit": o.cockpit is not None, "has_cabin": o.cabin is not None,
             "service_tier": getattr(o, "service_tier", 2),
-            "fees": getattr(o, "last_fees", 0.0),
+            "fees_per_day": getattr(o, "last_fees", 0.0) * day,
             "data_tier": getattr(o.spec, "data_tier", ""),
             # what the weather is doing to THIS route right now
             "weather": getattr(o, "weather_text", ""),
@@ -936,6 +967,9 @@ class GameSession:
     def _cabin_snapshot(self, o: RouteOp) -> list:
         layout = o.effective_layout()
         overrides = getattr(o, "cabin_prices", None) or {}
+        # per-day for the same reason as _op_snapshot; `seats` stays an
+        # INSTALLED count and `load_factor` a ratio, so neither is a rate.
+        day = 24.0 / max(1e-9, self.engine.dt)
         out = []
         for cc in CABIN_ORDER:
             seats = layout.seats_of(cc)
@@ -949,18 +983,141 @@ class GameSession:
                 "fare": o.fare_for(cc),
                 "priced": cc in overrides,
                 "default_fare": o.ticket_price * DEFAULT_SEAT_CLASSES[cc].price_multiplier,
-                "pax": pax,
-                "revenue": (getattr(o, "last_class_revenue", None) or {}).get(cc.name, 0.0),
+                "pax_per_day": pax * day,
+                "revenue_per_day":
+                    (getattr(o, "last_class_revenue", None) or {}).get(cc.name, 0.0) * day,
                 "load_factor": (pax / offered) if offered > 1e-6 else 0.0,
             })
         return out
 
     def _crew_snapshot(self, c: CrewUnit) -> dict:
+        st, lim = c.duty, c.limits
+        rest_need = max(1e-9, getattr(lim, "min_rest_hours", 10.0))
+        day_cap = max(1e-9, getattr(lim, "max_daily_flight_hours", 9.0))
         return {
             "spec_id": c.spec.spec_id, "crew_type": c.spec.crew_type.name,
             "headcount": c.headcount, "home_iata": c.home_iata,
-            "location_iata": c.location_iata, "resting": getattr(c.duty, "resting", False),
+            "location_iata": c.location_iata,
+            "resting": getattr(st, "resting", False),
+            # How far through the rest a resting crew is, and how much of the
+            # daily flight-time cap it has spent. Both are FRACTIONS so the UI
+            # doesn't have to know the limits — and both were invisible, which
+            # made "no legal crew available" a verdict with no working out.
+            "rest_frac": min(1.0, getattr(st, "rest_accumulated", 0.0) / rest_need),
+            "duty_frac": min(1.0, getattr(st, "hours_today", 0.0) / day_cap),
+            "duty_h": getattr(st, "continuous_duty_hours", 0.0),
         }
+
+    def _crew_bases(self, p) -> dict:
+        """
+        Crew grouped by HOME base, in five mutually exclusive states.
+
+        This is the panel's whole point: a crew shortage is nearly always a
+        DISTRIBUTION problem rather than a headcount one. Positioning is
+        direct-to-base only, so a crew that ends a rotation away from home is
+        idle until it deadheads back — and a base can be simultaneously
+        over-staffed on paper and unable to crew its own departures.
+
+        States are ordered by operational salience and assigned first-match,
+        because they genuinely overlap (a flying crew is usually also away):
+          flying  — rostered to an op this tick
+          resting — mid-rest, not yet legal
+          capped  — legal to be at work but out of duty hours (daily, 7-day
+                    or 28-day). A crew at its daily cap is NOT available, and
+                    counting it as ready reported "34 ready" at a base that
+                    could not crew its own departures.
+          away    — at some other airport, doing nothing
+          ready   — at base, rested, in hours, unassigned
+
+        Legality comes from `crew.is_legal_for_flight`, the same gate the
+        roster uses, so this panel can never disagree with the roster about
+        who is available. It is asked about a NOMINAL half-hour of flying
+        rather than zero: with zero added hours a crew sitting exactly on its
+        cap still passes, and no real leg is that short.
+        """
+        now = self.world.sim_time
+        assigned = {}
+        for op in p.route_ops:
+            for c in (op.cockpit, op.cabin):
+                if c is not None:
+                    assigned[id(c)] = op.spec.origin_iata
+        # Departures each base owes, and the ones it failed to crew. A base
+        # with blocked ops and idle crew is the distribution failure made
+        # visible; a base with blocked ops and none is simply short-handed.
+        demand, blocked = {}, {}
+        for op in p.route_ops:
+            o = op.spec.origin_iata
+            demand[o] = demand.get(o, 0) + 1
+            if op.last_crew_block:
+                blocked[o] = blocked.get(o, 0) + 1
+
+        # Where crew physically ARE, which is a different question from where
+        # they are based and the other half of the distribution story. A
+        # station with nobody based at it is perfectly normal when a crew
+        # flies out and back — it is a station with nobody based AND nobody
+        # present that cannot crew its departures.
+        present: dict = {}
+        for pool in (getattr(p, "cockpit_pool", []), getattr(p, "cabin_pool", []),
+                     getattr(p, "crews", [])):
+            for c in pool:
+                loc = c.location_iata or c.home_iata
+                if loc:
+                    present[loc] = present.get(loc, 0) + c.headcount
+
+        hubs = set(getattr(p, "hub_iatas", []))
+
+        def _blank(iata):
+            return {
+                "iata": iata, "headcount": 0, "units": 0, "present": present.get(iata, 0),
+                "flying": 0, "resting": 0, "capped": 0, "away": 0, "ready": 0,
+                "by_type": {}, "rest_frac": 0.0,
+                "demand": demand.get(iata, 0), "blocked": blocked.get(iata, 0),
+                "is_hub": iata in hubs,
+            }
+
+        bases: dict = {}
+        for pool_name, pool in (("cockpit", getattr(p, "cockpit_pool", [])),
+                                ("cabin", getattr(p, "cabin_pool", [])),
+                                ("ground", getattr(p, "crews", []))):
+            for c in pool:
+                # Maintenance staff are hired with no home base — they are
+                # certified on types, not stationed at fields. They have no
+                # base to be AWAY from, so they group under their own key
+                # rather than reading as a permanent positioning failure.
+                home = c.home_iata or c.location_iata or UNBASED
+                b = bases.setdefault(home, _blank(home))
+                st = c.duty
+                legal, why = is_legal_for_flight(c, now, NOMINAL_LEG_H, c.limits)
+                if id(c) in assigned:
+                    state = "flying"
+                elif not legal:
+                    state = "resting" if why.startswith("resting") else "capped"
+                elif home != UNBASED and c.location_iata != home:
+                    state = "away"
+                else:
+                    state = "ready"
+                b["headcount"] += c.headcount
+                b["units"] += 1
+                b[state] += c.headcount
+                t = b["by_type"].setdefault(
+                    pool_name, {"headcount": 0, "flying": 0, "resting": 0,
+                                "capped": 0, "away": 0, "ready": 0})
+                t["headcount"] += c.headcount
+                t[state] += c.headcount
+                if state == "resting":
+                    need = max(1e-9, getattr(c.limits, "min_rest_hours", 10.0))
+                    b["rest_frac"] += (min(1.0, getattr(st, "rest_accumulated", 0.0)
+                                           / need) * c.headcount)
+
+        # A station that flies but employs nobody is the interesting empty
+        # case — it never appears in the pools, so it has to be added
+        # explicitly or the panel silently omits the shortage it exists to
+        # show. Same for a declared hub with no crew at it yet.
+        for iata in set(demand) | hubs:
+            bases.setdefault(iata, _blank(iata))
+        for b in bases.values():
+            b["rest_frac"] = (b["rest_frac"] / b["resting"]) if b["resting"] else 0.0
+        return bases
 
     # -- save/load --------------------------------------------------------
     def save(self, path: str):
