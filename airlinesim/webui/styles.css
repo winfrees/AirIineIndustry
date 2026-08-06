@@ -354,7 +354,19 @@ dialog h2 { margin-top: 0; }
 /* --- network map ------------------------------------------------------- */
 #mapWrap { width: 100%; background: #071320; border: 1px solid var(--card-border);
            border-radius: 0.5rem; overflow: hidden; }
-.mapSvg { display: block; width: 100%; height: auto; }
+/* touch-action:none is what makes pinch-zoom on the MAP work: without it the
+   browser claims the gesture for page zoom and the pointer events never
+   arrive. It scopes to the SVG, so the page still scrolls normally around it. */
+.mapSvg { display: block; width: 100%; height: auto;
+          touch-action: none; cursor: grab; }
+.mapSvg.panning { cursor: grabbing; }
+
+/* GEOMETRY scales with the zoom; STROKE WIDTH must not. At 8x a 0.7px state
+   line drawn normally is a 5.6px ribbon, and the coastline swallows the
+   cities you zoomed in to read. vector-effect keeps every line the width it
+   was authored at, whatever the transform above it. */
+.mapLand, .mapState, .mapLake, .mapRiver, .mapRoad, .mapRoute,
+.mapWx { vector-effect: non-scaling-stroke; }
 .mapLand  { fill: #16232f; stroke: none; }
 .mapState { fill: none; stroke: #2f4a63; stroke-width: 0.7; }
 .mapLake  { fill: #0b1826; stroke: #2f4a63; stroke-width: 0.5; }
@@ -381,6 +393,11 @@ dialog h2 { margin-top: 0; }
                gap: 0.5rem; margin: 0.3rem 0 0.15rem; font-size: 0.8rem; }
 .mapControls label { color: var(--muted); display: inline-flex;
                      align-items: center; gap: 0.3rem; }
+.zoomControls { color: var(--muted); display: inline-flex; align-items: center;
+                gap: 0.3rem; }
+.zoomControls #mapZoomLevel { min-width: 2.2rem; text-align: center;
+                              font-family: ui-monospace, monospace; }
+.zoomControls .btn[disabled] { opacity: 0.4; cursor: default; }
 
 /* carrier colours and the weather kinds currently on the map */
 /* Carriers pinned left, weather pinned right — see drawLegend(). space-between

@@ -178,6 +178,7 @@ def check_wiring():
               'data-rowop="' in app and 'data-rowtail="' in app)
         check("the panels render the weather the map draws",
               "weatherCell" in app and "reliability" in app)
+        check_zoom(html, j, (WEBUI_DIR / "styles.css").read_text())
 
     # pyproject has to carry both globs or the wheel ships a map with no data
     pp = (Path(__file__).parent.parent.parent / "pyproject.toml")
@@ -186,6 +187,66 @@ def check_wiring():
         check("package-data covers webui/, data/*.json and data/*.cof",
               'webui/**/*' in txt and 'data/*.json' in txt
               and 'data/*.cof' in txt)
+
+
+# ------------------------------------------------------------------
+# 3b — zoom and pan
+#
+# The lower 48 in one frame gives the Northeast about forty pixels to fit
+# BOS/PVD/BDL/HPN/LGA/JFK/EWR into, so a busy market is unreadable without
+# zooming. What makes a zoomable map WORK rather than merely scale is the
+# split between geography and symbols, and these checks pin that split — plus
+# the two things that silently break the map as a control surface.
+# ------------------------------------------------------------------
+def check_zoom(html, j, css):
+    check("the map has a zoom group the compass sits outside of",
+          "MAP.view" in j and "mapView" in j and "zoomTransform" in j,
+          "base+live ride inside the transform; the compass is a sibling, so "
+          "it stays put while the map moves under it")
+    check("zoom is about the cursor, not the centre",
+          "zoomAbout" in j and "getScreenCTM" in j,
+          "zooming about the centre makes you chase your target across the frame")
+    check("pan is clamped so the frame is always full of map",
+          "clampPan" in j)
+
+    # GEOGRAPHY scales, SYMBOLS don't. Both halves have to hold or the map is
+    # useless zoomed in: at 8x a 0.7px state line drawn normally is a 5.6px
+    # ribbon that swallows the cities you zoomed in to read, and an airport
+    # label scaled with the map is a billboard.
+    # Read the SELECTOR LIST of the non-scaling-stroke rule, not just whether
+    # the property appears somewhere in the file: a rule that declares it for
+    # one class and misses the coastline is the failure mode.
+    rule = ""
+    if "non-scaling-stroke" in css:
+        head = css.split("non-scaling-stroke")[0]
+        rule = head[head.rfind("}") + 1:]
+    stroked = (".mapLand", ".mapState", ".mapLake", ".mapRiver", ".mapRoad",
+               ".mapRoute", ".mapWx")
+    missing = [c for c in stroked if c not in rule]
+    check("stroke widths do not scale with the zoom", not missing,
+          f"missing from the vector-effect rule: {missing}" if missing else
+          "vector-effect covers coast, states, lakes, rivers, roads, routes "
+          "and weather")
+    check("airport dots, labels and aircraft hold their screen size",
+          "1 / ZOOM.k" in j and "icon.scale / ZOOM.k" in j,
+          "point features carry a counter-scale — that IS the reason to zoom")
+
+    # Two ways a zoomable map quietly stops working, both found the hard way.
+    check("a drag is not counted as a click on what it ends over",
+          "DRAG_SLOP_PX" in j and "PAN.dragged" in j,
+          "otherwise panning clears the selection instead of moving the map")
+    check("pinch-zoom is not stolen by the browser",
+          "touch-action" in css and "pointerdown" in j and "pinchSpan" in j,
+          "without touch-action:none the gesture becomes page zoom and no "
+          "pointer events arrive")
+
+    # And the controls have to be reachable without a scroll wheel or a
+    # trackpad — plus a way back, because it is easy to get lost at 8x.
+    check("the zoom controls exist in the page",
+          all(i in html for i in ('id="btnMapZoomIn"', 'id="btnMapZoomOut"',
+                                  'id="btnMapReset"', 'id="mapZoomLevel"')))
+    check("the About dialog explains the gesture and the scaling rule",
+          'id="mapZoomNote"' in html and "pinch" in html and "symbols" in html)
 
 
 # ------------------------------------------------------------------

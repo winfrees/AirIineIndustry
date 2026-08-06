@@ -610,6 +610,22 @@ Natural Earth into `airlinesim/data/basemap.json`, `server.py` serves it at
   changes while only the live layer re-renders per snapshot. Click handling
   then comes free, which is what makes aircraft and routes selectable without
   hit-testing geometry by hand.
+- **Zoom/pan is a TRANSFORM on `MAP.view`, not a viewBox change**, because the
+  compass is chrome and has to stay put — base and live ride inside the group,
+  the compass is a sibling. The split that makes it work is GEOGRAPHY vs
+  SYMBOLS. Geography scales (a coastline, a route, a 300 km weather system)
+  but its STROKE does not — `vector-effect: non-scaling-stroke`, or at 8x a
+  0.7px state line is a 5.6px ribbon that swallows the cities you zoomed in
+  to read. Symbols do NOT scale: airport dots, their labels and aircraft
+  icons carry a counter-scale (`1 / ZOOM.k`), which is the entire reason to
+  zoom — the lower 48 in one frame gives the Northeast about forty pixels for
+  BOS/PVD/BDL/HPN/LGA/JFK/EWR. Point features are drawn by `drawLive`, so a
+  zoom has to redraw them or they stay wrong until the next tick — which is
+  every time someone studies a market while PAUSED. Two things silently break
+  it: without `DRAG_SLOP_PX` a pan lands as a click and clears the selection,
+  and without `touch-action: none` the browser claims the pinch for page zoom
+  and no pointer events arrive at all. Max zoom is 8x because that is where
+  Natural Earth's simplification runs out, not an arbitrary stop.
 - **The map is a FULL-WIDTH row and leads the page.** It is the one block
   that reads better the more width it gets. Its height is capped at 78vh — a
   map taller than the viewport buries every panel under it — but the cap is
