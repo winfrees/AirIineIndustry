@@ -1041,15 +1041,30 @@ class GameSession:
             for c in (op.cockpit, op.cabin):
                 if c is not None:
                     assigned[id(c)] = op.spec.origin_iata
-        # Departures each base owes, and the ones it failed to crew. A base
-        # with blocked ops and idle crew is the distribution failure made
-        # visible; a base with blocked ops and none is simply short-handed.
-        demand, blocked = {}, {}
+        # What each base owes and what it failed to fly. `last_crew_block` is
+        # set in TWO quite different situations and they must not be reported
+        # as one number:
+        #
+        #   GROUNDED — no legal crew could be rostered, so the route operated
+        #     NOTHING this tick. This is the cancellation.
+        #   TRIMMED  — crew were rostered and flew, but one of them hit a duty
+        #     cap partway through, so fewer rotations operated than were
+        #     scheduled. The route DID fly.
+        #
+        # Conflating them produced a panel that said "9 uncrewed departures"
+        # for a mix of routes that never left and routes that flew a reduced
+        # schedule — which reads as aircraft departing with no crew aboard,
+        # something the engine does not and cannot do.
+        routes, departures, grounded, trimmed = {}, {}, {}, {}
         for op in p.route_ops:
             o = op.spec.origin_iata
-            demand[o] = demand.get(o, 0) + 1
+            routes[o] = routes.get(o, 0) + 1
+            departures[o] = departures.get(o, 0.0) + op.daily_frequency
             if op.last_crew_block:
-                blocked[o] = blocked.get(o, 0) + 1
+                if op.last_eff_freq > 0:
+                    trimmed[o] = trimmed.get(o, 0) + 1
+                else:
+                    grounded[o] = grounded.get(o, 0) + 1
 
         # Where crew physically ARE, which is a different question from where
         # they are based and the other half of the distribution story. A
@@ -1071,7 +1086,9 @@ class GameSession:
                 "iata": iata, "headcount": 0, "units": 0, "present": present.get(iata, 0),
                 "flying": 0, "resting": 0, "capped": 0, "away": 0, "ready": 0,
                 "by_type": {}, "rest_frac": 0.0,
-                "demand": demand.get(iata, 0), "blocked": blocked.get(iata, 0),
+                "routes": routes.get(iata, 0),
+                "departures": round(departures.get(iata, 0.0), 1),
+                "grounded": grounded.get(iata, 0), "trimmed": trimmed.get(iata, 0),
                 "is_hub": iata in hubs,
             }
 
@@ -1113,7 +1130,7 @@ class GameSession:
         # case — it never appears in the pools, so it has to be added
         # explicitly or the panel silently omits the shortage it exists to
         # show. Same for a declared hub with no crew at it yet.
-        for iata in set(demand) | hubs:
+        for iata in set(routes) | hubs:
             bases.setdefault(iata, _blank(iata))
         for b in bases.values():
             b["rest_frac"] = (b["rest_frac"] / b["resting"]) if b["resting"] else 0.0

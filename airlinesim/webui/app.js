@@ -701,16 +701,23 @@ function crewBaseRow(b) {
   }).join("");
   const counts = CREW_STATES.filter(([k]) => b[k])
     .map(([k, label]) => `<span class="${k}">${b[k]} ${label}</span>`).join(" · ");
-  // A blocked departure is the failure this panel is for, and the diagnosis
-  // differs: crew sitting idle on the field means the legality gate refused
-  // them, no crew present means the station was never staffed or positioned.
+  // GROUNDED and TRIMMED are different failures and must not read as one
+  // number. Grounded is a route that operated NOTHING because no legal crew
+  // could be rostered; trimmed is a route that DID fly, with fewer rotations
+  // than scheduled because a crew hit a duty cap partway through. Nothing
+  // ever departs without crew — saying "uncrewed departures" for the mix
+  // implied it did.
   let flag = "";
-  if (b.blocked) {
+  if (b.grounded) {
     flag = b.present
-      ? `<span class="bad" title="crew are on this field but none could be legally rostered — check rest and duty">
-           ${b.blocked}/${b.demand} departures uncrewed, ${b.present} on the field</span>`
-      : `<span class="bad" title="nobody is at this airport to fly them">
-           ${b.blocked}/${b.demand} departures uncrewed, nobody here</span>`;
+      ? `<span class="bad" title="crew are on this field but none could be legally rostered — check rest and duty hours">
+           ${plural(b.grounded, "route")} grounded, ${b.present} crew on the field</span>`
+      : `<span class="bad" title="no crew is at this airport to fly them, so nothing operated">
+           ${plural(b.grounded, "route")} grounded, no crew here</span>`;
+  }
+  if (b.trimmed) {
+    flag += `<span class="warn" title="these routes flew, but a crew hit a duty cap partway through so fewer rotations operated than were scheduled">
+      ${plural(b.trimmed, "route")} short-crewed</span>`;
   }
   const rest = b.resting
     ? `<span class="metric" title="mean progress through the mandatory rest">
@@ -728,7 +735,9 @@ function crewBaseRow(b) {
       <span class="iata">${esc(b.iata)}</span>
       ${b.is_hub ? '<span class="tag">hub</span>' : ""}
       <span class="metric">${hc} ${unbased ? "crew" : "based"}</span>${here}
-      ${b.demand ? `<span class="metric">· ${b.demand} dep/day</span>` : ""}
+      ${b.routes ? `<span class="metric"
+        title="${plural(b.routes, "route")} departs this airport, ${b.departures} times a day between them"
+        >· ${b.departures}/day</span>` : ""}
       ${rest}${flag}
     </div>
     <div class="crewBar" title="${hc} crew based at ${esc(b.iata)}
@@ -744,10 +753,12 @@ ${crewTypeLines(b)}">${seg}</div>
 function crewStationsHtml(stations) {
   if (!stations.length) return "";
   const bits = stations.map((b) => {
-    const cls = b.blocked ? "bad" : "metric";
-    const mark = b.blocked ? `${b.blocked} uncrewed` : `${b.present} here`;
+    const cls = b.grounded ? "bad" : b.trimmed ? "warn" : "metric";
+    const mark = b.grounded ? `${b.grounded} grounded`
+      : b.trimmed ? `${b.trimmed} short-crewed`
+      : `${b.present} here`;
     return `<span class="${cls}"
-      title="${esc(b.iata)}: ${plural(b.demand, "departure")} a day, no crew based here — ${mark}"
+      title="${esc(b.iata)}: ${plural(b.routes, "route")} out, ${b.departures} departures a day, no crew based here — ${mark}"
       >${esc(b.iata)} <span class="metric">${mark}</span></span>`;
   }).join(" · ");
   return `<div class="crewStations metric" title="stations flown from with no crew based there">
@@ -766,18 +777,26 @@ function crewHtml(snap) {
     const stations = all.filter((b) => !b.headcount);
     // Uncrewed departures first, then by headcount, so the row you need to
     // act on is never below the fold.
-    bases.sort((a, b) => (b.blocked - a.blocked) || (b.headcount - a.headcount));
-    stations.sort((a, b) => (b.blocked - a.blocked) || (b.demand - a.demand));
+    bases.sort((a, b) => (b.grounded - a.grounded) || (b.headcount - a.headcount));
+    stations.sort((a, b) => (b.grounded - a.grounded) || (b.routes - a.routes));
     const tot = bases.reduce((s, b) => s + b.headcount, 0);
     const idle = bases.reduce((s, b) => s + b.ready + b.away, 0);
     const away = bases.reduce((s, b) => s + b.away, 0);
-    const blocked = all.reduce((s, b) => s + b.blocked, 0);
+    const grounded = all.reduce((s, b) => s + b.grounded, 0);
+    const trimmed = all.reduce((s, b) => s + b.trimmed, 0);
+    // "grounded" means the route operated NOTHING for want of a legal crew.
+    // Nothing ever departs uncrewed, and this line must not imply it does.
+    const fail = [
+      grounded ? `<span class="bad" title="no legal crew could be rostered, so these routes flew nothing">
+        ${plural(grounded, "route")} grounded, no crew</span>` : "",
+      trimmed ? `<span class="warn" title="these routes flew, but a crew hit a duty cap so fewer rotations operated than scheduled">
+        ${plural(trimmed, "route")} short-crewed</span>` : "",
+    ].filter(Boolean).join(" · ");
     return `<div class="playerBlock">
       <div class="playerHead">
         <span class="name">${esc(p.name)}</span>
         <span class="metric">${tot} crew across ${plural(bases.length, "base")}
-          · ${idle} idle${away ? `, ${away} out of position` : ""}${blocked
-            ? ` · <span class="bad">${plural(blocked, "uncrewed departure")}</span>` : ""}</span>
+          · ${idle} idle${away ? `, ${away} out of position` : ""}${fail ? ` · ${fail}` : ""}</span>
       </div>
       <div class="crewGrid">${bases.map(crewBaseRow).join("")}</div>
       ${crewStationsHtml(stations)}
