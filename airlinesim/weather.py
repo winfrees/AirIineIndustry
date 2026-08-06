@@ -101,6 +101,8 @@ class WeatherKind(Enum):
     SNOW = auto()               # accumulating: de-icing, runway clearing
     ICING = auto()              # freezing rain: the worst per hour, closes fields
     BLIZZARD = auto()           # snow + wind: closes fields for many hours
+    NOREASTER = auto()          # coastal low up the Eastern Seaboard: snow + wind
+    LAKE_EFFECT = auto()        # narrow band downwind of a Great Lake
     HURRICANE = auto()          # multi-day closure, days of advance cancels
     WILDFIRE_SMOKE = auto()     # visibility, mostly western, summer/autumn
     VOLCANIC_ASH = auto()       # rare, absolute: engines cannot ingest ash
@@ -120,6 +122,14 @@ VOLCANOES = (
 # (distance to the nearest large water body). A real coastline would be a
 # shapefile and a GIS dependency; this is a dozen points and gets the
 # maritime/continental contrast right, which is all the seasonal curve needs.
+# The UPWIND coast. Continentality is measured to these, not to the nearest
+# water — see climate_for(). Alaska's Pacific shore counts; Hawaii does not,
+# being downwind of nothing that reaches the mainland.
+_PACIFIC = (
+    (47.6, -122.3), (44.6, -124.1), (37.8, -122.5), (32.7, -117.2),
+    (61.2, -149.9), (58.3, -134.4),
+)
+
 _OCEAN_COAST = (
     (47.6, -122.3), (44.6, -124.1), (37.8, -122.5), (32.7, -117.2),   # Pacific
     (29.3, -94.8), (30.4, -88.9), (27.8, -82.6), (25.8, -80.2),        # Gulf
@@ -141,6 +151,54 @@ _GULF = (
 _LAKE_COAST = (
     (41.9, -87.6), (43.0, -83.0), (43.6, -79.4), (46.5, -84.3), (43.5, -76.5),
 )
+
+# The Great Lakes as SEGMENTS — long axis endpoints plus a half-width — rather
+# than as points. This is a second representation of the same water the shore
+# anchors above describe, and it exists because the two answer different
+# questions: the shore anchors say how far an airport is from moderating
+# water, this says where a lake-effect band is BORN and who is downwind of it.
+#
+# The geometry has to be a segment because these lakes are long and thin.
+# Erie is 400 km on its long axis and 90 km across, and Buffalo sits on its
+# ENE tip: as a circle centred mid-lake, Buffalo came out 97 km "inland" and
+# scored 0.24 on a scale where it should be the highest in the country. The
+# same collapse gave Marquette and Traverse City — two of the snowiest fields
+# in the US — exactly ZERO, because the nearest anchor was east of them and
+# the downwind test reads east as downwind.
+#   (name, lat1, lon1, lat2, lon2, half_width_km)
+_LAKES = (
+    ("Superior", 46.7, -92.1, 46.6, -84.6, 90.0),
+    ("Michigan", 45.8, -86.9, 41.8, -87.3, 60.0),
+    ("Huron",    46.0, -83.6, 43.1, -82.4, 80.0),
+    ("Erie",     41.7, -83.4, 42.9, -78.9, 45.0),
+    ("Ontario",  43.3, -79.3, 44.1, -76.4, 40.0),
+)
+
+# The prevailing lake-effect flow, and how wide a sector counts as downwind.
+# Bands run with the low-level wind, which in a post-frontal cold outbreak is
+# somewhere between WNW and WSW — so the snow lands anywhere from ENE round to
+# SSE of the water. A narrow ESE-only sector missed the Tug Hill plateau
+# east of Ontario, which is the single snowiest lake-effect belt there is.
+_LAKE_DOWNWIND_DEG = 110.0
+_LAKE_INLAND_KM = 120.0     # e-folding distance for a band's reach inland
+
+
+def _seg_point_km(lat, lon, lat1, lon1, lat2, lon2):
+    """
+    Distance in km from a point to a line SEGMENT, plus the closest point on
+    it. Works in a local equirectangular frame scaled at the segment's mean
+    latitude — good to a fraction of a percent over a few hundred km, which is
+    well inside the accuracy of everything else here.
+    """
+    coslat = math.cos(math.radians(0.5 * (lat1 + lat2)))
+    ax, ay = lon1 * coslat, lat1
+    bx, by = lon2 * coslat, lat2
+    px, py = lon * coslat, lat
+    dx, dy = bx - ax, by - ay
+    den = dx * dx + dy * dy
+    t = 0.0 if den <= 0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / den))
+    cx, cy = ax + t * dx, ay + t * dy
+    return haversine(lat, lon, cy, cx / coslat), cy, cx / coslat
 
 
 def _dist_to_ocean_km(lat: float, lon: float) -> float:
@@ -171,6 +229,12 @@ class Climate:
     hurricane_exposure: float
     wildfire_exposure: float
     ash_exposure: float
+    # Atlantic seaboard, north of the Carolinas — where a coastal low bites.
+    noreaster_exposure: float = 0.0
+    # Downwind (east/south-east) of a Great Lake, close enough for a band to
+    # reach. Distinct from winter_severity: this is a NARROW, local, very
+    # heavy phenomenon, and it is why Buffalo is not Boston.
+    lake_effect_exposure: float = 0.0
 
     # -- seasonal temperature -------------------------------------------
     def mean_temp_c(self, day_of_year: float) -> float:
@@ -184,7 +248,15 @@ class Climate:
         made every high-latitude summer tropical and every winter Siberian.
         Real continental interiors top out around a 20 C seasonal amplitude.
         """
-        base = 26.0 - 0.62 * (self.lat - 20.0)
+        # The latitude lapse is GENTLER where the ocean is upwind. Measuring
+        # continentality to the Pacific fixed the eastern winters but left
+        # Seattle 4 C too cold in January, because the amplitude term alone
+        # cannot lift a winter — it only narrows the swing about a mean the
+        # latitude line had already put too low. Onshore flow raises the mean
+        # as well as damping the swing, which is why the Pacific Northwest is
+        # mild rather than merely even.
+        lapse = 0.62 - 0.18 * (1.0 - self.continentality)
+        base = 26.0 - lapse * (self.lat - 20.0)
         amp = min(19.0, 3.0 + 0.39 * max(0.0, self.lat - 20.0)) \
             * (0.62 + 0.55 * self.continentality)
         return base + amp * math.cos(2 * math.pi * (day_of_year - 200.0) / 365.0)
@@ -214,7 +286,22 @@ def climate_for(iata: str, lat: float, lon: float) -> Climate:
     # does — it partly freezes, and it is small. Measuring against any water
     # made Chicago (27 km from Lake Michigan) as maritime as Boston, which
     # flattened its seasonal swing and left it too warm to snow in January.
-    continentality = max(0.0, min(1.0, 1.0 - math.exp(-ocean / 420.0)))
+    # ...and against the UPWIND ocean, which over North America is the
+    # PACIFIC. Prevailing flow is westerly, so an ocean to the west moderates
+    # a winter and an ocean to the east barely does. Boston and Seattle are
+    # both coastal at similar latitude: Seattle's February mean is about +5 C,
+    # Boston's about -1.5 C, and the whole difference is which side the water
+    # is on.
+    #
+    # Measuring to the NEAREST ocean gave Boston Seattle's answer — +5.1 C in
+    # February — which set `freezing()` to zero and gated every cold-weather
+    # kind off the entire Northeast coast. Nor'easters spawned, tracked over
+    # Boston and did nothing, and the same silence applied to snow, ice and
+    # blizzards there. Distance to the Pacific is what the seasonal swing
+    # actually keys on; the Atlantic and the Gulf still supply moisture and
+    # fog through `coast_km`, which is measured to any water.
+    pacific = min(haversine(lat, lon, cl, cn) for cl, cn in _PACIFIC)
+    continentality = max(0.0, min(1.0, 1.0 - math.exp(-pacific / 900.0)))
 
     # Convection needs warmth AND moisture. Latitude supplies the warmth; the
     # Gulf of Mexico supplies almost all of the moisture that feeds US
@@ -255,6 +342,42 @@ def climate_for(iata: str, lat: float, lon: float) -> Climate:
     # Wildfire smoke: the interior and mountain West.
     wildfire = max(0.0, min(1.0, (-(lon) - 103.0) / 18.0)) * max(0.0, min(1.0, (lat - 31.0) / 12.0))
 
+    # NOR'EASTER: an Atlantic coastal low, so exposure needs BOTH the Atlantic
+    # (not the Gulf, not the Pacific) and the latitude band it actually hits.
+    # Longitude east of -82 excludes the Gulf coast; the latitude ramp starts
+    # at the Carolinas and saturates over New England, which is the real
+    # gradient — Boston takes several a winter, Norfolk one, Jacksonville none.
+    if lon > -82.0:
+        noreaster = (math.exp(-ocean / 300.0)
+                     * max(0.0, min(1.0, (lat - 34.0) / 8.0)))
+    else:
+        noreaster = 0.0
+
+    # LAKE EFFECT: cold air crossing warm water, so the band falls DOWNWIND —
+    # east and south-east of the lake, under the prevailing westerlies. That
+    # directionality is the whole phenomenon: Milwaukee sits upwind of Lake
+    # Michigan and gets little, Grand Rapids sits downwind of the same lake
+    # and gets buried. Measured to the nearest point on each lake's long axis
+    # and scored on distance BEYOND the shore, so a field on the water is at
+    # full exposure however long the lake is. Best lake wins: an airport
+    # downwind of any of them qualifies.
+    lake = 0.0
+    for _, la1, lo1, la2, lo2, half_w in _LAKES:
+        d, cy, cx = _seg_point_km(lat, lon, la1, lo1, la2, lo2)
+        inland = max(0.0, d - half_w)
+        if inland > 3.0 * _LAKE_INLAND_KM:
+            continue
+        # Bearing from the water to the airport, against the prevailing band
+        # axis. Cosine to the half power keeps the whole ENE-to-SSE arc in
+        # play rather than only the exact downwind line.
+        brg = math.degrees(math.atan2(
+            (lon - cx) * math.cos(math.radians(lat)), lat - cy)) % 360.0
+        align = math.cos(math.radians(brg - _LAKE_DOWNWIND_DEG))
+        if align <= 0.0:
+            continue
+        lake = max(lake, math.exp(-inland / _LAKE_INLAND_KM) * math.sqrt(align))
+    lake = max(0.0, min(1.0, lake))
+
     # Ash: proximity to a real volcano, and only near one.
     nearest_v = min(haversine(lat, lon, vlat, vlon) for _, vlat, vlon in VOLCANOES)
     ash = max(0.0, min(1.0, math.exp(-nearest_v / 700.0)))
@@ -263,7 +386,9 @@ def climate_for(iata: str, lat: float, lon: float) -> Climate:
                    continentality=continentality, convective=convective,
                    winter_severity=winter, icing_belt=max(0.0, min(1.0, icing)),
                    fog_prone=fog, hurricane_exposure=hurricane,
-                   wildfire_exposure=wildfire, ash_exposure=ash)
+                   wildfire_exposure=wildfire, ash_exposure=ash,
+                   noreaster_exposure=max(0.0, min(1.0, noreaster)),
+                   lake_effect_exposure=lake)
 
 
 # ============================================================
@@ -309,6 +434,26 @@ KIND_PROFILE = {
     WeatherKind.SNOW:           KindProfile(380, 50, 16, 85, 0.55, 1.10),
     WeatherKind.ICING:          KindProfile(220, 40, 12, 85, 0.30, 2.10, True),
     WeatherKind.BLIZZARD:       KindProfile(420, 45, 22, 85, 0.12, 3.20, True),
+    # A NOR'EASTER is a coastal low that deepens off Hatteras and runs up the
+    # seaboard, so it tracks NNE along the coast rather than west-to-east like
+    # everything else, and it is big, slow and long-lived: a single storm can
+    # shut Boston and New York on the same day and still be snowing on Maine
+    # the next. Bearing 30 with a slight clockwise curve keeps it following
+    # the coastline instead of driving inland.
+    # Bearing 20 rather than a textbook north-east one: a nor'easter tracks
+    # roughly PARALLEL to the coast, passing just offshore, which is what puts
+    # the heavy snow on its western side over the cities. At 30 the track ran
+    # out to sea and the storms landed on interior New England while missing
+    # Boston, New York and Philadelphia entirely — the airports the storm is
+    # operationally about.
+    WeatherKind.NOREASTER:      KindProfile(480, 40, 34, 20, 0.15, 3.00, True,
+                                            curve_deg_per_h=0.35),
+    # LAKE EFFECT is the opposite shape: a NARROW band, nearly stationary,
+    # that sits over the same few counties for a day or more. Small radius and
+    # a low speed are the whole character — it does not sweep a region, it
+    # parks on one. It throttles hard rather than closing: Buffalo is very
+    # good at operating in snow it gets every winter.
+    WeatherKind.LAKE_EFFECT:    KindProfile(110, 14, 30, 100, 0.35, 1.60, False),
     # HURRICANES RECURVE, and modelling that as one constant bearing meant
     # none of them ever reached the United States. At bearing 45 (north-east)
     # every storm left its genesis point heading away from the continent: born
@@ -465,6 +610,10 @@ BASINS = (
     ("south", 27.0, 38.0, -95.0, -80.0),
     ("northeast", 38.0, 47.0, -82.0, -68.0),
     ("tropics", 12.0, 24.0, -82.0, -50.0),        # hurricane genesis
+    # Nor'easter genesis: the Hatteras coastal-low breeding ground. Overlaps
+    # the "south"/"northeast" boxes on purpose — it is a separate GENESIS
+    # region, not a separate piece of land, and only NOREASTER spawns in it.
+    ("atlantic", 32.0, 38.0, -79.0, -73.0),
 )
 
 # Base spawn probability per basin per 6-hour slot, before climate and season
@@ -484,6 +633,12 @@ BASE_SPAWN = {
     WeatherKind.SNOW: 0.22,
     WeatherKind.ICING: 0.08,
     WeatherKind.BLIZZARD: 0.035,
+    # Roughly a dozen coastal storms a winter reach the seaboard, of which a
+    # handful matter operationally.
+    WeatherKind.NOREASTER: 0.045,
+    # Lake-effect bands are FREQUENT and small: Buffalo and Cleveland see them
+    # on many winter days. High rate, tiny footprint.
+    WeatherKind.LAKE_EFFECT: 0.55,
     WeatherKind.HURRICANE: 0.020,
     WeatherKind.WILDFIRE_SMOKE: 0.05,
     # An eruption that reaches airline cruise levels over North America is a
@@ -638,10 +793,23 @@ class WeatherModel:
         prof = KIND_PROFILE[kind]
         r = self.rng
         self._seq += 1
+        lat0, lon0 = r.uniform(la_lo, la_hi), r.uniform(lo_lo, lo_hi)
+        if kind is WeatherKind.LAKE_EFFECT:
+            # Born over open water, not anywhere in the basin. The basin still
+            # decides WHICH lakes are in play — the Midwest box covers
+            # Superior/Michigan/Huron, the Northeast box Erie/Ontario — so the
+            # per-basin spawn rate keeps its meaning.
+            lakes = [k for k in _LAKES
+                     if lo_lo <= 0.5 * (k[2] + k[4]) <= lo_hi]
+            if lakes:
+                _, la1, lo1, la2, lo2, _ = r.choice(lakes)
+                t = r.random()          # anywhere along the lake's long axis
+                lat0 = la1 + t * (la2 - la1)
+                lon0 = lo1 + t * (lo2 - lo1)
         return WeatherSystem(
             system_id=f"{kind.name[:3]}{self._seq}{basin[:2]}", kind=kind,
             born_at=born_at, life_h=prof.life_h * r.uniform(0.6, 1.5),
-            lat0=r.uniform(la_lo, la_hi), lon0=r.uniform(lo_lo, lo_hi),
+            lat0=lat0, lon0=lon0,
             bearing_deg=prof.bearing_deg + r.uniform(-25, 25),
             speed_kmh=prof.speed_kmh * r.uniform(0.7, 1.35),
             radius_km=prof.radius_km * r.uniform(0.65, 1.4),
@@ -709,11 +877,19 @@ class WeatherModel:
                 return 0.0
             # Atlantic season runs Jun 1 - Nov 30, peaking ~10 September.
             return _season(day_of_year, 253.0, 1.0) ** 2.5
+        if kind is WeatherKind.NOREASTER:
+            # Genesis is off the Carolina/Virginia coast, and only there.
+            # Season peaks in early February and is over by April.
+            if basin != "atlantic":
+                return 0.0
+            return _season(day_of_year, 35.0, 1.0) ** 1.8
         if kind is WeatherKind.VOLCANIC_ASH:
             # Eruptions are aseasonal, and only where there are volcanoes.
             return 1.0 if lo_lo <= -110.0 else 0.0
-        if basin == "tropics":
-            return 0.0                     # nothing else is born down there
+        if basin in ("tropics", "atlantic"):
+            # Genesis-only boxes: the tropics make hurricanes, the Hatteras
+            # box makes nor'easters, and neither makes anything else.
+            return 0.0
         if kind is WeatherKind.THUNDERSTORM:
             return _season(day_of_year, 200.0, 0.85) * max(0.25, 1.4 - abs(mid_lat - 35.0) / 16.0)
         if kind is WeatherKind.RAIN:
@@ -724,6 +900,14 @@ class WeatherModel:
             return _season(day_of_year, 18.0, 1.0) ** 1.5 * max(0.0, (mid_lat - 32.0) / 14.0)
         if kind is WeatherKind.ICING:
             return _season(day_of_year, 25.0, 1.0) ** 1.5 * max(0.0, 1.0 - abs(mid_lat - 39.0) / 9.0)
+        if kind is WeatherKind.LAKE_EFFECT:
+            # Needs cold air over OPEN water, which is a narrower window than
+            # winter: the lakes are still warm in late autumn (peak season)
+            # and increasingly ice-covered by late winter. Peaks around
+            # mid-December, and only in the basins that contain the lakes.
+            if basin not in ("midwest", "northeast"):
+                return 0.0
+            return _season(day_of_year, 349.0, 1.0) ** 2.0
         if kind is WeatherKind.BLIZZARD:
             return _season(day_of_year, 15.0, 1.0) ** 2.0 * max(0.0, (mid_lat - 37.0) / 11.0)
         if kind is WeatherKind.WILDFIRE_SMOKE:
@@ -856,6 +1040,14 @@ class WeatherModel:
             return climate.winter_severity
         if kind is WeatherKind.ICING:
             return climate.icing_belt
+        if kind is WeatherKind.NOREASTER:
+            # No freezing term here, for the same reason SNOW has none: a
+            # staged nor'easter in July is a legitimate what-if at a field
+            # that gets them, and the exposure alone already refuses Chicago
+            # and Miami on geography.
+            return climate.noreaster_exposure
+        if kind is WeatherKind.LAKE_EFFECT:
+            return climate.lake_effect_exposure
         if kind is WeatherKind.HURRICANE:
             return climate.hurricane_exposure
         if kind is WeatherKind.WILDFIRE_SMOKE:
@@ -885,6 +1077,12 @@ class WeatherModel:
             return climate.fog_prone
         if kind in (WeatherKind.SNOW, WeatherKind.BLIZZARD):
             return climate.winter_severity * climate.freezing(day_of_year)
+        if kind is WeatherKind.NOREASTER:
+            # Coastal AND cold: the same storm that buries Boston in February
+            # falls as rain on Norfolk in November.
+            return climate.noreaster_exposure * climate.freezing(day_of_year)
+        if kind is WeatherKind.LAKE_EFFECT:
+            return climate.lake_effect_exposure * climate.freezing(day_of_year)
         if kind is WeatherKind.ICING:
             # Freezing rain needs the temperature to be near freezing, not
             # merely cold — deep cold gives dry snow instead.

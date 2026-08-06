@@ -266,6 +266,7 @@ function planeIcon(spec) {
 const WX_COLOR = {
   RAIN: "#4a90d9", FOG: "#9bb0c4", THUNDERSTORM: "#8a5cf6", SNOW: "#cfe8ff",
   ICING: "#7fd8e8", BLIZZARD: "#e6f2ff", HURRICANE: "#ff4d6d",
+  NOREASTER: "#6f8cff", LAKE_EFFECT: "#a8e6ff",
   WILDFIRE_SMOKE: "#d98032", VOLCANIC_ASH: "#8d8d8d",
 };
 

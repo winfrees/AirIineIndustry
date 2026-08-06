@@ -338,12 +338,37 @@ touching `weather.py`, `disruption.py`, or anything that scales with `dt`.
   day and the *next* rotation is the one that cancels. The delay is cheap; the
   crew it strands is not.
 - **Climate is derived from MEASURED lat/lon; everything else is HEURISTIC.**
-  No weather record is committed to this repo. Five calibration errors were
-  fixed and are documented in the design doc — the two worth remembering are
-  that continentality and hurricane exposure must be measured to the OCEAN
-  (measuring to any water made Chicago maritime and gave it hurricanes), and
-  that convection needs a Gulf-moisture term or Los Angeles storms like
-  Atlanta.
+  No weather record is committed to this repo. Nine calibration errors were
+  fixed and are documented in the design doc — the three worth remembering:
+  hurricane exposure must be measured to the OCEAN (any water gave Chicago
+  hurricanes); convection needs a Gulf-moisture term or Los Angeles storms
+  like Atlanta; and **continentality is measured to the UPWIND (Pacific)
+  coast, not the nearest one.** Prevailing flow is westerly, so it is the
+  ocean to the WEST that moderates a place. Measuring to the nearest ocean put
+  Boston's February at +5.1 °C against a real −1.5 °C, and since every cold
+  kind is multiplied by `freezing()`, that silently gated snow, ice, blizzards
+  and nor'easters off the whole Eastern Seaboard. Current error over ten
+  stations is 2.9 °C in February and 2.5 °C in July. `mean_temp_c` carries a
+  maritime lapse correction alongside it — without that, fixing the East made
+  Seattle 4 °C too cold.
+- **The three REGIONAL kinds each need their own genesis geography**, and each
+  is asserted on BOTH halves: the belt gets it, the rest of the country never
+  does. Hurricanes spawn in the tropics box and recurve; nor'easters spawn
+  ONLY in the Hatteras box (`atlantic`, 32–38 °N) — its `_seasonal_gate`
+  branch has to sit ABOVE the `basin in ("tropics", "atlantic")` early
+  return, or the kind is unreachable and spawns nothing; lake-effect bands are
+  born ON a lake, at a random point along its long axis, because spawning them
+  uniformly across the Midwest basin put a 110 km band on the snow belt about
+  once a year.
+- **The Great Lakes are SEGMENTS, not points, and the downwind test is the
+  phenomenon.** Five shore anchors for 4,000 km of shoreline put Buffalo — on
+  Lake Erie's ENE tip — 97 km "inland", and gave Marquette and Traverse City
+  zero. `_LAKES` carries each lake's long axis and half-width; exposure is
+  scored on distance BEYOND the shore, in a broad ESE sector. Milwaukee sits
+  upwind of the lake that buries Grand Rapids and scores 0.04 to its 0.52.
+  Note `_LAKE_COAST` (shore anchors, for how maritime a nearby airport is) and
+  `_LAKES` (surface, for genesis and downwind) are two representations of the
+  same water answering two different questions — don't collapse them.
 - **Rebooking is same-tick, same-market only** — about 7% of stranded
   passengers on a corpus world, the rest refunded. That OVERSTATES the cost;
   a real recovery model carries passengers forward over days and searches

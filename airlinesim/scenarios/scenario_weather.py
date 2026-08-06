@@ -277,6 +277,139 @@ def check_geography():
 
 
 # ------------------------------------------------------------------
+# 3b — the two REGIONAL kinds: nor'easters and lake effect
+#
+# These are the only kinds whose whole point is that they hit a NAMED
+# handful of airports and nowhere else, so a check that they merely occur
+# proves nothing. Both halves are asserted: the belt gets them, and the
+# places that must never see them don't.
+# ------------------------------------------------------------------
+_NE_SPOTS = {
+    # the Seaboard
+    "BOS": (42.36, -71.01), "EWR": (40.69, -74.17), "LGA": (40.78, -73.87),
+    "PWM": (43.65, -70.31), "PHL": (39.87, -75.24), "ORF": (36.89, -76.20),
+    # the snow belt
+    "BUF": (42.94, -78.73), "ROC": (43.12, -77.67), "SYR": (43.11, -76.10),
+    "ERI": (42.08, -80.18), "MQT": (46.35, -87.40), "GRR": (42.88, -85.52),
+    # controls: upwind of a lake, inland, and far away
+    "MKE": (42.95, -87.90), "ORD": (41.98, -87.90), "MSP": (44.88, -93.22),
+    "MIA": (25.79, -80.29), "SEA": (47.45, -122.31), "DEN": (39.86, -104.67),
+}
+
+
+def check_regional_kinds():
+    print("\n=== NOR'EASTERS AND LAKE EFFECT ===")
+    cl = {k: climate_for(k, *v) for k, v in _NE_SPOTS.items()}
+
+    # The climate gate comes first. Every cold kind is multiplied by
+    # `freezing()`, so a coast the model thinks is mild is a coast no winter
+    # storm can reach — this was a real bug: continentality measured to the
+    # NEAREST ocean gave Boston Seattle's February and silently gated snow,
+    # ice, blizzards AND nor'easters off the entire Northeast.
+    print(f"  {'ap':5s} {'Feb C':>6s} {'Jul C':>6s} {'frz':>5s} "
+          f"{'noreast':>8s} {'lake':>5s}")
+    for k, c in cl.items():
+        print(f"  {k:5s} {c.mean_temp_c(46):6.1f} {c.mean_temp_c(200):6.1f} "
+              f"{c.freezing(46):5.2f} {c.noreaster_exposure:8.2f} "
+              f"{c.lake_effect_exposure:5.2f}")
+
+    check("the Northeast coast actually freezes in winter",
+          cl["BOS"].freezing(46) > 0.25 and cl["PWM"].freezing(46) > 0.25,
+          f"BOS {cl['BOS'].freezing(46):.2f}, PWM {cl['PWM'].freezing(46):.2f}")
+    check("nor'easter exposure rises up the Seaboard and stops at the coast",
+          cl["BOS"].noreaster_exposure > cl["PHL"].noreaster_exposure
+          > cl["ORF"].noreaster_exposure > cl["ORD"].noreaster_exposure,
+          f"BOS {cl['BOS'].noreaster_exposure:.2f} > PHL "
+          f"{cl['PHL'].noreaster_exposure:.2f} > ORF "
+          f"{cl['ORF'].noreaster_exposure:.2f} > ORD "
+          f"{cl['ORD'].noreaster_exposure:.2f}")
+    check("nowhere west of the Appalachians has nor'easter exposure",
+          max(cl[k].noreaster_exposure for k in ("ORD", "MSP", "DEN", "SEA")) == 0.0)
+    check("lake-effect exposure is highest at the Erie/Ontario snow belt",
+          min(cl[k].lake_effect_exposure for k in ("BUF", "ROC", "ERI")) > 0.5,
+          f"BUF {cl['BUF'].lake_effect_exposure:.2f}, "
+          f"ROC {cl['ROC'].lake_effect_exposure:.2f}, "
+          f"ERI {cl['ERI'].lake_effect_exposure:.2f}")
+    # The directionality IS the phenomenon. Milwaukee and Chicago sit on the
+    # UPWIND shore of the same lake that buries Grand Rapids; a model that
+    # scored them on distance alone would rank them together.
+    check("a field upwind of a lake is not in the snow belt",
+          cl["MKE"].lake_effect_exposure < 0.1
+          and cl["ORD"].lake_effect_exposure < 0.1
+          and cl["GRR"].lake_effect_exposure > 0.4,
+          f"MKE {cl['MKE'].lake_effect_exposure:.2f} and ORD "
+          f"{cl['ORD'].lake_effect_exposure:.2f} upwind, GRR "
+          f"{cl['GRR'].lake_effect_exposure:.2f} downwind of Lake Michigan")
+    check("airports with no Great Lake near them get no lake effect",
+          max(cl[k].lake_effect_exposure for k in ("MSP", "BOS", "MIA", "DEN")) == 0.0)
+
+    # Now DELIVERY. Exposure is only half of it — a kind also has to spawn
+    # somewhere it can reach the belt from. Nor'easters need the Hatteras
+    # genesis box; lake-effect bands have to be born over open water, and
+    # spawning them uniformly across the Midwest basin put one on the snow
+    # belt about once a year, some forty times rarer than the real thing.
+    years = 6
+    m = WeatherModel(seed=1877)
+    for k, (la, lo) in _NE_SPOTS.items():
+        m.add_airport(k, la, lo)
+    days = {k: collections.Counter() for k in _NE_SPOTS}
+    step = 6.0
+    for h in range(0, int(24 * 365 * years), int(step)):
+        m.advance(float(h), step)
+        for k in _NE_SPOTS:
+            w = m.over(k, float(h), step, samples=1)
+            if w.intensity > 0.15:
+                days[k][w.kind.name] += step / 24.0
+
+    def per_year(k, kind):
+        return days[k][kind] / years
+
+    print(f"  {'ap':5s} {'noreast d/yr':>13s} {'lake d/yr':>10s}   ({years} sim-years)")
+    for k in _NE_SPOTS:
+        n, l = per_year(k, "NOREASTER"), per_year(k, "LAKE_EFFECT")
+        if n or l:
+            print(f"  {k:5s} {n:13.1f} {l:10.1f}")
+
+    check("nor'easters reach the major Seaboard airports",
+          min(per_year(k, "NOREASTER") for k in ("BOS", "EWR", "LGA")) > 0.5,
+          "  ".join(f"{k} {per_year(k, 'NOREASTER'):.1f}/yr"
+                    for k in ("BOS", "EWR", "LGA", "PWM")))
+    check("nor'easters never reach the interior or the West",
+          max(per_year(k, "NOREASTER")
+              for k in ("ORD", "MSP", "DEN", "SEA", "MIA")) == 0.0)
+    check("lake-effect bands actually land on the snow belt",
+          min(per_year(k, "LAKE_EFFECT") for k in ("BUF", "ROC")) > 2.0,
+          "  ".join(f"{k} {per_year(k, 'LAKE_EFFECT'):.1f}/yr"
+                    for k in ("BUF", "ROC", "SYR", "ERI", "MQT")))
+    check("lake-effect bands never land away from the lakes",
+          max(per_year(k, "LAKE_EFFECT")
+              for k in ("BOS", "MSP", "DEN", "SEA", "MIA", "PHL")) == 0.0)
+    # Seasonality. The gate is a single harmonic, so midsummer is a small
+    # number rather than exactly zero — the assertion is that it is a
+    # negligible FRACTION of the seasonal peak, which is what a cosine can
+    # actually promise. Lake effect peaks in December, earlier than the deep
+    # winter kinds: it needs cold air over water that has not yet frozen.
+    seasons = {}
+    for kind, basin, peak in ((WeatherKind.NOREASTER, "atlantic", 35.0),
+                              (WeatherKind.LAKE_EFFECT, "northeast", 349.0)):
+        hi = m._seasonal_gate(kind, basin, peak, 38.0, 47.0, -82.0)
+        lo = m._seasonal_gate(kind, basin, (peak + 182.5) % 365.0,
+                              38.0, 47.0, -82.0)
+        seasons[kind.name] = (hi, lo)
+    check("both kinds are winter phenomena",
+          all(hi > 0.5 and lo < 0.02 * hi for hi, lo in seasons.values()),
+          "  ".join(f"{n} peak {hi:.2f} vs opposite season {lo:.4f}"
+                    for n, (hi, lo) in seasons.items()))
+    check("neither kind spawns outside its own genesis region",
+          m._seasonal_gate(WeatherKind.NOREASTER, "northeast", 35.0,
+                           38.0, 47.0, -82.0) == 0.0
+          and m._seasonal_gate(WeatherKind.LAKE_EFFECT, "splains", 349.0,
+                               29.0, 41.0, -108.0) == 0.0,
+          "nor'easters only from the Hatteras box, lake effect only from the "
+          "two basins that contain lakes")
+
+
+# ------------------------------------------------------------------
 # 4 + 5 — operational impact
 # ------------------------------------------------------------------
 def check_impact():
@@ -356,6 +489,7 @@ def main():
     check_clock()
     check_probabilistic()
     check_geography()
+    check_regional_kinds()
     check_impact()
     passed = sum(1 for _, ok in CHECKS if ok)
     print("\n" + "=" * 70)

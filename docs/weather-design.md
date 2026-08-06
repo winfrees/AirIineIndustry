@@ -114,15 +114,15 @@ susceptibility gate.
 
 ### Calibration, and what it cost to get right
 
-Five things were measurably wrong in the first cut and are worth recording so
+Nine things were measurably wrong in successive cuts and are worth recording so
 they are not reintroduced:
 
 1. **Seasonal amplitude grew without bound with latitude** — Anchorage came
    out at −22 °C in January and +29 °C in July. Capped at 19 °C.
 2. **Continentality was measured to any water, including the Great Lakes** —
    Chicago (27 km from Lake Michigan) was as maritime as Boston, which
-   flattened its winter and left it too warm to snow. Continentality is now
-   measured to the **ocean**; lakes still drive fog and lake-effect snow.
+   flattened its winter and left it too warm to snow. Lakes were split out;
+   they still drive fog and lake-effect snow. See (6) for where this ended up.
 3. **Hurricane exposure used the same any-water distance** — Chicago scored a
    third of Miami's. Hurricanes now use the ocean coastline only.
 4. **Convection was latitude-only** — Los Angeles, as warm as Atlanta and at
@@ -132,6 +132,39 @@ they are not reintroduced:
 5. **Nothing ever closed.** The closure test was a threshold on intensity that
    susceptibility had already scaled below it. Closure is now tied to the
    computed capacity, so tuning severity tunes closures with it.
+6. **Continentality to the NEAREST ocean made the Northeast coast mild.**
+   Fixing (2) left Boston's simulated February at **+5.1 °C** against a real
+   −1.5 °C, because Boston is 5 km from the Atlantic and scored as maritime as
+   Seattle. Every cold kind is multiplied by `freezing()`, so this silently
+   gated snow, ice, blizzards *and* nor'easters off the entire Eastern
+   Seaboard — the nor'easter work is what surfaced it. Prevailing flow over
+   North America is **westerly**, so it is the **upwind** ocean that moderates
+   a place: continentality is now measured to the **Pacific**. That alone made
+   Seattle 4 °C too cold, so `mean_temp_c` also carries a maritime lapse
+   correction (a gentler latitude gradient where the ocean is upwind). Current
+   error across ten stations: **2.9 °C mean absolute in February, 2.5 °C in
+   July**. Boston's February `freezing()` went 0.00 → 0.43.
+7. **Nor'easters spawned nowhere.** The `NOREASTER` branch of `_seasonal_gate`
+   sat *below* the `basin in ("tropics", "atlantic")` genesis-only early
+   return, so it was unreachable and the kind existed with a spawn rate of
+   zero. The branch must stay above that return.
+8. **Lake-effect bands were born anywhere in the Midwest.** A 110 km band
+   spawned uniformly across a ~1,000 × 1,100 km basin box landed on the snow
+   belt about **once a year** — some forty times rarer than the real thing.
+   A lake-effect band is cold air picking up moisture over open water, so it
+   is now born **over a lake**, on a randomly chosen point along that lake's
+   long axis.
+9. **The Great Lakes as points ranked the snow belt wrong.** Five shore
+   anchors standing in for 4,000 km of shoreline put Buffalo — which sits on
+   Lake Erie's ENE tip — 97 km "inland", scoring 0.24 where it should be the
+   highest in the country; Marquette and Traverse City scored **zero**,
+   because the nearest anchor was east of them and the downwind test reads
+   east as downwind. The lakes are long and thin, so each is now a **segment**
+   (long axis plus half-width) and exposure is scored on distance *beyond the
+   shore*. Buffalo 0.89, Niagara 0.81, Erie 0.77, Rochester 0.66, Marquette
+   0.57; Milwaukee — upwind of the same lake that buries Grand Rapids — 0.04,
+   and Chicago 0.00. That directionality is the whole phenomenon, and
+   `scenario_weather` asserts both halves of it.
 
 Resulting behaviour over a simulated year (seed 42):
 
@@ -145,6 +178,33 @@ Resulting behaviour over a simulated year (seed 42):
 
 Northern hubs peak in winter, the Gulf coast in summer, Miami in hurricane
 season. **None of this is fitted to a weather record** — see §4.
+
+### The three regional kinds
+
+`HURRICANE`, `NOREASTER` and `LAKE_EFFECT` are different in kind from the rest:
+their whole point is that they hit a *named handful* of airports and nowhere
+else, so a check that they merely occur proves nothing. Each gets its own
+genesis geography and each is asserted on both halves — the belt gets them,
+and the places that must never see them don't.
+
+| kind | genesis | track | delivered (sim-years) |
+|---|---|---|---|
+| `HURRICANE` | tropics box, 12–24 °N | recurves NW→NE at ~0.42 °/h | 9.0 storms/yr, 91 airports; worst all Florida |
+| `NOREASTER` | Hatteras box, 32–38 °N / 79–73 °W | NNE up the coast, recurving | BOS 4.1 d/yr, PWM 2.7, LGA 2.0, EWR 1.8 |
+| `LAKE_EFFECT` | along a lake's long axis | ESE at 14 km/h, ~30 h life | BUF 12.8 d/yr, ROC 11.5, MQT 9.2, ERI 8.4, SYR 7.5 |
+
+The Hatteras box overlaps the `south` and `northeast` basins deliberately: it
+is a separate *genesis region*, not a separate piece of land, and only
+`NOREASTER` spawns in it. Both it and the tropics box return zero for every
+other kind.
+
+Two honest limits. Lake-effect flow is modelled as a single prevailing axis
+(ESE, with a broad cosine sector either side) rather than the actual wind of
+the day, so the belt is static where a real one shifts storm to storm — this
+is why Chicago scores exactly zero rather than the occasional northeasterly
+event it really gets. And a nor'easter's intensity is not tied to how deep the
+low is, only to how far the airport is up the coast; the model has no
+pressure field.
 
 ---
 
