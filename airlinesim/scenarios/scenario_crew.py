@@ -162,7 +162,8 @@ def check_distribution():
         print(f"    {iata:9} based {b['headcount']:4d}  here {b['present']:4d}  "
               f"fly {b['flying']:3d} rdy {b['ready']:3d} rest {b['resting']:3d} "
               f"cap {b['capped']:3d} away {b['away']:3d}   "
-              f"dep {b['demand']:2d} blocked {b['blocked']:2d}")
+              f"dep/day {b['departures']:5.1f} grounded {b['grounded']:2d} "
+              f"trimmed {b['trimmed']:2d}")
 
     # The five states are MUTUALLY EXCLUSIVE and exhaustive. If they ever
     # stop summing to the headcount, the bar in the GUI is drawing widths
@@ -237,15 +238,64 @@ def check_distribution():
 
     # The failure the panel exists to surface has to be REACHABLE in a real
     # run, or the whole card is decoration.
-    stations = [b for b in bases.values() if not b["headcount"] and b["demand"]]
+    stations = [b for b in bases.values() if not b["headcount"] and b["routes"]]
     with_crew = [b for b in bases.values() if b["headcount"]]
     check("a real run produces stations that are flown but not based",
           bool(stations),
-          "  ".join(f"{b['iata']}({b['demand']}dep,{b['present']}here)"
+          "  ".join(f"{b['iata']}({b['departures']:g}/day,{b['present']}here)"
                     for b in stations[:6]) or "none — panel would be empty")
     check("a real run produces bases with crew to distribute",
           len(with_crew) >= 1,
           "  ".join(f"{b['iata']}:{b['headcount']}" for b in with_crew[:6]))
+
+    # GROUNDED and TRIMMED must never be reported as one number. They are
+    # different failures — one route flew NOTHING, the other flew a reduced
+    # schedule — and a panel that adds them reads as "N departures left with
+    # no crew aboard", which is not a thing the engine can do. Cross-check
+    # both against the ops themselves.
+    for pl, pl_snap in zip(session.engine.players, players):
+        want_g, want_t = {}, {}
+        for op in pl.route_ops:
+            if not op.last_crew_block:
+                continue
+            o = op.spec.origin_iata
+            if op.last_eff_freq > 0:
+                want_t[o] = want_t.get(o, 0) + 1
+            else:
+                want_g[o] = want_g.get(o, 0) + 1
+        wrong = [(o, want_g.get(o, 0), want_t.get(o, 0),
+                  b["grounded"], b["trimmed"])
+                 for o, b in pl_snap["crew_bases"].items()
+                 if b["grounded"] != want_g.get(o, 0)
+                 or b["trimmed"] != want_t.get(o, 0)]
+        if wrong:
+            break
+    else:
+        wrong = []
+    check("a grounded route is counted apart from a short-crewed one",
+          not wrong,
+          f"disagreements: {wrong[:3]}" if wrong else
+          "grounded = flew nothing; trimmed = flew fewer rotations than scheduled")
+
+    # And the invariant underneath the whole panel, asserted directly: the
+    # engine does not fly aircraft without crew. A player reported the old
+    # wording as "routes are leaving when no crew is available" — this is the
+    # check that says whether that could ever be true.
+    flew_uncrewed = [f"{pl.player_id} {op.spec.origin_iata}->{op.spec.dest_iata}"
+                     for pl in session.engine.players for op in pl.route_ops
+                     if op.last_eff_freq > 0
+                     and (op.cockpit is None or op.cabin is None)]
+    check("no route ever operates without both cockpit and cabin crew",
+          not flew_uncrewed,
+          f"FLEW UNCREWED: {flew_uncrewed[:3]}" if flew_uncrewed else
+          f"{sum(len(pl.route_ops) for pl in session.engine.players)} ops checked")
+    over = [f"{c.spec.spec_id} {c.duty.hours_today:.2f}h"
+            for pl in session.engine.players
+            for pool in (pl.cockpit_pool, pl.cabin_pool)
+            for c in pool
+            if c.duty.hours_today > c.limits.max_daily_flight_hours + 1e-6]
+    check("no crew is ever flown past its daily flight-hour cap", not over,
+          f"OVER CAP: {over[:3]}" if over else "every crew inside its envelope")
 
     # Hubs must appear whether or not anyone is based at them yet — a hub you
     # just opened and haven't staffed is exactly what you need to see.

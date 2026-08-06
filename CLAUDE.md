@@ -491,6 +491,19 @@ represent "ten consecutive hours of rest" — it grants twenty-four — so the
 daily run is slightly optimistic about crew availability. That is a stated
 resolution limit, not a leak, and the check says which is which.
 
+**`last_crew_block` means two different things, and reporting them as one
+number is a bug.** It is set when no legal crew could be rostered — the route
+operates NOTHING — and *also* when a rostered crew hits a duty cap partway
+through, which only REDUCES the rotations flown. The crew panel added them and
+called the total "uncrewed departures", which a player correctly read as
+aircraft leaving with no crew aboard. The snapshot now carries `grounded`
+(flew nothing) and `trimmed` (flew a reduced schedule) separately and never
+uses the word "departures" for either. The engine itself was never wrong:
+`scenario_crew` asserts directly that no op operates with `cockpit` or `cabin`
+None, and that no crew is flown past its daily cap. Measured over 90 sim-days
+at hourly resolution — zero uncrewed flights, zero resting crews flying, zero
+breaches of the daily/7-day/28-day caps.
+
 ## Cabins: geometry, fitting and per-cabin fares
 
 `cabin.py` answers "what physically fits in this airframe?"; `finance_cabin.py`
