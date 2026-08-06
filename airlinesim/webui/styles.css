@@ -398,3 +398,45 @@ dialog h2 { margin-top: 0; }
 
 /* a row highlighted by a map selection */
 tr.selectedRow > td { background: rgba(46, 168, 255, 0.16); }
+
+/* ---- crew distribution across bases -------------------------------------
+   A stacked bar per base, widths proportional to headcount in each state.
+   The bar is the panel: a crew shortage is nearly always a DISTRIBUTION
+   problem, and one line of "ORD:12 DFW:8" per crew type showed the headcount
+   while hiding the shortage. Colours carry the meaning — flying is the
+   working payroll, ready is capacity in hand, resting is time you must wait
+   out, and AWAY is the one that costs money for nothing, because positioning
+   is direct-to-base only. */
+.crewGrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+            gap: 0.45rem 1rem; margin-bottom: 0.5rem; }
+.crewBase { min-width: 0; }
+.crewBaseHead { display: flex; flex-wrap: wrap; align-items: baseline;
+                gap: 0.35rem; font-size: 0.8rem; }
+.crewBaseHead .iata { font-weight: 600; font-size: 0.9rem;
+                      font-family: ui-monospace, monospace; }
+.crewBaseHead .tag {
+  font-size: 0.65rem; color: var(--muted);
+  border: 1px solid var(--card-border); border-radius: 0.3rem;
+  padding: 0.05rem 0.3rem;
+}
+.crewBar {
+  display: flex; height: 0.6rem; margin: 0.2rem 0 0.15rem;
+  border-radius: 0.3rem; overflow: hidden;
+  background: #0c1b2b; border: 1px solid var(--card-border);
+}
+.crewSeg { display: block; height: 100%; }
+.crewSeg.flying  { background: var(--accent); }
+.crewSeg.ready   { background: var(--good); }
+.crewSeg.resting { background: var(--warn); }
+.crewSeg.capped  { background: #a2703a; }
+.crewSeg.away    { background: var(--bad); }
+.crewCounts { font-size: 0.72rem; color: var(--muted); }
+.crewCounts .flying  { color: var(--accent); }
+.crewCounts .ready   { color: var(--good); }
+.crewCounts .resting { color: var(--warn); }
+.crewCounts .capped  { color: #c98a45; }
+.crewCounts .away    { color: var(--bad); }
+/* stations flown from but not based at — one compact line, not a card each */
+.crewStations { margin-top: 0.15rem; line-height: 1.6; }
+.crewStations span { font-family: ui-monospace, monospace; font-size: 0.72rem;
+                     margin-right: 0.15rem; }
