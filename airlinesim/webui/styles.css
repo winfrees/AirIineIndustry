@@ -492,3 +492,36 @@ tr.selectedRow > td { background: rgba(46, 168, 255, 0.16); }
   font-size: 0.72rem; padding: 0.05rem 0.3rem; border-radius: 0.3rem;
   background: rgba(255,255,255,0.06);
 }
+
+
+/* ---- Route planner: the map layer ----------------------------------------
+   Candidates are FORECASTS of routes that do not exist, so they must not read
+   like the operated network. Dashed, thinner, and tinted by rank — and the
+   About dialog says so in words, because a viewer could reasonably mistake a
+   proposal for a flight. */
+.planSpoke {
+  fill: none;
+  stroke-dasharray: 5 4;
+  opacity: 0.85;
+  vector-effect: non-scaling-stroke;   /* geography scales; its stroke does not */
+  pointer-events: none;
+}
+.planSpokeDead { opacity: 0.3; stroke-dasharray: 2 5; }
+.planPort { cursor: pointer; }
+.planPortDot { stroke: #0b1420; stroke-width: 0.8; }
+.planLabel {
+  font-size: 8px; font-weight: 600; paint-order: stroke;
+  stroke: #0b1420; stroke-width: 2.4px; stroke-linejoin: round;
+}
+.planOriginDot {
+  fill: none; stroke: #7ff2c8; stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+.mapPort { cursor: pointer; }
+/* Transparent, but it still takes pointer events — this is the click and
+   touch target for an airport. The visible dot is about three pixels and the
+   label sits BESIDE it, so the target spans both: a click on the label is a
+   click on the airport, and the group's own centre lands inside the target
+   rather than on whatever geography shows through between them. */
+.mapHit { fill: transparent; stroke: none; }
+.mapLabel, .planLabel { pointer-events: none; }

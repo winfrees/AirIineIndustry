@@ -539,11 +539,31 @@ Also noted: every type's D check requires a widebody-class facility
 (`databuilder._program`), so `required_class` reads WIDEBODY even for a
 regional jet. That is the data, not a planner bug.
 
-**Phase 5 — the map.** `MAP.plan` layer, airport selection, hover linkage,
-About paragraph. *Asserted:* the reachability path — button, panel, forecast
-note, click handler — the way `scenario_map` pins the derived-position note;
-planner geometry stays inside the bbox; candidates render distinctly from
-operated routes; the layer survives a zoom redraw.
+**Phase 5 — the map.** ✅ *Landed.* A `MAP.plan` group inside `MAP.view`,
+airport click targets, rank-tinted dashed spokes, and an About paragraph. One
+click ranks every destination from an airport; a second plans that pair. The
+panel pushes what it is showing to the map, so the two cannot disagree.
+
+Building it uncovered a bug that had **broken map selection entirely**, not
+just for the planner:
+
+> `pointerdown` calls `svg.setPointerCapture()` so a drag that leaves the
+> element still pans. Pointer capture **retargets the compatibility `click`
+> that follows to the capturing element** — the bare `<svg>`. So
+> `e.target.closest(".mapPlane")` in the click handler always found nothing,
+> and clicking an aircraft or a route did nothing at all: the handler ran,
+> matched neither, and fell through to "clear the selection". The map has been
+> a poster rather than a control surface since zoom/pan landed.
+
+The click handler now reads the **pointerdown** target. Two related fixes came
+with it: `pointerup` no longer rebuilds the whole live layer on a plain click
+(it was removing the very element the pointer went down on, and a click
+changes no zoom to repaint for), and an airport's click target now spans its
+dot *and* its label — the visible dot is about three pixels and the label sits
+beside it, so the group's own centre used to land on bare geography.
+
+`scenario_map` could not have caught this: it asserts the handler exists in
+source, which it did. `scenario_planner` now guards the specific cause.
 
 **Later, deliberately deferred:** reliability discounting; feed index on
 candidates; compound one-click execution; ferry/repositioning; multi-leg

@@ -1494,6 +1494,79 @@ def check_delivery():
         hub.session.stop()
 
 
+def check_map_layer():
+    """
+    PHASE 5 — the planner on the map.
+
+    A GUI layer can only be verified in a browser, so what a scenario pins is
+    everything the browser depends on — and, as with the map's
+    derived-position note, the REACHABILITY of the caveat. `scenario_map`
+    stopped accepting "the string is in index.html" as evidence a player can
+    read it; the same standard applies here.
+    """
+    from airlinesim.server import WEBUI_DIR
+    print("\n=== MAP LAYER ===")
+    js = (WEBUI_DIR / "map.js").read_text()
+    app = (WEBUI_DIR / "app.js").read_text()
+    css = (WEBUI_DIR / "styles.css").read_text()
+    flat = " ".join((WEBUI_DIR / "index.html").read_text().split())
+
+    check("the plan is its own layer inside the zoom group",
+          'MAP.plan = svgEl("g", {}, MAP.view)' in js,
+          "inside MAP.view, so it pans and zooms with the geography rather "
+          "than floating over it")
+    check("a zoom redraws the plan, not just the live layer",
+          "drawPlan();" in js.split("function drawPlan")[0],
+          "drawLive calls drawPlan, and drawLive is what a zoom triggers — "
+          "without it the counter-scaled markers stay the wrong size until "
+          "the next tick, which is every time someone studies a market PAUSED")
+    check("candidate spokes scale but their stroke does not",
+          ".planSpoke" in css
+          and "vector-effect: non-scaling-stroke" in
+              css.split(".planSpoke")[1].split("}")[0],
+          "at 8x a 1px line would otherwise be an 8px ribbon over the cities "
+          "being read")
+    check("plan markers counter-scale, so they stay legible at every zoom",
+          "1 / ZOOM.k" in js.split("function drawPlan")[1].split(
+              "function pickAirport")[0])
+    check("candidates are drawn DISTINCTLY from the operated network",
+          "stroke-dasharray" in css.split(".planSpoke")[1].split("}")[0],
+          "dashed and rank-tinted; operated routes are solid — a proposal "
+          "must not read as a flight")
+    check("airports are clickable and feed the planner",
+          "pickAirport" in js and 'closest(".mapPort, .planPort")' in js
+          and "onPlanAirports" in js and "function onPlanAirports" in app)
+    check("the map and the panel always describe the same query",
+          "pushPlanToMap" in app and "setPlanLayer" in app,
+          "the panel pushes what it is showing to the map, so the two cannot "
+          "disagree about what is being planned")
+
+    # THE REGRESSION GUARD on a real bug: pointer capture retargets the click.
+    check("the click handler reads the POINTERDOWN target, not e.target",
+          "downTarget" in js and "PAN.downTarget || e.target" in js,
+          "pointerdown calls setPointerCapture so a drag that leaves the "
+          "element still pans, and capture retargets the compatibility click "
+          "to the <svg> — so e.target.closest('.mapPlane') always found "
+          "nothing and map selection did nothing at all")
+    check("a plain click does not rebuild the live layer",
+          "if (panned && latest) drawLive(latest);" in js,
+          "rebuilding it on every pointerup removed the element the pointer "
+          "went down on, and a plain click changes no zoom to repaint for")
+    check("an airport's click target spans its dot AND its label",
+          "mapHit" in js and ".mapHit" in css,
+          "the visible dot is about three pixels and the label sits beside "
+          "it; without this the group's own centre lands on bare geography")
+
+    # The caveat has to be reachable, not merely present.
+    check("the map's About dialog explains the planner layer",
+          'id="mapPlanNote"' in flat)
+    check("it says the spokes are FORECASTS of routes that do not exist",
+          "FORECASTS of routes that do not exist" in flat)
+    check("it says how to drive it", "Click an AIRPORT to plan from it" in flat)
+    check("it explains what a faded spoke means",
+          "Faded spokes are destinations that cannot" in flat)
+
+
 def check_quote():
     """
     `Bank.quote()` must answer what `try_acquire()` would DO.
@@ -1605,6 +1678,7 @@ def main():
     check_resourcing()
     check_lock_discipline()
     check_delivery()
+    check_map_layer()
     passed = sum(1 for _, ok in CHECKS if ok)
     print("\n" + "=" * 70)
     print(f"{passed}/{len(CHECKS)} checks passed — "

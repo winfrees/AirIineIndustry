@@ -1133,9 +1133,15 @@ def plan_pair(world, players, player, origin, dest, *, service_tier: int = 2,
         "it converts capital, and the lease rate is what its use is worth. "
         "The three quotes on each row are what the bank would actually do.")
     notes.append(
-        "still NOT deducted, on either line: payroll for crews that did not "
-        "fly, and hub overhead. The crew figure here is a flat per-block-hour "
-        "estimate, not a headcount.")
+        "crew is priced the way the ledger prices it: your own rated crews' "
+        "rate at this base where you have them, the market rate where you do "
+        "not, on CRUISE hours. Flight crew here is purely variable — a crew "
+        "that does not fly costs nothing, and is on no standing payroll.")
+    notes.append(
+        "still NOT deducted: hub overhead. It is charged per hub per day "
+        "whatever flies, so it belongs to a network rather than to one leg; "
+        "the maintenance column names the fee where a plan needs a hub you "
+        "do not have.")
 
     return PairPlan(
         origin=origin.iata, dest=dest.iata, distance_km=dist,

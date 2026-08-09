@@ -1225,6 +1225,56 @@ async function runPlan(params) {
   planData = await fetch(`${url}?${q}`).then((r) => r.json())
     .catch((e) => ({ error: String(e) }));
   el.innerHTML = pair ? planHtml(planData) : destHtml(planData);
+  pushPlanToMap(pair, planData);
+  document.getElementById("plannerCard")
+    .scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+// The map draws whatever the panel is showing, so the two can never disagree
+// about what is being planned. A pair plan is a one-candidate layer — the
+// same shape, so `drawPlan` needs no second code path.
+function pushPlanToMap(pair, d) {
+  if (typeof setPlanLayer !== "function") return;
+  if (!d || d.error) return setPlanLayer(null);
+  if (pair) {
+    const best = (d.options || []).find((o) => o.operable) || d.options[0];
+    return setPlanLayer({
+      origin: d.origin,
+      candidates: [{
+        dest: d.dest, operable: !!(best && best.operable),
+        label: best
+          ? `${best.spec_id} — ${money(best.forecast.absorbed)}/day absorbed, ` +
+            `${best.frequency.rotations}/day (${best.frequency.binding}-limited)`
+          : "no aircraft can serve this pair",
+      }],
+    });
+  }
+  setPlanLayer({
+    origin: d.origin,
+    candidates: (d.candidates || []).map((c) => ({
+      dest: c.dest, operable: c.operable,
+      label: `${c.spec_id} — ${money(c.forecast.absorbed)}/day absorbed, ` +
+             `${c.frequency.rotations}/day, ${Math.round(c.forecast.demand_per_day)} pax/day`,
+    })),
+  });
+}
+
+// Called by map.js when airports are clicked. One airport ranks destinations
+// from it; two plan that pair. The form is filled in as well as run, so the
+// map and the panel are always describing the same query.
+function onPlanAirports(picks) {
+  const originEl = document.getElementById("planOrigin");
+  const destEl = document.getElementById("planDest");
+  if (!picks.length) {
+    originEl.value = "";
+    destEl.value = "";
+    document.getElementById("plan").innerHTML = planHtml(null);
+    return;
+  }
+  originEl.value = picks[0] || "";
+  destEl.value = picks[1] || "";
+  document.getElementById("formPlan")
+    .dispatchEvent(new Event("submit", { cancelable: true }));
 }
 
 document.getElementById("formPlan").addEventListener("submit", (e) => {

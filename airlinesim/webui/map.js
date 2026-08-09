@@ -45,7 +45,15 @@ const MAP = {
   svg: null, view: null, base: null, live: null, wrap: null,
   basemap: null,
   W: 1000, H: 620,
-  selection: null,      // {kind: "route"|"plane", id}
+  selection: null,      // {kind: "route"|"plane"|"airport", id}
+  // The ROUTE PLANNER's layer. `plan` is its own <g> inside MAP.view so it
+  // pans and zooms with the geography; `planData` is what to draw; `planPick`
+  // is the one-or-two airports the player has clicked. Kept separate from
+  // `live` because the live layer is rebuilt every tick and the plan is not —
+  // a forecast should not flicker once a second while it is being read.
+  plan: null,
+  planData: null,
+  planPick: [],
   northRef: "magnetic", // "magnetic" (aviation convention) or "true"
   declination: null,    // deg east at the projection's reference point
   magnetic: null,       // the whole /api/magnetic payload, for the note
@@ -606,6 +614,11 @@ function drawLive(snap) {
       transform: `translate(${x.toFixed(1)},${y.toFixed(1)}) `
                + `scale(${(1 / ZOOM.k).toFixed(4)})`,
     }, MAP.live);
+    // An invisible hit area, because the dot is ~3px and the label sits to one
+    // side: without it the group's centre lands on empty map and a click there
+    // goes to whatever geography is underneath. Also what makes the marker a
+    // usable touch target.
+    svgEl("rect", { x: -8, y: -8, width: 34, height: 17, class: "mapHit" }, g);
     svgEl("circle", {
       cx: 0, cy: 0, r: isHub ? 4.5 : 2.6,
       class: wx.closed ? "mapPortClosed" : "mapPortDot",
@@ -619,6 +632,11 @@ function drawLive(snap) {
   }
 
   drawLegend(snap, offscreen);
+  // The plan rides the same redraw as the live layer. Point features carry a
+  // counter-scale, so a zoom that did not redraw them would leave the plan
+  // markers the wrong size until the next tick — which is every time someone
+  // studies a market while PAUSED, i.e. exactly when the planner is used.
+  drawPlan();
 }
 
 // A colour with no key is decoration. The legend names the carriers and the
@@ -674,6 +692,116 @@ function drawLegend(snap, offscreen) {
   left.appendChild(mode);
 }
 
+// -- the route planner's layer ----------------------------------------------
+//
+// CANDIDATES ARE NOT ROUTES. Everything here is a forecast of a route that
+// does not exist, so it must not read like the operated network: candidate
+// spokes are dashed, thinner, and tinted by rank, and the About dialog says
+// so in words. Drawing a proposal the same way as a flight would be the most
+// misleading thing this map could do — the same reason the aircraft note
+// exists.
+//
+// Rank tint runs best -> worst through a single hue so the ordering survives
+// greyscale and colour-blindness; it is a sequence, not a set of categories.
+const PLAN_TINT = ["#7ff2c8", "#63d9b4", "#4bbfa1", "#36a68d", "#248c79"];
+
+function planTint(i, n) {
+  if (n <= 1) return PLAN_TINT[0];
+  const step = Math.min(PLAN_TINT.length - 1,
+                        Math.floor((i / (n - 1)) * (PLAN_TINT.length - 1)));
+  return PLAN_TINT[step];
+}
+
+function setPlanLayer(data) {
+  MAP.planData = data;
+  drawPlan();
+}
+
+function clearPlanLayer() {
+  MAP.planData = null;
+  MAP.planPick = [];
+  drawPlan();
+  updatePlanStatus();
+}
+
+function drawPlan() {
+  if (!MAP.plan) return;
+  MAP.plan.innerHTML = "";
+  const d = MAP.planData;
+  if (!d || !d.origin) return;
+  const ports = airportsByCode();
+  const from = ports[d.origin];
+  if (!from) return;
+  const [ox, oy] = project(from.lon, from.lat);
+
+  const cands = (d.candidates || []).filter((c) => ports[c.dest]);
+  cands.forEach((c, i) => {
+    const to = ports[c.dest];
+    const [dx, dy] = project(to.lon, to.lat);
+    const tint = c.operable ? planTint(i, cands.length) : "#6b7c8f";
+    // GEOGRAPHY: scales with the map, stroke does not — at 8x a 1px line
+    // would otherwise become an 8px ribbon over the cities being read.
+    const path = svgEl("path", {
+      d: pathOf(greatCircle(from, to), false),
+      class: "planSpoke" + (c.operable ? "" : " planSpokeDead"),
+      stroke: tint,
+      "stroke-width": (2.4 - 1.4 * (i / Math.max(1, cands.length - 1))).toFixed(2),
+    }, MAP.plan);
+    svgEl("title", {}, path).textContent =
+      `${d.origin} -> ${c.dest} (#${i + 1})\n${c.label || ""}`;
+
+    // SYMBOL: counter-scaled, so it stays legible at every zoom.
+    const g = svgEl("g", {
+      class: "planPort", "data-iata": c.dest,
+      transform: `translate(${dx.toFixed(1)},${dy.toFixed(1)}) `
+               + `scale(${(1 / ZOOM.k).toFixed(4)})`,
+    }, MAP.plan);
+    svgEl("rect", { x: -8, y: -12, width: 40, height: 18, class: "mapHit" }, g);
+    svgEl("circle", { cx: 0, cy: 0, r: 3.4, fill: tint,
+                      class: "planPortDot" }, g);
+    svgEl("text", { x: 6, y: -2, class: "planLabel", fill: tint }, g)
+      .textContent = `${i + 1}. ${c.dest}`;
+    svgEl("title", {}, g).textContent = c.label || c.dest;
+  });
+
+  // The origin, marked so it is obvious which end the plan starts from.
+  const og = svgEl("g", {
+    class: "planPort planOrigin", "data-iata": d.origin,
+    transform: `translate(${ox.toFixed(1)},${oy.toFixed(1)}) `
+             + `scale(${(1 / ZOOM.k).toFixed(4)})`,
+  }, MAP.plan);
+  svgEl("rect", { x: -9, y: -9, width: 18, height: 18, class: "mapHit" }, og);
+  svgEl("circle", { cx: 0, cy: 0, r: 5.5, class: "planOriginDot" }, og);
+  svgEl("title", {}, og).textContent = `${d.origin} — planning from here`;
+}
+
+// Clicking airports is how the map becomes the planner's input. One picked
+// airport asks "where should I fly from here"; two ask "what can fly this
+// pair". app.js owns running the plan — the map only reports the pick.
+function pickAirport(iata) {
+  const picks = MAP.planPick;
+  const at = picks.indexOf(iata);
+  if (at >= 0) picks.splice(at, 1);
+  else if (picks.length >= 2) MAP.planPick = [iata];
+  else picks.push(iata);
+  updatePlanStatus();
+  if (typeof onPlanAirports === "function") onPlanAirports([...MAP.planPick]);
+}
+
+function updatePlanStatus() {
+  const el = document.getElementById("mapSel");
+  if (!el) return;
+  const picks = MAP.planPick;
+  if (picks.length === 1) {
+    el.textContent = `planning from ${picks[0]} — click a second airport for a `
+                   + `pair, or the same one again to clear`;
+  } else if (picks.length === 2) {
+    el.textContent = `planning ${picks[0]} -> ${picks[1]}`;
+  } else if (!MAP.selection) {
+    el.textContent = "";
+  }
+}
+
 // -- selection --------------------------------------------------------------
 // Selecting on the map highlights the matching rows in the Routes and Fleet
 // panels, which is what makes the map a control surface rather than a poster.
@@ -690,9 +818,14 @@ function applySelection() {
   // absorb. When something IS selected this line is genuinely status.
   const label = document.getElementById("mapSel");
   if (label) {
-    label.textContent = sel
-      ? `selected ${sel.kind}: ${sel.id}  (click empty map to clear)`
-      : "";
+    if (sel) {
+      label.textContent =
+        `selected ${sel.kind}: ${sel.id}  (click empty map to clear)`;
+    } else {
+      // Hand the line back to the planner rather than blanking it — both
+      // write here, and whichever is live should own it.
+      updatePlanStatus();
+    }
   }
 }
 
@@ -717,6 +850,7 @@ async function initMap() {
   MAP.view = svgEl("g", { class: "mapView" }, MAP.svg);
   MAP.base = svgEl("g", {}, MAP.view);
   MAP.live = svgEl("g", {}, MAP.view);
+  MAP.plan = svgEl("g", {}, MAP.view);
 
   const [basemap, magnetic] = await Promise.all([
     fetch("/api/basemap").then((r) => r.json()).catch(() => null),
@@ -749,10 +883,19 @@ async function initMap() {
   MAP.svg.addEventListener("click", (e) => {
     // A drag that ends over an aircraft is not a click on it.
     if (PAN.dragged) return;
-    const plane = e.target.closest(".mapPlane");
+    // The pointerdown target, NOT e.target: pointer capture retargets this
+    // event to the SVG. See PAN.downTarget.
+    const t = PAN.downTarget || e.target;
+    const plane = t.closest && t.closest(".mapPlane");
     if (plane) return selectOn("plane", plane.dataset.tail);
-    const route = e.target.closest(".mapRoute");
+    const route = t.closest && t.closest(".mapRoute");
     if (route) return selectOn("route", route.dataset.op);
+    // Airport dots are planner input. Checked after aircraft and routes so a
+    // click on a route that happens to pass over a dot still selects the
+    // route, which is the older and more specific gesture.
+    const port = t.closest && t.closest(".mapPort, .planPort");
+    if (port && port.dataset.iata) return pickAirport(port.dataset.iata);
+    if (MAP.planPick.length || MAP.planData) clearPlanLayer();
     if (MAP.selection) { MAP.selection = null; if (latest) drawLive(latest); applySelection(); }
   });
   applySelection();
@@ -762,7 +905,17 @@ async function initMap() {
 // Pointer events throughout, so mouse, trackpad, pen and touch are ONE code
 // path — including pinch, which is just "two active pointers" rather than a
 // separate touch API with its own coordinate conventions to get wrong.
-const PAN = { pointers: new Map(), dragged: false, start: null, pinch: 0 };
+const PAN = { pointers: new Map(), dragged: false, start: null, pinch: 0,
+              // WHAT THE POINTER WENT DOWN ON, because the click event cannot
+              // be trusted to say. `pointerdown` calls setPointerCapture on
+              // the SVG so a drag that leaves the element still pans, and
+              // pointer capture RETARGETS the compatibility `click` that
+              // follows to the capturing element — the bare <svg>. So
+              // `e.target.closest('.mapPlane')` in the click handler always
+              // found nothing, and clicking an aircraft, a route or an
+              // airport did nothing at all. The handler ran, matched none of
+              // them, and fell through to "clear the selection".
+              downTarget: null };
 
 function wireZoomPan() {
   const svg = MAP.svg;
@@ -779,6 +932,8 @@ function wireZoomPan() {
 
   svg.addEventListener("pointerdown", (e) => {
     if (e.pointerType === "mouse" && e.button !== 0) return;
+    // Recorded BEFORE capture retargets everything that follows.
+    PAN.downTarget = e.target;
     svg.setPointerCapture(e.pointerId);
     PAN.pointers.set(e.pointerId, svgPoint(e));
     PAN.dragged = false;
@@ -837,9 +992,18 @@ function wireZoomPan() {
     if (PAN.pointers.size === 0) {
       PAN.start = null;
       svg.classList.remove("panning");
+      const panned = PAN.dragged;
       // Clear the drag flag AFTER the click event that follows pointerup.
       setTimeout(() => { PAN.dragged = false; }, 0);
-      if (latest) drawLive(latest);   // repaint point features at final zoom
+      // ONLY after an actual pan or pinch. `drawLive` rebuilds the whole live
+      // layer, so calling it on every pointerup removed the very element the
+      // pointer went down on — and the browser then dispatches the following
+      // `click` on the nearest surviving ancestor, i.e. the bare SVG. The
+      // result was that clicking an aircraft, a route or an airport did
+      // nothing at all: the handler ran, found no `.mapPlane` or `.mapRoute`
+      // under `e.target`, and fell through to "clear the selection". A plain
+      // click also changes no zoom, so there is nothing to repaint for.
+      if (panned && latest) drawLive(latest);
     }
   };
   svg.addEventListener("pointerup", release);
