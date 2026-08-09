@@ -307,9 +307,18 @@
       ranked on absorbed, because ranking on contribution puts the biggest
       aeroplane first on every route it can fill and that aeroplane often
       loses money once its lease is paid.</div>
-    <div class="metric"><b>Still not deducted, on either line:</b> payroll for
-      crews that did not fly, and hub overhead. The crew figure is a flat
-      per-block-hour estimate rather than a headcount.</div>
+    <div class="metric"><b>Crew is charged the way the ledger charges it.</b>
+      Flight crew in this engine is a purely variable cost: cockpit and cabin
+      are billed only for the hours flown, on cruise time, and are not on any
+      standing payroll — a crew that does not fly costs nothing. Each row uses
+      your own rated crews' rate where you have them at that base, and the
+      market rate where you do not, and tells you the headcount the schedule
+      needs against what you have.</div>
+    <div class="metric"><b>Still not deducted: hub overhead.</b>
+      <i>hub_fee_per_day</i> is charged per hub per day whatever flies, so it
+      belongs to a network rather than to one leg — splitting it across routes
+      would need an arbitrary rule for how many routes share a hub. Where a
+      plan needs a hub you do not have, the row says so and names the fee.</div>
     <div class="metric"><b>Frequency is four limits, not one.</b> Airframe
       hours, market demand, gate capacity and the crew pool each cap the
       schedule; the panel names whichever one binds. A limit marked advisory

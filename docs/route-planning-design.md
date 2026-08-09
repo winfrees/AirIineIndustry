@@ -504,12 +504,40 @@ Three corrections from building it:
   comparison passed regardless of what the code did. It now reports the
   duration as its evidence and says the wait was never measured.
 
-**Phase 4 — Q2, resourcing.** Crew requirement by base, maintenance-hub
-feasibility, basing recommendation, the fully-absorbed cost line. *Asserted:*
-a plan needing more crew than the base has is flagged and the gap matches what
-`hire_crew` would need; a type with no rated hub is blocked with the fee of
-the nearest rated field; contribution and absorbed lines differ by exactly the
-items §2 says they do.
+**Phase 4 — Q2, resourcing.** ✅ *Landed.* Crew headcount by base with the
+hiring gap, maintenance-hub feasibility running the engine's own predicate,
+and the crew cost corrected. Two things this phase was planned on were wrong:
+
+- **Flight crew is a PURELY VARIABLE cost, and this doc said otherwise.**
+  `OperationsSubsystem` bills cockpit + cabin only for the hours FLOWN, and
+  `FinanceSubsystem`'s standing payroll covers ground, baggage, meteorology
+  and maintenance staff — **not** flight crew. So "payroll for crews that did
+  not fly" is not an omission from the absorbed line; it is not a cost this
+  engine has, and the About dialog shipped saying it was. What *was* wrong:
+  the forecast charged a flat $680/hour on BLOCK hours where the engine
+  charges the actual crews' rate on CRUISE hours — $408 per departure too
+  much. The player's forecast now reads the carrier's own rated crews at that
+  base and charges cruise hours; the AI keeps the flat block figure, because
+  its goldens pin it and over-stating a cost is the safe direction for a
+  rival.
+- **Hub overhead is deliberately NOT amortised.** `hub_fee_per_day` is charged
+  per hub per day whatever flies, so it belongs to a network, not a leg. Any
+  split across routes needs an arbitrary rule for how many share the hub, so
+  it is reported as a plan-level cost — "your hubs cannot check this type;
+  nearest that can is MDW at $16,703/day" — and never folded into a per-route
+  margin.
+
+One branch is **unreachable on the committed corpus** and is asserted as such
+rather than claimed as tested: `routedata` derives `has_maintenance_facility`
+and `facility_max_class` from the same test (`hub_rank <= 40` → WIDEBODY), so
+every field that can do maintenance can do any check, and "your hub is not
+rated for this type" cannot arise from the data. The scenario proves the
+branch works by downgrading a facility in a scratch world, and separately
+asserts the corpus cannot reach it.
+
+Also noted: every type's D check requires a widebody-class facility
+(`databuilder._program`), so `required_class` reads WIDEBODY even for a
+regional jet. That is the data, not a planner bug.
 
 **Phase 5 — the map.** `MAP.plan` layer, airport selection, hover linkage,
 About paragraph. *Asserted:* the reachability path — button, panel, forecast

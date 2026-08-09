@@ -1074,6 +1074,27 @@ function bindsLabel(freq) {
          `${b ? ` — ${esc(b.detail)}` : ""}<br>${esc(others)}</div>`;
 }
 
+// Crew and maintenance are the two ways a plan that prices well still cannot
+// be stood up. A gap is shown as a HIRE, not as a failure — hiring is part of
+// the plan, and the panel says how many of each.
+function crewCell(c) {
+  if (!c) return "";
+  const gap = c.cockpit_gap || c.cabin_gap
+    ? `<div class="why">hire ${c.cockpit_gap} cockpit, ${c.cabin_gap} cabin</div>`
+    : `<div class="binds">covered by your crews here</div>`;
+  return `${c.cockpit_needed}&times; cockpit + ${c.cabin_needed}&times; cabin` +
+         `<div class="binds">have ${c.cockpit_have}/${c.cabin_have} &middot; ` +
+         `${money(c.cockpit_hourly + c.cabin_hourly)}/h &middot; ` +
+         `${esc(c.rate_source)}</div>${gap}`;
+}
+
+function mxCell(m) {
+  if (!m) return "";
+  return m.ok
+    ? `<span class="pos">ok</span><div class="binds">${esc(m.reason)}</div>`
+    : `<span class="neg">no base</span><div class="why">${esc(m.reason)}</div>`;
+}
+
 function sourceCell(o) {
   const tag = `<span class="srcTag">${esc(o.source)}</span>`;
   if (o.source === "acquire") {
@@ -1135,6 +1156,8 @@ function planHtml(d) {
       <td>${signed(f.contribution)}</td>
       <td>${f.costs.ownership ? money(f.costs.ownership) : "—"}</td>
       <td><b>${signed(f.absorbed)}</b></td>
+      <td>${crewCell(o.crew)}</td>
+      <td>${mxCell(o.maintenance)}</td>
       <td>${why.length ? `<div class="why">${esc(why.join("; "))}</div>` : ""}${warn}</td>
     </tr>`;
   }).join("");
@@ -1143,7 +1166,8 @@ function planHtml(d) {
     <thead><tr>
       <th>type</th><th>size</th><th>aircraft from</th><th>frequency</th>
       <th>pax/day</th><th>contribution</th><th>ownership</th>
-      <th>absorbed &#9660;</th><th>why not</th>
+      <th>absorbed &#9660;</th><th>crew needed</th><th>maintenance</th>
+      <th>why not</th>
     </tr></thead><tbody>${rows}</tbody></table>`;
 }
 
@@ -1176,6 +1200,7 @@ function destHtml(d) {
           <span class="binds">${(f.load_factor * 100).toFixed(0)}% LF</span></td>
       <td>${signed(f.contribution)}</td>
       <td><b>${signed(f.absorbed)}</b></td>
+      <td>${crewCell(c.crew)}</td>
       <td>${tierBadge(f.data_tier)}</td>
       <td>${why.length ? `<div class="why">${esc(why.join("; "))}</div>` : ""}</td>
     </tr>`;
@@ -1183,8 +1208,8 @@ function destHtml(d) {
   return head + notes + `<table>
     <thead><tr>
       <th>destination</th><th>stage</th><th>aircraft</th><th>frequency</th>
-      <th>market</th><th>contribution</th><th>absorbed</th><th>demand data</th>
-      <th>why not</th>
+      <th>market</th><th>contribution</th><th>absorbed</th><th>crew needed</th>
+      <th>demand data</th><th>why not</th>
     </tr></thead><tbody>${rows}</tbody></table>`;
 }
 

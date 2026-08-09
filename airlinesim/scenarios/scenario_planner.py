@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 
 from airlinesim import actions
 from airlinesim.ai import AICarrierSubsystem, archetype
@@ -1254,6 +1255,138 @@ def _lock_pressure(gs, call):
     return took.get("s", 0.0), worst, tries
 
 
+def check_resourcing():
+    """
+    PHASE 4 — what a plan needs to actually be stood up.
+
+    The plan for this phase was written on a wrong assumption and the UI
+    shipped the wrong caveat, so the first thing asserted here is the fact
+    that corrected it: flight crew in this engine is a PURELY VARIABLE cost.
+    """
+    import dataclasses
+
+    from airlinesim import planner
+    from airlinesim.engine import AirportSpec, PlaneClass
+    print("\n=== RESOURCING ===")
+    world, engine = golden_world()
+    players = list(engine.players)
+    me = players[0]
+    ord_ = actions.airport(world, "ORD")
+    a321 = world.repo.get(AircraftSpec, "A321")
+    b789 = world.repo.get(AircraftSpec, "B789")
+
+    # --- the correction itself, asserted against the engine's own source ---
+    src = (Path(__file__).parent.parent / "engine.py").read_text()
+    check("flight crew is billed only for hours flown",
+          "crew_cost = (cockpit_cost + cabin_cost) * fh" in src,
+          "OperationsSubsystem, where fh = distance / cruise_speed x freq")
+    finance = src.split("class FinanceSubsystem")[1].split("class ")[0]
+    check("cockpit and cabin are NOT on standing payroll",
+          "CrewType.GROUND" in finance and "COCKPIT" not in finance,
+          "FinanceSubsystem pays ground, baggage, meteorology and "
+          "maintenance staff only — a flight crew that does not fly is free")
+    check("the player's forecast charges crew on CRUISE hours, like the ledger",
+          planner.player_policy(world, ord_).crew_hours_basis == "cruise")
+    check("the AI still charges block hours, so its goldens hold",
+          planner.ForecastPolicy().crew_hours_basis == "block",
+          f"the difference is 0.6h x ${planner.AI_CREW_COST_PER_BLOCK_HOUR:,.0f} "
+          f"= ${0.6 * planner.AI_CREW_COST_PER_BLOCK_HOUR:,.0f} a departure, "
+          f"and over-stating a cost is the safe direction for a rival")
+
+    # --- crew rate is read, not assumed ---
+    ch, cb, mine = planner.crew_rates(world, me, "ORD", a321)
+    _mh, _mb, market = planner.crew_rates(world, me, "ORD", b789)
+    check("the rate comes from the carrier's own crews where it has them",
+          "own crews" in mine and "market rate" in market,
+          f"A321 ${ch + cb:,.0f}/h from your crews; B789 falls back to market "
+          f"— your pilots are not rated for it")
+
+    # --- headcount, and the inverse property that makes it trustworthy ---
+    plan = planner.plan_pair(world, players, me, ord_,
+                             actions.airport(world, "DEN"))
+    by_id = {o.spec_id: o for o in plan.options}
+    req = by_id["A321"].crew
+    check("a rotation can never need fewer than two crews of each kind",
+          req.cockpit_needed >= 2 and req.cabin_needed >= 2,
+          f"{req.cockpit_needed} cockpit / {req.cabin_needed} cabin for "
+          f"{req.daily_block_h:.1f} block hours a day — the roster assigns "
+          f"exclusively, and a rotation is two ops")
+    check("the requirement is the exact inverse of the frequency ceiling",
+          _requirement_inverts(world, players, me, ord_),
+          "hire what the planner asks for and the schedule it was hired for "
+          "is exactly flyable")
+    unrated = by_id["B789"].crew
+    check("a type the carrier is not rated for shows the full hiring gap",
+          unrated.cockpit_gap == unrated.cockpit_needed
+          and unrated.cockpit_have == 0,
+          f"B789: {unrated.cockpit_gap} cockpit crews to hire, "
+          f"{unrated.cabin_have} cabin already universal")
+
+    # --- maintenance runs the ENGINE's predicate ---
+    mx = by_id["A321"].maintenance
+    check("with no hubs declared, the legacy path is reported as such",
+          mx.ok and "no hubs" in mx.reason,
+          mx.reason)
+    w2, e2 = golden_world()
+    p2 = e2.players[0]
+    actions.set_hub(w2, p2, "ORD", True)
+    mx2 = planner.maintenance_plan(w2, p2, actions.airport(w2, "ORD"), a321)
+    check("a rated hub satisfies the check and is named",
+          mx2.ok and mx2.at_iata == "ORD", mx2.reason)
+    check("the required class is the heaviest check in the type's program",
+          mx2.required_class == "WIDEBODY",
+          "every type's D check needs a widebody-class facility "
+          "(databuilder._program), so this reads WIDEBODY for a narrowbody too")
+
+    # THE UNRATED-HUB BRANCH IS UNREACHABLE ON THE COMMITTED CORPUS, because
+    # routedata sets has_maintenance_facility and facility_max_class from the
+    # SAME test (hub_rank <= 40 -> WIDEBODY). Every field that can do
+    # maintenance can do any check. Rather than claim the branch is tested by
+    # a corpus that cannot reach it, it is reached deliberately here.
+    nb = [a for a in world.repo.all(AirportSpec)
+          if a.has_maintenance_facility
+          and a.facility_max_class is not None
+          and a.facility_max_class.value < PlaneClass.WIDEBODY.value]
+    check("no corpus airport is maintenance-capable but under-rated",
+          not nb,
+          "routedata derives both fields from hub_rank <= 40, so the "
+          "'your hub cannot do this check' branch cannot arise from the data")
+    w3, e3 = golden_world()
+    p3 = e3.players[0]
+    actions.set_hub(w3, p3, "ORD", True)
+    downgraded = dataclasses.replace(
+        w3.repo.get(AirportSpec, "ORD"),
+        facility_max_class=PlaneClass.NARROWBODY)
+    w3.repo._tables[AirportSpec]["ORD"] = downgraded
+    mx3 = planner.maintenance_plan(w3, p3, actions.airport(w3, "ORD"), a321)
+    check("an under-rated hub is caught, with the fee of the nearest that "
+          "is not", not mx3.ok and mx3.candidate_iata
+          and mx3.candidate_fee_per_day > 0, mx3.reason)
+
+
+def _requirement_inverts(world, players, me, origin) -> bool:
+    """
+    Hiring exactly what `crew_requirement` asks for must make
+    `crew_frequency` permit exactly the schedule it was sized for. If these
+    disagree the planner tells a player to hire a number that then cannot fly.
+    """
+    from airlinesim import planner
+    for spec_id, freq in (("A321", 3), ("A320", 5), ("E175", 2)):
+        spec = world.repo.get(AircraftSpec, spec_id)
+        block = __import__("airlinesim.route", fromlist=["x"]).block_hours(
+            1400.0, spec.cruise_speed_kmh)
+        req = planner.crew_requirement(world, me, origin, spec,
+                                       block_h=block, frequency=freq)
+        allowed, _d = planner.crew_frequency(1400.0, spec.cruise_speed_kmh,
+                                             req.cockpit_needed,
+                                             req.cabin_needed)
+        # crew_frequency sizes ONE op; the requirement covers the rotation's
+        # two, so the pool it asks for must cover at least the leg frequency.
+        if allowed + 1e-9 < freq:
+            return False
+    return True
+
+
 def check_delivery():
     """
     THE PLANNER IS ONLY DELIVERED IF A PLAYER CAN REACH IT.
@@ -1469,6 +1602,7 @@ def main():
     check_quote()
     check_pair_plan()
     check_dest_plan()
+    check_resourcing()
     check_lock_discipline()
     check_delivery()
     passed = sum(1 for _, ok in CHECKS if ok)

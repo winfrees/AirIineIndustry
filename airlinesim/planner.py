@@ -51,11 +51,20 @@ WHAT IS NOT MODELLED, and must not be quietly added
   ownership only where an aeroplane must be ACQUIRED is deliberate — a tail
   already owned is being paid for either way, so putting it to work costs
   nothing extra.
-- **Still outside both lines:** payroll for crews that did not fly, and hub
-  overhead. The crew figure is a flat per-block-hour estimate rather than a
-  headcount; phase 4 of `docs/route-planning-design.md` replaces it. So a
-  network of individually "profitable" routes can still burn cash, exactly as
-  CLAUDE.md warns about `RouteOp.last_profit`.
+- **Flight crew is a VARIABLE cost, and an earlier version of this note said
+  otherwise.** `OperationsSubsystem` bills cockpit + cabin only for the hours
+  FLOWN, and `FinanceSubsystem`'s standing payroll covers ground, baggage,
+  meteorology and maintenance staff — NOT flight crew. So "payroll for crews
+  that did not fly" is not missing from the absorbed line; it is not a cost
+  this engine has. What was genuinely wrong is fixed: the player's forecast
+  now charges the carrier's OWN crews at their real rate on CRUISE hours,
+  which is what the ledger charges. The AI keeps its flat $680/block-hour —
+  its goldens pin it, and over-stating a cost is the safe direction.
+- **Still outside both lines: hub overhead.** `hub_fee_per_day` is charged per
+  hub per day whatever flies, so it belongs to a network rather than to a leg.
+  Splitting it across routes would need a policy for how many routes share a
+  hub, and any such split is arbitrary — so it is reported as a PLAN-LEVEL
+  cost by `maintenance_plan` and never amortised into a per-route margin.
 """
 from __future__ import annotations
 
@@ -193,7 +202,8 @@ def fuel_price_at(world, iata: str, default: float = 0.9) -> float:
 
 
 def player_policy(world, origin, *, service_tier: int = 2,
-                  fare_vs_reference: float = 1.0) -> "ForecastPolicy":
+                  fare_vs_reference: float = 1.0, player=None,
+                  aircraft_spec=None) -> "ForecastPolicy":
     """
     A human carrier's forecasting assumptions.
 
@@ -202,16 +212,23 @@ def player_policy(world, origin, *, service_tier: int = 2,
     Fuel is priced at the origin's own base rate rather than the AI's flat
     assumption.
 
-    The crew line is still the flat per-block-hour stand-in. Phase 4 of
-    `docs/route-planning-design.md` replaces it with a real crew requirement;
-    until then any surface showing this must call the bottom line a
-    CONTRIBUTION MARGIN, because that is what it is.
+    CREW IS PRICED THE WAY THE LEDGER PRICES IT: the carrier's own rated crews
+    at this base where it has them, at the market rate where it does not, and
+    charged on CRUISE hours. Given `player` and `aircraft_spec` the rate is
+    read off the real crews; without them it falls back to the standard
+    complement, still on cruise hours.
     """
+    rate = AI_CREW_COST_PER_BLOCK_HOUR
+    if player is not None and aircraft_spec is not None:
+        ch, cb, _src = crew_rates(world, player, origin.iata, aircraft_spec)
+        rate = ch + cb
     return ForecastPolicy(
         service_tier=service_tier,
         fare_vs_reference=fare_vs_reference,
         fit=1.0,
         fuel_price_per_l=fuel_price_at(world, origin.iata),
+        crew_cost_per_block_hour=rate,
+        crew_hours_basis="cruise",
     )
 
 
@@ -509,6 +526,14 @@ class ForecastPolicy:
     max_stage_km: float = INF
     fuel_price_per_l: float = 0.9
     crew_cost_per_block_hour: float = AI_CREW_COST_PER_BLOCK_HOUR
+    # WHICH HOURS the crew rate is charged on. The engine bills flight crew
+    # on CRUISE hours (`fh = distance / cruise_speed x frequency` in
+    # OperationsSubsystem) — taxi, climb and descent are free on the crew's
+    # clock. The AI has always charged BLOCK hours, which over-states crew by
+    # $408 a departure; its goldens pin that and over-stating a cost is the
+    # safe direction for a rival, so it keeps "block". The player's forecast
+    # uses "cruise" and matches the ledger.
+    crew_hours_basis: str = "block"      # "block" | "cruise"
     cost_basis: CostBasis = CostBasis.CONTRIBUTION
 
 
@@ -769,7 +794,15 @@ def evaluate_route(world, players, origin, dest, aircraft_spec, frequency: int,
 
     bh = leg_h * freq
     fuel = spec.fuel_burn_lph * bh * policy.fuel_price_per_l
-    crew = policy.crew_cost_per_block_hour * bh
+    # Crew on cruise hours where the caller asked for it, because that is what
+    # OperationsSubsystem bills. Fuel and maintenance stay on block hours: the
+    # engine accrues maintenance on `fh` too, but its fuel claim is also cruise
+    # -based, and moving either would change the AI's numbers. Left as-is and
+    # flagged rather than quietly "corrected" — see the phase 4 notes.
+    crew_h = (dist / spec.cruise_speed_kmh * freq
+              if policy.crew_hours_basis == "cruise" and spec.cruise_speed_kmh > 0
+              else bh)
+    crew = policy.crew_cost_per_block_hour * crew_h
     maint = spec.maint_cost_per_hour * bh
 
     landing = gate = amenities = baggage = 0.0
@@ -844,6 +877,8 @@ class FleetOption:
     tails: tuple                # TailOption, best source first
     quotes: tuple               # AcquisitionQuote, one per method
     source: str                 # the best way to fly it today
+    crew: "CrewRequirement" = None
+    maintenance: "MaintenancePlan" = None
 
     @property
     def open_route_ok(self) -> bool:
@@ -895,6 +930,9 @@ class FleetOption:
             "suitability": list(self.suitability),
             "tails": [t.to_json() for t in self.tails],
             "quotes": [q.to_json() for q in self.quotes],
+            "crew": self.crew.to_json() if self.crew else None,
+            "maintenance": (self.maintenance.to_json()
+                            if self.maintenance else None),
         }
 
 
@@ -987,16 +1025,26 @@ def plan_pair(world, players, player, origin, dest, *, service_tier: int = 2,
     hub overhead sit outside it. Any surface showing this number must say so.
     """
     from airlinesim.actions import METHOD_BY_NAME, TERMS_BY_METHOD, bank_for
-    policy = player_policy(world, origin, service_tier=service_tier,
-                           fare_vs_reference=fare_vs_reference)
     bank = bank or bank_for(world)
     demand, ref_fare = market_estimate(world, origin, dest)
-    share = expected_share(world, players, origin, dest, policy)
     dist = haversine(origin.lat, origin.lon, dest.lat, dest.lon)
     route_spec = route_spec_for(world, origin, dest)
+    # Share does not depend on the aircraft, only on the offer's service tier
+    # and who is already in the market — computed once, off a policy with no
+    # type attached.
+    share = expected_share(world, players, origin, dest,
+                           player_policy(world, origin,
+                                         service_tier=service_tier,
+                                         fare_vs_reference=fare_vs_reference))
 
     options = []
     for spec in world.repo.all(AircraftSpec):
+        # The crew RATE is per type — a carrier's A320 pilots are not rated
+        # for a 787 and the market rate applies instead — so the policy is
+        # built per option rather than once for the pair.
+        policy = player_policy(world, origin, service_tier=service_tier,
+                               fare_vs_reference=fare_vs_reference,
+                               player=player, aircraft_spec=spec)
         fplan = frequency_plan(world, players, origin, dest, spec,
                                demand_per_day=demand, share=share,
                                player=player)
@@ -1038,7 +1086,11 @@ def plan_pair(world, players, player, origin, dest, *, service_tier: int = 2,
             takeoff_runway_m=spec.takeoff_runway_m,
             forecast=forecast, frequency=fplan,
             suitability=suitability_reasons(world, origin, dest, spec),
-            tails=tails, quotes=quotes, source=source))
+            tails=tails, quotes=quotes, source=source,
+            crew=crew_requirement(world, player, origin, spec,
+                                  block_h=forecast.block_h,
+                                  frequency=max(1, fplan.rotations)),
+            maintenance=maintenance_plan(world, player, origin, spec)))
 
     # Operable options first, then by what they earn. Types that cannot fly
     # the pair sort last but are still present, with their reasons.
@@ -1137,6 +1189,8 @@ class Candidate:
     suitability: tuple
     operable: bool
     alternatives: int          # how many other types could also fly it
+    crew: "CrewRequirement" = None
+    maintenance: "MaintenancePlan" = None
 
     def to_json(self) -> dict:
         return {"dest": self.dest, "dest_name": self.dest_name,
@@ -1146,7 +1200,10 @@ class Candidate:
                 "alternatives": self.alternatives,
                 "suitability": list(self.suitability),
                 "forecast": self.forecast.to_json(),
-                "frequency": self.frequency.to_json()}
+                "frequency": self.frequency.to_json(),
+                "crew": self.crew.to_json() if self.crew else None,
+                "maintenance": (self.maintenance.to_json()
+                                if self.maintenance else None)}
 
 
 @dataclass(frozen=True)
@@ -1211,18 +1268,28 @@ def plan_from(world, players, player, *, origin=None, tail_number: str = "",
 
     rank_by = rank_by if rank_by in RANK_KEYS else DEFAULT_RANK
     rank_label, rank_fn = RANK_KEYS[rank_by]
+    # Share needs a policy but not a type; the per-type policies differ only
+    # in their crew rate, which does not enter the share.
     policy = player_policy(world, origin, service_tier=service_tier,
                            fare_vs_reference=fare_vs_reference)
 
     # Fixed by the tail if there is one; otherwise the whole catalog.
     specs = ([plane.spec] if plane is not None
              else sorted(world.repo.all(AircraftSpec), key=lambda s: s.spec_id))
-    # Lease rate per type, once, rather than per destination.
-    lease_daily = {}
-    for s in specs:
-        q = bank.quote(player, s, METHOD_BY_NAME["LEASE"],
+    # EVERYTHING THAT DOES NOT DEPEND ON THE DESTINATION, once per type
+    # rather than once per (type, destination): the lease rate, the crew rate
+    # and headcount at this base, the maintenance verdict, and the forecast
+    # policy. Left inside the loop this was 4,800 walks of the crew list.
+    lease_daily, policies, mx = {}, {}, {}
+    for sp in specs:
+        q = bank.quote(player, sp, METHOD_BY_NAME["LEASE"],
                        TERMS_BY_METHOD[METHOD_BY_NAME["LEASE"]])
-        lease_daily[s.spec_id] = q.daily
+        lease_daily[sp.spec_id] = q.daily
+        policies[sp.spec_id] = player_policy(
+            world, origin, service_tier=service_tier,
+            fare_vs_reference=fare_vs_reference, player=player,
+            aircraft_spec=sp)
+        mx[sp.spec_id] = maintenance_plan(world, player, origin, sp)
 
     candidates, scanned, skipped_tier = [], 0, 0
     for dest in sorted(world.repo.all(AirportSpec), key=lambda a: a.iata):
@@ -1248,7 +1315,8 @@ def plan_from(world, players, player, *, origin=None, tail_number: str = "",
                                    demand_per_day=demand, share=share,
                                    player=player)
             fc = evaluate_route(world, players, origin, dest, spec,
-                                max(1, fplan.rotations), policy,
+                                max(1, fplan.rotations),
+                                policies[spec.spec_id],
                                 ownership_per_day=ownership)
             suit = suitability_reasons(world, origin, dest, spec)
             ok = (fc.viable and fc.feasible and not suit
@@ -1260,7 +1328,11 @@ def plan_from(world, players, player, *, origin=None, tail_number: str = "",
                 lat=dest.lat, lon=dest.lon, spec_id=spec.spec_id,
                 source=(SOURCE_IDLE if owned else SOURCE_ACQUIRE),
                 forecast=fc, frequency=fplan, suitability=suit, operable=ok,
-                alternatives=0)
+                alternatives=0,
+                crew=crew_requirement(world, player, origin, spec,
+                                      block_h=fc.block_h,
+                                      frequency=max(1, fplan.rotations)),
+                maintenance=mx[spec.spec_id])
             # Prefer a workable option over a better-looking impossible one.
             if best is None or (ok, -rank_fn(cand)) > (best.operable,
                                                        -rank_fn(best)):
@@ -1300,3 +1372,210 @@ def plan_from(world, players, player, *, origin=None, tail_number: str = "",
         origin=origin.iata, tail_number=(plane.tail_number if plane else ""),
         rank_by=rank_by, rank_label=rank_label, scanned=scanned,
         measured_only=measured_only, candidates=shown, notes=tuple(notes))
+
+
+# ============================================================
+# PHASE 4 — CREW, MAINTENANCE, BASING
+# ============================================================
+#
+# WHAT THE ENGINE ACTUALLY CHARGES FOR CREW, because the plan for this phase
+# was written on a wrong assumption and the UI shipped the wrong caveat:
+#
+#   OperationsSubsystem charges (cockpit.hourly_cost + cabin.hourly_cost) x fh
+#   for the hours FLOWN, where fh = distance / cruise_speed x frequency —
+#   CRUISE hours, not block hours.
+#
+#   FinanceSubsystem's standing payroll covers GROUND, BAGGAGE, METEOROLOGY
+#   and MAINTENANCE crews only. Cockpit and cabin crews are NOT on it.
+#
+# So flight crew in this engine is a PURELY VARIABLE cost: a crew that does
+# not fly costs nothing. "Payroll for crews that did not fly" is not an
+# omission from the absorbed line — it is not a cost that exists. What was
+# genuinely wrong is that the forecast charged a flat $680/hour on BLOCK
+# hours; the engine charges the actual crews' rate on CRUISE hours, which is
+# $408 per departure less. The AI keeps the flat block-hour figure (its
+# goldens pin it, and over-estimating a cost is the safe direction for a
+# rival); the player's forecast now matches the ledger.
+
+# What one departure needs in the air. Matches the complement `databuilder`
+# and `builder` both hire, and the composition behind the AI's flat rate
+# (2 x $220 + 4 x $60 = $680/h).
+COCKPIT_PER_FLIGHT = 2
+CABIN_PER_FLIGHT = 4
+MARKET_COCKPIT_RATE = 220.0    # $ per member-hour
+MARKET_CABIN_RATE = 60.0
+
+
+def crew_rates(world, player, iata: str, aircraft_spec) -> tuple:
+    """
+    ``(cockpit $/h, cabin $/h, source)`` for a flight out of this station.
+
+    Reads the carrier's OWN rated crews where it has them, because that is
+    what `OperationsSubsystem` will actually bill; falls back to the market
+    rate a new hire would cost. A carrier that hired cheap gets its cheap
+    number, which is the point of reading it rather than assuming it.
+    """
+    from airlinesim.crew import _all_crews, crew_is_type_rated
+    from airlinesim.engine import CrewType
+    cockpit, cabin = [], []
+    for c in _all_crews(player):
+        if not crew_is_type_rated(c, aircraft_spec):
+            continue
+        if (c.home_iata or c.location_iata) != iata:
+            continue
+        if c.spec.crew_type is CrewType.COCKPIT:
+            cockpit.append(c.hourly_cost())
+        elif c.spec.crew_type is CrewType.CABIN:
+            cabin.append(c.hourly_cost())
+    if cockpit and cabin:
+        return (sum(cockpit) / len(cockpit), sum(cabin) / len(cabin),
+                "your own crews at this base")
+    return (MARKET_COCKPIT_RATE * COCKPIT_PER_FLIGHT,
+            MARKET_CABIN_RATE * CABIN_PER_FLIGHT,
+            "market rate — you have no rated crew here yet")
+
+
+@dataclass(frozen=True)
+class CrewRequirement:
+    """What crewing this schedule takes, against what the carrier has."""
+    base: str
+    spec_id: str
+    cockpit_needed: int
+    cabin_needed: int
+    cockpit_have: int
+    cabin_have: int
+    cockpit_hourly: float
+    cabin_hourly: float
+    rate_source: str
+    daily_block_h: float
+
+    @property
+    def cockpit_gap(self) -> int:
+        return max(0, self.cockpit_needed - self.cockpit_have)
+
+    @property
+    def cabin_gap(self) -> int:
+        return max(0, self.cabin_needed - self.cabin_have)
+
+    @property
+    def short(self) -> bool:
+        return bool(self.cockpit_gap or self.cabin_gap)
+
+    def to_json(self) -> dict:
+        return {"base": self.base, "spec_id": self.spec_id,
+                "cockpit_needed": self.cockpit_needed,
+                "cabin_needed": self.cabin_needed,
+                "cockpit_have": self.cockpit_have,
+                "cabin_have": self.cabin_have,
+                "cockpit_gap": self.cockpit_gap, "cabin_gap": self.cabin_gap,
+                "short": self.short,
+                "cockpit_hourly": round(self.cockpit_hourly, 2),
+                "cabin_hourly": round(self.cabin_hourly, 2),
+                "rate_source": self.rate_source,
+                "daily_block_h": round(self.daily_block_h, 2)}
+
+
+def crew_requirement(world, player, origin, aircraft_spec, *, block_h: float,
+                     frequency: int, rotation: bool = True,
+                     limits=DEFAULT_DUTY_LIMITS) -> CrewRequirement:
+    """
+    Crews needed to fly this schedule out of this base, and the gap to hire.
+
+    THE EXACT INVERSE of `crew_frequency`, and the same arithmetic as
+    `ai._crew_target`: a schedule of D daily block hours needs
+    ``D / max_daily_flight_hours x CREW_DEPTH`` crews, rounded up. If the two
+    ever disagree, the planner tells a player to hire a number that then
+    cannot fly the schedule it was hired for.
+
+    A rotation is TWO route ops in the engine — the outbound and the return —
+    and the roster assigns exclusively, so it can never be flown by fewer
+    than two crews of each kind however short the legs are.
+    """
+    import math as _math
+    ops = 2 if rotation else 1
+    daily_bh = block_h * max(0, frequency) * ops
+    per_crew = max(1.0, limits.max_daily_flight_hours)
+    need = max(ops, _math.ceil(daily_bh / per_crew * CREW_DEPTH))
+    have_cockpit, have_cabin = available_crews(player, origin.iata,
+                                               aircraft_spec)
+    ch, cb, src = crew_rates(world, player, origin.iata, aircraft_spec)
+    return CrewRequirement(
+        base=origin.iata, spec_id=aircraft_spec.spec_id,
+        cockpit_needed=need, cabin_needed=need,
+        cockpit_have=have_cockpit, cabin_have=have_cabin,
+        cockpit_hourly=ch, cabin_hourly=cb, rate_source=src,
+        daily_block_h=daily_bh)
+
+
+@dataclass(frozen=True)
+class MaintenancePlan:
+    """Where this type could be checked, and what that costs."""
+    spec_id: str
+    required_class: str
+    ok: bool
+    at_iata: str                # the hub that can do it, or "" if none can
+    candidate_iata: str         # nearest rated field that is NOT yet a hub
+    candidate_fee_per_day: float
+    reason: str
+
+    def to_json(self) -> dict:
+        return {"spec_id": self.spec_id, "required_class": self.required_class,
+                "ok": self.ok, "at_iata": self.at_iata,
+                "candidate_iata": self.candidate_iata,
+                "candidate_fee_per_day": round(self.candidate_fee_per_day, 2),
+                "reason": self.reason}
+
+
+def maintenance_plan(world, player, origin, aircraft_spec) -> MaintenancePlan:
+    """
+    Can this carrier actually maintain this type, and where?
+
+    Runs the SAME predicate as `MaintenanceEngine._find_facility`: the field
+    must be a DECLARED HUB of the owner, have a maintenance facility, and be
+    rated for the heaviest check in the type's program. Get this wrong and the
+    aeroplane flies for weeks and then cannot be checked — the same quiet,
+    delayed failure `set_hub` refuses outright when you close your last hub.
+
+    A carrier with NO hubs at all is the engine's legacy path, where any rated
+    field will do. That is reported as such rather than as a pass, because the
+    moment they declare their first hub it stops being true.
+    """
+    from airlinesim.engine import AirportSpec
+    program = getattr(aircraft_spec, "maint_program", None)
+    checks = getattr(program, "checks", ()) if program else ()
+    if not checks:
+        return MaintenancePlan(aircraft_spec.spec_id, "none", True, "", "",
+                               0.0, "this type has no maintenance program")
+    # PlaneClass is an auto() enum and not orderable; its `.value` is the
+    # capability ladder MaintenanceEngine._find_facility compares on.
+    heaviest = max((c.min_facility_class for c in checks),
+                   key=lambda pc: pc.value)
+    rated = [ap for ap in world.repo.all(AirportSpec)
+             if ap.has_maintenance_facility and ap.facility_max_class is not None
+             and ap.facility_max_class.value >= heaviest.value]
+    hubs = list(getattr(player, "hub_iatas", ()))
+    usable = [ap for ap in rated if ap.iata in hubs]
+    if usable:
+        return MaintenancePlan(
+            aircraft_spec.spec_id, heaviest.name, True, usable[0].iata, "",
+            0.0, f"{usable[0].iata} is your hub and is rated for a "
+                 f"{heaviest.name.lower()} check")
+    if not hubs:
+        return MaintenancePlan(
+            aircraft_spec.spec_id, heaviest.name, True, "", "", 0.0,
+            "you have declared no hubs, so the engine's legacy path lets any "
+            "rated field do the work — this stops being true the moment you "
+            "declare your first hub")
+    if not rated:
+        return MaintenancePlan(
+            aircraft_spec.spec_id, heaviest.name, False, "", "", 0.0,
+            f"no airport in this world is rated for a {heaviest.name.lower()} "
+            f"check — this type cannot be maintained here at all")
+    near = min(rated, key=lambda ap: (haversine(origin.lat, origin.lon,
+                                                ap.lat, ap.lon), ap.iata))
+    return MaintenancePlan(
+        aircraft_spec.spec_id, heaviest.name, False, "", near.iata,
+        near.hub_fee_per_day,
+        f"none of your hubs ({', '.join(hubs)}) is rated for a "
+        f"{heaviest.name.lower()} check. Nearest that is: {near.iata}, "
+        f"${near.hub_fee_per_day:,.0f}/day to run as a hub")
