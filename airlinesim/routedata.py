@@ -212,18 +212,24 @@ class RouteDataProvider:
         if not (os.path.exists(rp) and os.path.exists(ap)):
             return None
 
+        # UTF-8 EXPLICITLY, not the locale's preferred encoding. The
+        # committed snapshot is UTF-8 and carries en dashes in airport names
+        # ("Minneapolis-Saint Paul" is U+2013), so on any machine whose locale
+        # is not UTF-8 those three bytes decoded as three Latin-1 characters
+        # and the name reached the GUI as mojibake. The same class of bug the
+        # Windows launchers set PYTHONUTF8=1 for.
         def read(path):
-            with gzip.open(path, "rt", newline="") as fh:
+            with gzip.open(path, "rt", newline="", encoding="utf-8") as fh:
                 return list(csv.DictReader(fh))
 
         gravity, manifest = {}, {}
         gj = os.path.join(directory, "gravity.json")
         mj = os.path.join(directory, "MANIFEST.json")
         if os.path.exists(gj):
-            with open(gj) as fh:
+            with open(gj, encoding="utf-8") as fh:
                 gravity = json.load(fh)
         if os.path.exists(mj):
-            with open(mj) as fh:
+            with open(mj, encoding="utf-8") as fh:
                 manifest = json.load(fh)
         return cls.from_tables(read(rp), read(ap), gravity, manifest)
 
@@ -250,14 +256,34 @@ class RouteDataProvider:
     # ---- the three tiers --------------------------------------------
 
     def observation(self, origin: str, dest: str) -> RouteObservation:
+        """
+        What the corpus says about one directional pair.
+
+        MEMOIZED. `_comparable` falls through to `_neighbour_season`, which
+        scans the whole route table to average the seasonal shape of an
+        airport's neighbours — cheap once, and the dominant cost of anything
+        that sweeps a map. The route planner's 300-destination scan spent 3.9
+        of its 4.9 seconds in here before this cache existed.
+
+        Safe for the same reason `route_spec`'s cache is: a pure function of
+        committed, immutable corpus data returning a frozen dataclass.
+        """
+        cache = self.__dict__.setdefault("_obs_cache", {})
+        hit = cache.get((origin, dest))
+        if hit is not None:
+            return hit
         row = self._routes.get((origin, dest))
         if row is not None:
-            return self._exact(row)
-        est = self._comparable(origin, dest)
-        if est is not None:
-            return est
-        return RouteObservation(origin, dest, 0.0, 0.0, DataTier.SYNTHETIC,
-                                vintage=self.vintage, demand_basis="none")
+            obs = self._exact(row)
+        else:
+            obs = self._comparable(origin, dest)
+            if obs is None:
+                obs = RouteObservation(origin, dest, 0.0, 0.0,
+                                       DataTier.SYNTHETIC,
+                                       vintage=self.vintage,
+                                       demand_basis="none")
+        cache[(origin, dest)] = obs
+        return obs
 
     def _exact(self, row: dict) -> RouteObservation:
         monthly = tuple(_num(row.get(f"m{i}"), 1.0) for i in range(1, 13))
@@ -396,6 +422,13 @@ class RouteDataProvider:
         Build a RouteSpec for the engine. Tier 1/2 use measured or estimated
         demand and the fitted seasonal shape; Tier 3 reproduces today's defaults.
 
+        MEMOIZED, because the route planner scans every destination out of an
+        airport and this is the whole cost of that scan: 300 pairs measured at
+        0.19 s cold and effectively nothing warm. Safe to cache because it is
+        a pure function of committed, immutable corpus data returning a frozen
+        dataclass — the provider is loaded once and never mutated. Route
+        opening and the AI's candidate search get the same speedup.
+
         The traveler-segment mix uses the MEASURED connecting share when DB1B
         coupons are loaded, splitting the remaining non-connecting demand between
         business and leisure in the caller's ratio. Without it, the caller's
@@ -406,6 +439,19 @@ class RouteDataProvider:
         neither source carries trip purpose. Business-vs-leisure remains a
         split of what's left over, not a measurement.
         """
+        key = (origin, dest, business_frac, leisure_frac, plane_class, spec_id)
+        cache = self.__dict__.setdefault("_spec_cache", {})
+        if key in cache:
+            return cache[key]
+        spec = self._build_route_spec(origin, dest, business_frac=business_frac,
+                                      leisure_frac=leisure_frac,
+                                      plane_class=plane_class, spec_id=spec_id)
+        cache[key] = spec
+        return spec
+
+    def _build_route_spec(self, origin: str, dest: str, *, business_frac=0.25,
+                          leisure_frac=0.55, plane_class=None, spec_id=None):
+        """The uncached body of `route_spec`. Call that, not this."""
         from airlinesim.engine import RouteSpec, PlaneClass
         from airlinesim.route import (default_segments, EquipmentRequirements,
                                       CrewRequirements)

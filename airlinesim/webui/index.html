@@ -98,8 +98,21 @@
       <input name="origin" id="planOrigin" list="airportsDL" placeholder="from (IATA)"
              size="6" maxlength="4" autocomplete="off" required>
       <span class="arrow">&rarr;</span>
-      <input name="dest" id="planDest" list="airportsDL" placeholder="to (IATA)"
-             size="6" maxlength="4" autocomplete="off" required>
+      <input name="dest" id="planDest" list="airportsDL"
+             placeholder="to (blank = rank all)"
+             size="16" maxlength="4" autocomplete="off"
+             title="leave blank to rank every destination reachable from the origin">
+      <label>aircraft
+        <select name="tail_number" id="planTail">
+          <option value="">any / to acquire</option>
+        </select>
+      </label>
+      <label>rank
+        <select name="rank_by" id="planRank"></select>
+      </label>
+      <label title="drop pairs whose demand is a fitted estimate rather than a BTS measurement">
+        <input type="checkbox" name="measured_only" id="planMeasured"> measured only
+      </label>
       <label>service
         <select name="service_tier" id="planTier">
           <option value="1">1 — basic</option>

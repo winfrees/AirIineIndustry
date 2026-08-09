@@ -50,7 +50,7 @@ def _magnetic() -> dict:
     year = now.year + (now.timetuple().tm_yday - 1) / 365.25
     lat, lon = _MAG_REF
     try:
-        bbox = json.loads(BASEMAP_PATH.read_text())["bbox"] \
+        bbox = json.loads(BASEMAP_PATH.read_text(encoding="utf-8"))["bbox"] \
             if BASEMAP_PATH.is_file() else [-125.0, 24.0, -66.5, 50.0]
         lo, hi = geomag.declination_range(bbox, year)
         return {
@@ -301,6 +301,8 @@ def make_handler(hub: Hub):
                 self._send_json(self._cabin_fit(urlparse(self.path).query))
             elif path == "/api/plan":
                 self._send_json(self._route_plan(urlparse(self.path).query))
+            elif path == "/api/plan/from":
+                self._send_json(self._dest_plan(urlparse(self.path).query))
             elif path == "/api/events":
                 self._serve_sse()
             elif path == "/api/explore/tree":
@@ -349,6 +351,9 @@ def make_handler(hub: Hub):
         # just takes its default and nothing complains. `scenario_planner`
         # asserts each of these round-trips.
         PLAN_PARAMS = ("origin", "dest", "service_tier", "fare_vs_reference")
+        PLAN_FROM_PARAMS = ("origin", "tail_number", "rank_by", "limit",
+                            "measured_only", "service_tier",
+                            "fare_vs_reference")
 
         def _route_plan(self, query: str) -> dict:
             """
@@ -370,6 +375,32 @@ def make_handler(hub: Hub):
             try:
                 return hub.session.plan_pair(
                     origin, dest,
+                    service_tier=int(one("service_tier", 2)),
+                    fare_vs_reference=float(one("fare_vs_reference", 1.0)))
+            except (TypeError, ValueError) as e:
+                return {"error": str(e)}
+
+        def _dest_plan(self, query: str) -> dict:
+            """
+            GET /api/plan/from?origin=ORD&rank_by=absorbed — every destination
+            reachable from a station (or from one tail), ranked.
+
+            A SEPARATE route from /api/plan rather than "the same one with no
+            dest": two questions, two endpoints, and no ambiguity about
+            whether a missing parameter meant a different mode or a mistake.
+            """
+            qs = parse_qs(query)
+
+            def one(name, default=""):
+                vals = qs.get(name) or []
+                return vals[0] if vals and vals[0] != "" else default
+
+            try:
+                return hub.session.plan_from(
+                    origin=one("origin"), tail_number=one("tail_number"),
+                    rank_by=one("rank_by", "absorbed"),
+                    limit=int(one("limit", 25)),
+                    measured_only=one("measured_only", "") in ("1", "true", "on"),
                     service_tier=int(one("service_tier", 2)),
                     fare_vs_reference=float(one("fare_vs_reference", 1.0)))
             except (TypeError, ValueError) as e:

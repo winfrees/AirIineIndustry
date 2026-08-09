@@ -837,6 +837,47 @@ class GameSession:
                                  service_tier=tier,
                                  fare_vs_reference=ratio).to_json()
 
+    def plan_from(self, origin: str = "", tail_number: str = "",
+                  rank_by: str = "absorbed", limit: int = 25,
+                  measured_only: bool = False, service_tier: int = 2,
+                  fare_vs_reference: float = 1.0) -> dict:
+        """
+        "Where should this aeroplane fly?" / "what should I fly out of here?"
+
+        Read-only. The scan touches every airport in the corpus, so the lock
+        is taken only to resolve the origin and copy the player list — holding
+        it across the scan would stall the tick loop, the command API and the
+        SSE stream together. The result is a forecast as of the moment it
+        started, which is what a forecast is.
+        """
+        from airlinesim import planner
+        with self.lock:
+            me = self._human()
+            players = list(self.engine.players)
+            world = self.world
+            ap = None
+            code = (origin or "").strip().upper()
+            if code:
+                ap = actions.airport(world, code)
+                if ap is None:
+                    return {"error": f"unknown airport {code}"}
+            tail = (tail_number or "").strip()
+            if not ap and not tail:
+                return {"error": "origin or tail_number is required"}
+        try:
+            return planner.plan_from(
+                world, players, me, origin=ap, tail_number=tail,
+                rank_by=str(rank_by or "absorbed"),
+                limit=max(1, min(100, int(limit))),
+                measured_only=bool(measured_only),
+                service_tier=max(1, min(3, int(service_tier))),
+                fare_vs_reference=max(0.1, min(5.0, float(fare_vs_reference)))
+            ).to_json()
+        except KeyError as e:
+            return {"error": str(e).strip("'\"")}
+        except (TypeError, ValueError) as e:
+            return {"error": str(e)}
+
     # -- snapshot projection (JSON-safe read model) ----------------------
     def snapshot(self) -> dict:
         with self.lock:

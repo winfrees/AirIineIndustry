@@ -1060,6 +1060,200 @@ def _ownership_is_lease_rate(options) -> bool:
     return True
 
 
+# ============================================================
+# PHASE 3 — Q3, destination ranking
+# ============================================================
+
+# What a full scan out of one airport is allowed to cost. The scan runs
+# OUTSIDE GameSession.lock (see GameSession.plan_from), but a budget still
+# matters: this is a synchronous HTTP request a player is waiting on.
+SCAN_BUDGET_S = 2.0
+
+
+def check_dest_plan():
+    """
+    "Where should this aeroplane fly?" over the whole corpus.
+
+    The two things that decide whether this is usable: it must be fast enough
+    to be a synchronous request, and it must never offer a plan the carrier
+    cannot execute.
+    """
+    import time
+
+    from airlinesim import planner
+    print("\n=== DESTINATION RANKING ===")
+    world, engine = golden_world()
+    players = list(engine.players)
+    me = players[0]
+    ord_ = actions.airport(world, "ORD")
+
+    t0 = time.time()
+    plan = planner.plan_from(world, players, me, origin=ord_, limit=25)
+    cold = time.time() - t0
+    t0 = time.time()
+    planner.plan_from(world, players, me, origin=ord_, limit=25)
+    warm = time.time() - t0
+    check("a full-corpus scan fits the interactive budget",
+          cold < SCAN_BUDGET_S,
+          f"{plan.scanned} destinations x {len(world.repo.all(AircraftSpec))} "
+          f"types in {cold:.2f}s cold, {warm:.2f}s warm (budget "
+          f"{SCAN_BUDGET_S:.0f}s)")
+    check("every corpus airport is considered",
+          plan.scanned == len(world.repo.all(AirportSpec)) - 1,
+          f"{plan.scanned} of {len(world.repo.all(AirportSpec))} — all but "
+          f"the origin itself")
+    check("the ranking is honoured and operable rows come first",
+          _ranked_ok(plan),
+          f"top: {plan.candidates[0].dest} on {plan.candidates[0].spec_id} at "
+          f"${plan.candidates[0].forecast.absorbed:,.0f}/day")
+    check("every rank key orders as it claims", _every_rank_key_orders(
+        world, players, me, ord_), ", ".join(planner.RANK_KEYS))
+    check("a destination nothing can serve is returned with its reason, "
+          "not dropped",
+          _unservable_explained(world, players, me, ord_))
+
+    # THE TAIL CONSTRAINT. An aircraft is permanently where it was based, so a
+    # plan that starts anywhere else cannot be executed.
+    tail = next(a for a in me.fleet if a.location_iata != "ORD")
+    byTail = planner.plan_from(world, players, me, tail_number=tail.tail_number,
+                               limit=10)
+    check("a tail plans only from its own base",
+          byTail.origin == tail.location_iata
+          and all(c.forecast.origin == tail.location_iata
+                  for c in byTail.candidates),
+          f"{tail.tail_number} is based at {tail.location_iata}, and every "
+          f"candidate starts there — the engine has no ferry flights")
+    check("a tail plans only with its own type",
+          all(c.spec_id == tail.spec.spec_id for c in byTail.candidates),
+          f"{tail.spec.spec_id} throughout")
+    check("owned metal is not charged ownership in its own plan",
+          all(c.forecast.costs.ownership == 0 for c in byTail.candidates))
+    check("an unknown tail is refused by name",
+          _raises_keyerror(lambda: planner.plan_from(
+              world, players, me, tail_number="NOT-A-TAIL")))
+
+    # THE PROVENANCE FILTER. A third of comparable pairs are out by >2x, so
+    # "measured only" is the difference between a ranking and a shortlist.
+    measured = planner.plan_from(world, players, me, origin=ord_, limit=40,
+                                 measured_only=True)
+    check("measured-only drops every fitted estimate",
+          all(c.forecast.data_tier == "exact" for c in measured.candidates)
+          and len(measured.candidates) <= len(plan.candidates) + 15,
+          f"{len(measured.candidates)} measured destinations")
+    check("the unfiltered list warns when it is showing estimates",
+          any("FITTED" in n for n in plan.notes)
+          or all(c.forecast.data_tier == "exact" for c in plan.candidates))
+    check("the censoring caveat travels with every ranking",
+          any("CENSORED" in n for n in plan.notes))
+
+
+def _ranked_ok(plan) -> bool:
+    from airlinesim import planner
+    _label, fn = planner.RANK_KEYS[plan.rank_by]
+    keys = [(not c.operable, fn(c)) for c in plan.candidates]
+    return keys == sorted(keys)
+
+
+def _every_rank_key_orders(world, players, me, origin) -> bool:
+    from airlinesim import planner
+    for key in planner.RANK_KEYS:
+        p = planner.plan_from(world, players, me, origin=origin, rank_by=key,
+                              limit=12)
+        if p.rank_by != key or not _ranked_ok(p):
+            return False
+    return True
+
+
+def _unservable_explained(world, players, me, origin) -> bool:
+    """At least one destination comes back unservable, and says why."""
+    from airlinesim import planner
+    p = planner.plan_from(world, players, me, origin=origin, limit=300)
+    bad = [c for c in p.candidates if not c.operable]
+    return bool(bad) and all(c.suitability or c.forecast.reasons
+                             or c.frequency.rotations == 0 for c in bad)
+
+
+def _raises_keyerror(fn) -> bool:
+    try:
+        fn()
+    except KeyError:
+        return True
+    return False
+
+
+def check_lock_discipline():
+    """
+    THE SCAN MUST NOT RUN UNDER `GameSession.lock`.
+
+    The lock serialises the tick loop, every command and the SSE broadcast. A
+    0.3-second scan held across it is a 0.3-second freeze of the whole game
+    for every connected tab — the same failure mode CLAUDE.md documents for
+    unbounded clock catch-up, arriving by a different door.
+
+    The property is that the lock is not HELD for the scan's duration, NOT
+    that a planner call never waits for it — it takes the lock briefly to
+    resolve the origin and copy the player list, so if the tick loop happens
+    to hold it first, waiting is correct behaviour.
+
+    So it is measured from the other side: run a scan on a background thread
+    and, from this one, repeatedly acquire the lock and record the worst wait.
+    If the scan held the lock throughout, some acquisition would wait roughly
+    the whole scan. That is exactly what the tick loop would experience.
+    """
+    print("\n=== LOCK DISCIPLINE ===")
+    from airlinesim.game import new_game
+    gs = new_game(world="data", hub="ORD")
+    gs.pause()
+    try:
+        gs.plan_from(origin="ORD", limit=5)      # warm the corpus caches
+        for label, call in (
+                ("destination scan",
+                 lambda: gs.plan_from(origin="ORD", limit=25)),
+                ("pair plan", lambda: gs.plan_pair("ORD", "DEN"))):
+            duration, worst, samples = _lock_pressure(gs, call)
+            if samples == 0:
+                # Too brief to sample. Saying so beats a comparison against
+                # zero attempts, which would pass whatever the code did.
+                check(f"the {label} is too brief for lock-holding to matter",
+                      duration < 0.05,
+                      f"finished in {duration * 1000:.0f} ms — under the "
+                      f"sampler's resolution, so the evidence here is the "
+                      f"duration, not a measured wait")
+            else:
+                check(f"the {label} does not hold the session lock while it "
+                      f"runs", worst < duration * 0.5,
+                      f"{duration * 1000:.0f} ms of work, worst lock wait "
+                      f"{worst * 1000:.1f} ms over {samples} attempts — the "
+                      f"tick loop stays responsive throughout")
+    finally:
+        gs.stop()
+
+
+def _lock_pressure(gs, call):
+    """Run `call` on a thread; return (its duration, worst lock wait, tries)."""
+    import threading
+    import time
+    took = {}
+
+    def run():
+        t0 = time.time()
+        call()
+        took["s"] = time.time() - t0
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    worst, tries = 0.0, 0
+    while t.is_alive():
+        t0 = time.time()
+        with gs.lock:
+            pass
+        worst = max(worst, time.time() - t0)
+        tries += 1
+        time.sleep(0.002)
+    t.join(10.0)
+    return took.get("s", 0.0), worst, tries
+
+
 def check_delivery():
     """
     THE PLANNER IS ONLY DELIVERED IF A PLAYER CAN REACH IT.
@@ -1087,7 +1281,10 @@ def check_delivery():
 
     src = (Path(__file__).parent.parent / "server.py").read_text()
     check("GET /api/plan is a route on the server", '"/api/plan"' in src)
-    check("GameSession exposes the planner", hasattr(GameSession, "plan_pair"))
+    check("GET /api/plan/from is a route on the server",
+          '"/api/plan/from"' in src)
+    check("GameSession exposes both planner questions",
+          hasattr(GameSession, "plan_pair") and hasattr(GameSession, "plan_from"))
 
     html = (WEBUI_DIR / "index.html").read_text()
     # Collapsed, because the prose in the dialog is hard-wrapped and a check
@@ -1096,8 +1293,13 @@ def check_delivery():
     js = (WEBUI_DIR / "app.js").read_text()
     check("the GUI has a planner panel and a form",
           'id="plannerCard"' in html and 'id="formPlan"' in html)
-    check("the panel is wired to the endpoint",
-          "/api/plan?" in js and 'getElementById("formPlan")' in js)
+    check("the panel is wired to both endpoints",
+          '"/api/plan"' in js and '"/api/plan/from"' in js
+          and 'getElementById("formPlan")' in js)
+    check("the rank picker is driven off the server's own key table",
+          "rank_keys" in js and "planRank" in js,
+          "adding a key in planner.RANK_KEYS is the whole change — the GUI "
+          "cannot offer a different set")
     check("every planner parameter has an input in the form",
           all(f'name="{p}"' in html for p in
               ("origin", "dest", "service_tier", "fare_vs_reference")))
@@ -1266,6 +1468,8 @@ def main():
     check_frequency(world, engine)
     check_quote()
     check_pair_plan()
+    check_dest_plan()
+    check_lock_discipline()
     check_delivery()
     passed = sum(1 for _, ok in CHECKS if ok)
     print("\n" + "=" * 70)

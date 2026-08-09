@@ -481,11 +481,28 @@ Phase 4's remaining work is therefore narrower than planned: crew payroll as
 a headcount rather than a flat per-block-hour rate, hub overhead, and the
 maintenance/basing outputs.
 
-**Phase 3 — Q3, destination ranking.** `plan_from` for an airport and for a
-tail; memoize `route_spec`; move the scan out of the lock. *Asserted:* a full
-300-airport scan completes inside a stated budget; the lock is not held across
-it; a tail is never offered a destination it cannot start from; each rank key
-orders as claimed.
+**Phase 3 — Q3, destination ranking.** ✅ *Landed.* `plan_from` for an airport
+and for a tail, seven rank keys, a measured-only filter, `GET /api/plan/from`,
+and the same panel in destination mode. All the planned assertions hold.
+Three corrections from building it:
+
+- **The bottleneck was not where the plan said.** The measurement in §4 timed
+  `route_spec` alone. In a real scan the cost was `observation()` →
+  `_comparable` → `_neighbour_season`, which scans the whole route table to
+  average an airport's neighbours' seasonal shape: **3.9 of the first scan's
+  4.9 seconds**. Memoizing `observation` as well as `route_spec` took a full
+  300-destination × 16-type scan from **2.36 s to 0.27 s**.
+- **The lock assertion was measuring the wrong thing.** "The planner never
+  waits on the lock" is false and *should* be — it takes the lock briefly to
+  resolve the origin, so waiting behind the tick loop is correct. The property
+  that matters is that the lock is not HELD for the scan's duration, measured
+  from the other side: run the scan on a thread, hammer the lock from another,
+  and record the worst wait. 212 ms of work, worst wait 0.0 ms over 29
+  attempts.
+- **A vacuous check is worse than no check.** The same test applied to the
+  pair plan sampled the lock zero times — the call finishes in 2 ms — so its
+  comparison passed regardless of what the code did. It now reports the
+  duration as its evidence and says the wait was never measured.
 
 **Phase 4 — Q2, resourcing.** Crew requirement by base, maintenance-hub
 feasibility, basing recommendation, the fully-absorbed cost line. *Asserted:*

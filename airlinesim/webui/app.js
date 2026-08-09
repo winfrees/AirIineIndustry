@@ -426,6 +426,17 @@ function render(snap) {
   if (human) {
     populateSelect(els.tailSelect, human.fleet.filter((a) => !a.retired), "tail_number",
       (a) => `${a.tail_number} (${a.display_name})`);
+    // The planner's picker carries a blank "any" option, so it cannot use
+    // populateSelect — a fixed first entry is the whole point of it.
+    const pt = document.getElementById("planTail");
+    if (pt && document.activeElement !== pt) {
+      const keep = pt.value;
+      pt.innerHTML = `<option value="">any / to acquire</option>` +
+        human.fleet.filter((a) => !a.retired).map((a) =>
+          `<option value="${esc(a.tail_number)}">${esc(a.tail_number)} — ` +
+          `${esc(a.display_name)} at ${esc(a.location_iata)}</option>`).join("");
+      if ([...pt.options].some((o) => o.value === keep)) pt.value = keep;
+    }
   }
 }
 
@@ -1136,23 +1147,86 @@ function planHtml(d) {
     </tr></thead><tbody>${rows}</tbody></table>`;
 }
 
-async function runPlan(origin, dest, tier, fare) {
-  const q = new URLSearchParams({
-    origin, dest, service_tier: tier, fare_vs_reference: fare,
-  });
-  planData = await fetch(`/api/plan?${q}`).then((r) => r.json())
+// -- destination ranking (blank destination) --------------------------------
+// The other half of the question: not "what can fly ORD-LGA" but "where
+// should this aeroplane go". Its own endpoint rather than /api/plan with a
+// missing parameter — two questions, and no ambiguity about whether a blank
+// field meant a different mode or a mistake.
+function destHtml(d) {
+  if (d.error) return `<div class="planNote warn">${esc(d.error)}</div>`;
+  const head = `<div class="metric"><b>from ${esc(d.origin)}</b>` +
+    `${d.tail_number ? ` on ${esc(d.tail_number)}` : ""}
+     &middot; ${d.scanned} destinations scanned
+     &middot; showing ${d.candidates.length}, ranked by ${esc(d.rank_label)}</div>`;
+  const notes = (d.notes || []).map((n) =>
+    `<div class="planNote${/FITTED|CENSORED/.test(n) ? " warn" : ""}">${esc(n)}</div>`
+  ).join("");
+  const rows = (d.candidates || []).map((c) => {
+    const f = c.forecast;
+    const why = [...(c.suitability || []), ...(f.reasons || [])];
+    return `<tr class="${c.operable ? "" : "notOperable"}">
+      <td><b>${esc(c.dest)}</b><br><span class="binds">${esc(c.dest_name)}</span></td>
+      <td>${Math.round(f.distance_km).toLocaleString()} km</td>
+      <td>${esc(c.spec_id)} <span class="srcTag">${esc(c.source)}</span>
+          ${c.alternatives ? `<br><span class="binds">${c.alternatives} other
+             type(s) also work</span>` : ""}</td>
+      <td>${c.frequency.rotations}/day<br>
+          <span class="binds">${esc(c.frequency.binding)}-limited</span></td>
+      <td>${Math.round(f.demand_per_day).toLocaleString()}<br>
+          <span class="binds">${(f.load_factor * 100).toFixed(0)}% LF</span></td>
+      <td>${signed(f.contribution)}</td>
+      <td><b>${signed(f.absorbed)}</b></td>
+      <td>${tierBadge(f.data_tier)}</td>
+      <td>${why.length ? `<div class="why">${esc(why.join("; "))}</div>` : ""}</td>
+    </tr>`;
+  }).join("");
+  return head + notes + `<table>
+    <thead><tr>
+      <th>destination</th><th>stage</th><th>aircraft</th><th>frequency</th>
+      <th>market</th><th>contribution</th><th>absorbed</th><th>demand data</th>
+      <th>why not</th>
+    </tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+async function runPlan(params) {
+  const el = document.getElementById("plan");
+  el.innerHTML = `<div class="planNote">planning&hellip;</div>`;
+  // A blank destination means "rank every destination from here", which is a
+  // different question and a different endpoint.
+  const pair = !!params.dest;
+  const url = pair ? "/api/plan" : "/api/plan/from";
+  const q = new URLSearchParams(params);
+  if (!pair) q.delete("dest");
+  planData = await fetch(`${url}?${q}`).then((r) => r.json())
     .catch((e) => ({ error: String(e) }));
-  document.getElementById("plan").innerHTML = planHtml(planData);
+  el.innerHTML = pair ? planHtml(planData) : destHtml(planData);
 }
 
 document.getElementById("formPlan").addEventListener("submit", (e) => {
   e.preventDefault();
   const f = new FormData(e.target);
-  runPlan(String(f.get("origin") || "").trim().toUpperCase(),
-          String(f.get("dest") || "").trim().toUpperCase(),
-          f.get("service_tier") || "2",
-          f.get("fare_vs_reference") || "1.0");
+  runPlan({
+    origin: String(f.get("origin") || "").trim().toUpperCase(),
+    dest: String(f.get("dest") || "").trim().toUpperCase(),
+    tail_number: f.get("tail_number") || "",
+    rank_by: f.get("rank_by") || "absorbed",
+    measured_only: f.get("measured_only") ? "1" : "",
+    service_tier: f.get("service_tier") || "2",
+    fare_vs_reference: f.get("fare_vs_reference") || "1.0",
+    limit: "25",
+  });
 });
+
+// The rank picker is driven off the server's own table, so the two cannot
+// offer different sets: adding a key in planner.RANK_KEYS is the whole change.
+async function loadRankKeys() {
+  const sel = document.getElementById("planRank");
+  const d = await fetch("/api/plan/from?origin=ORD&limit=1")
+    .then((r) => r.json()).catch(() => null);
+  const keys = (d && d.rank_keys) || { absorbed: "absorbed margin $/day" };
+  sel.innerHTML = Object.entries(keys)
+    .map(([k, label]) => `<option value="${esc(k)}">${esc(label)}</option>`).join("");
+}
 
 {
   const btn = document.getElementById("btnPlanAbout");
@@ -1225,6 +1299,7 @@ if ("serviceWorker" in navigator) {
   // planner can't be primed until now
   acquirePlanner.setSpec(els.specSelect.value);
   document.getElementById("plan").innerHTML = planHtml(null);
+  await loadRankKeys();
   const state = await fetch("/api/state").then((r) => r.json());
   render(state);
   // Valuations move as the sim runs, but not fast enough to justify a fetch

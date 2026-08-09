@@ -1093,3 +1093,210 @@ def plan_pair(world, players, player, origin, dest, *, service_tier: int = 2,
         data_vintage=getattr(route_spec, "data_vintage", ""),
         service_tier=service_tier, options=tuple(options),
         notes=tuple(notes))
+
+
+# ============================================================
+# Q3 — "I have this aircraft / this station. Where should it fly?"
+# ============================================================
+
+# How a destination list can be ordered. Every key is a function of the
+# candidate, so adding one is a table entry rather than a branch in the
+# sorter — and the GUI's picker is driven off this table, so the two cannot
+# offer different sets.
+RANK_KEYS = {
+    "absorbed": ("absorbed margin $/day",
+                 lambda c: -c.forecast.absorbed),
+    "contribution": ("contribution margin $/day",
+                     lambda c: -c.forecast.contribution),
+    "margin": ("margin as % of revenue",
+               lambda c: -(c.forecast.absorbed / c.forecast.revenue
+                           if c.forecast.revenue > 0 else -INF)),
+    "demand": ("market size, pax/day",
+               lambda c: -c.forecast.demand_per_day),
+    "frequency": ("achievable rotations/day",
+                  lambda c: -c.frequency.rotations),
+    "load": ("forecast load factor",
+             lambda c: -c.forecast.load_factor),
+    "distance": ("stage length, nearest first",
+                 lambda c: c.forecast.distance_km),
+}
+DEFAULT_RANK = "absorbed"
+
+
+@dataclass(frozen=True)
+class Candidate:
+    """One destination, with the best aircraft for it."""
+    dest: str
+    dest_name: str
+    lat: float
+    lon: float
+    spec_id: str
+    source: str
+    forecast: RouteForecast
+    frequency: FrequencyPlan
+    suitability: tuple
+    operable: bool
+    alternatives: int          # how many other types could also fly it
+
+    def to_json(self) -> dict:
+        return {"dest": self.dest, "dest_name": self.dest_name,
+                "lat": self.lat, "lon": self.lon,
+                "spec_id": self.spec_id, "source": self.source,
+                "operable": self.operable,
+                "alternatives": self.alternatives,
+                "suitability": list(self.suitability),
+                "forecast": self.forecast.to_json(),
+                "frequency": self.frequency.to_json()}
+
+
+@dataclass(frozen=True)
+class DestinationPlan:
+    origin: str
+    tail_number: str
+    rank_by: str
+    rank_label: str
+    scanned: int
+    measured_only: bool
+    candidates: tuple
+    notes: tuple
+
+    def to_json(self) -> dict:
+        return {"origin": self.origin, "tail_number": self.tail_number,
+                "rank_by": self.rank_by, "rank_label": self.rank_label,
+                "scanned": self.scanned, "measured_only": self.measured_only,
+                "rank_keys": {k: v[0] for k, v in RANK_KEYS.items()},
+                "candidates": [c.to_json() for c in self.candidates],
+                "notes": list(self.notes)}
+
+
+def plan_from(world, players, player, *, origin=None, tail_number: str = "",
+              rank_by: str = DEFAULT_RANK, limit: int = 25,
+              measured_only: bool = False, service_tier: int = 2,
+              fare_vs_reference: float = 1.0, bank=None) -> DestinationPlan:
+    """
+    "Where should this aeroplane fly?" or "what should I fly out of here?"
+
+    Given a TAIL, the origin is that aircraft's base and the type is fixed —
+    both are constraints, not preferences. `location_iata` is set at
+    acquisition and no subsystem ever updates it, so a tail genuinely cannot
+    start a route anywhere else, and offering destinations from another
+    station would be offering a plan that cannot be executed.
+
+    Given an AIRPORT, every type in the catalog is tried against every
+    destination and the best one is reported per destination, with a count of
+    the others that would also work.
+
+    Read-only. Costs one corpus lookup per destination (~0.19 s over 300
+    airports cold, nothing once `RouteDataProvider.route_spec`'s cache is
+    warm) plus trivial arithmetic per type — so it must NOT run under
+    `GameSession.lock`. See `GameSession.plan_from`.
+    """
+    from airlinesim.actions import METHOD_BY_NAME, TERMS_BY_METHOD, bank_for
+    from airlinesim.engine import AirportSpec
+
+    bank = bank or bank_for(world)
+    plane = None
+    if tail_number:
+        plane = next((a for a in player.fleet
+                      if a.tail_number == tail_number and not a.retired), None)
+        if plane is None:
+            raise KeyError(f"no such aircraft {tail_number}")
+        origin = next((ap for ap in world.repo.all(AirportSpec)
+                       if ap.iata == plane.location_iata), None)
+        if origin is None:
+            raise KeyError(f"{tail_number} is based at {plane.location_iata}, "
+                           f"which is not in this world")
+    if origin is None:
+        raise ValueError("plan_from needs an origin airport or a tail number")
+
+    rank_by = rank_by if rank_by in RANK_KEYS else DEFAULT_RANK
+    rank_label, rank_fn = RANK_KEYS[rank_by]
+    policy = player_policy(world, origin, service_tier=service_tier,
+                           fare_vs_reference=fare_vs_reference)
+
+    # Fixed by the tail if there is one; otherwise the whole catalog.
+    specs = ([plane.spec] if plane is not None
+             else sorted(world.repo.all(AircraftSpec), key=lambda s: s.spec_id))
+    # Lease rate per type, once, rather than per destination.
+    lease_daily = {}
+    for s in specs:
+        q = bank.quote(player, s, METHOD_BY_NAME["LEASE"],
+                       TERMS_BY_METHOD[METHOD_BY_NAME["LEASE"]])
+        lease_daily[s.spec_id] = q.daily
+
+    candidates, scanned, skipped_tier = [], 0, 0
+    for dest in sorted(world.repo.all(AirportSpec), key=lambda a: a.iata):
+        if dest.iata == origin.iata:
+            continue
+        scanned += 1
+        route_spec = route_spec_for(world, origin, dest)
+        tier = getattr(route_spec, "data_tier", "")
+        if measured_only and tier != "exact":
+            skipped_tier += 1
+            continue
+        demand, _fare = market_estimate(world, origin, dest)
+        share = expected_share(world, players, origin, dest, policy)
+
+        best, workable = None, 0
+        for spec in specs:
+            owned = (plane is not None
+                     or any(a.spec.spec_id == spec.spec_id and not a.retired
+                            and a.location_iata == origin.iata
+                            for a in player.fleet))
+            ownership = 0.0 if owned else lease_daily.get(spec.spec_id, 0.0)
+            fplan = frequency_plan(world, players, origin, dest, spec,
+                                   demand_per_day=demand, share=share,
+                                   player=player)
+            fc = evaluate_route(world, players, origin, dest, spec,
+                                max(1, fplan.rotations), policy,
+                                ownership_per_day=ownership)
+            suit = suitability_reasons(world, origin, dest, spec)
+            ok = (fc.viable and fc.feasible and not suit
+                  and fplan.rotations > 0)
+            if ok:
+                workable += 1
+            cand = Candidate(
+                dest=dest.iata, dest_name=dest.display_name,
+                lat=dest.lat, lon=dest.lon, spec_id=spec.spec_id,
+                source=(SOURCE_IDLE if owned else SOURCE_ACQUIRE),
+                forecast=fc, frequency=fplan, suitability=suit, operable=ok,
+                alternatives=0)
+            # Prefer a workable option over a better-looking impossible one.
+            if best is None or (ok, -rank_fn(cand)) > (best.operable,
+                                                       -rank_fn(best)):
+                best = cand
+        if best is None:
+            continue
+        candidates.append(
+            Candidate(**{**best.__dict__,
+                         "alternatives": max(0, workable - 1)}))
+
+    # Operable first, then the chosen key. A destination nothing can serve is
+    # still returned — with its reason — rather than silently dropped.
+    candidates.sort(key=lambda c: (not c.operable, rank_fn(c), c.dest))
+    shown = tuple(candidates[:max(1, limit)])
+
+    notes = [f"ranked by {rank_label}",
+             f"{sum(1 for c in candidates if c.operable)} of {scanned} "
+             f"destinations can be served from {origin.iata} as planned"]
+    if plane is not None:
+        notes.append(
+            f"{plane.tail_number} is based at {origin.iata} and the engine "
+            f"has no ferry flights, so every plan here starts there")
+    est = sum(1 for c in shown if c.forecast.data_tier != "exact")
+    if est:
+        notes.append(
+            f"{est} of the {len(shown)} shown rest on a FITTED demand "
+            f"estimate rather than a BTS measurement — around a third of "
+            f"those are out by more than 2x, so read this as a shortlist to "
+            f"check, not a ranking to trust")
+    if measured_only:
+        notes.append(f"measured pairs only: {skipped_tier} estimated "
+                     f"destinations were excluded")
+    notes.append(
+        "demand is CENSORED — the corpus counts passengers FLOWN, so the "
+        "busiest pairs are understated and rank lower here than they should")
+    return DestinationPlan(
+        origin=origin.iata, tail_number=(plane.tail_number if plane else ""),
+        rank_by=rank_by, rank_label=rank_label, scanned=scanned,
+        measured_only=measured_only, candidates=shown, notes=tuple(notes))
