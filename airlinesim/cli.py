@@ -13,7 +13,7 @@ Usage:
 Scenarios: competitive, integration, crew, deadhead, roster, route, finance,
            cabin, weather, alliance, map, btsdata, routedata, databuilt,
            refresh_cx,
-           explorer
+           explorer, planner
 """
 import argparse
 import importlib
@@ -38,6 +38,7 @@ SCENARIOS = {
     "ai_competition": "airlinesim.scenarios.ai_competition",
     "session":     "airlinesim.scenarios.scenario_session",
     "explorer":    "airlinesim.scenarios.scenario_explorer",
+    "planner":     "airlinesim.scenarios.scenario_planner",
 }
 
 
