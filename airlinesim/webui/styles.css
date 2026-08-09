@@ -97,12 +97,18 @@ main {
    better the more width it gets, and every airport label and route it draws
    competes for the same pixels.
 
+   THE PLANNER is full width for the same reason as ALLIANCES: a row carries
+   the aircraft, where it would come from, four frequency limits with the
+   binding one named, two margin lines and three acquisition quotes. In one
+   column that is a ribbon.
+
    ALLIANCES is here because its content is prose, not a table — a merger case
    carries a rationale, a price, an integration cost and the reason it would or
    wouldn't be approved. In one column those wrapped into an unreadable
    ribbon. */
 #startHint,
 #mapCard,
+#plannerCard,
 #playersCard,
 #routesCard,
 #fleetCard,
@@ -457,3 +463,32 @@ tr.selectedRow > td { background: rgba(46, 168, 255, 0.16); }
 .crewStations { margin-top: 0.15rem; line-height: 1.6; }
 .crewStations span { font-family: ui-monospace, monospace; font-size: 0.72rem;
                      margin-right: 0.15rem; }
+
+
+/* ---- Route planner -------------------------------------------------------
+   Two margin lines sit side by side on every row and a player must never
+   confuse them, so they are coloured by SIGN rather than by which line they
+   are: absorbed is the one that decides, contribution is context. */
+#plannerCard table { width: 100%; border-collapse: collapse; }
+#plannerCard .planNote {
+  font-size: 0.82rem; color: var(--muted); margin: 0.15rem 0;
+}
+#plannerCard .planNote.warn { color: var(--warn); }
+#plannerCard .tierBadge {
+  font-size: 0.72rem; padding: 0.05rem 0.35rem; border-radius: 0.3rem;
+  border: 1px solid var(--card-border); text-transform: uppercase;
+}
+#plannerCard .tier-exact { color: var(--good); border-color: var(--good); }
+#plannerCard .tier-comparable { color: var(--warn); border-color: var(--warn); }
+#plannerCard .tier-synthetic { color: var(--bad); border-color: var(--bad); }
+/* A row that cannot actually be flown is dimmed but NOT hidden: "why is the
+   787 not on this list?" is the question the panel exists to answer. */
+#plannerCard tr.notOperable td { opacity: 0.55; }
+#plannerCard .why { font-size: 0.78rem; color: var(--warn); }
+#plannerCard .binds { font-size: 0.76rem; color: var(--muted); }
+#plannerCard .pos { color: var(--good); }
+#plannerCard .neg { color: var(--bad); }
+#plannerCard .srcTag {
+  font-size: 0.72rem; padding: 0.05rem 0.3rem; border-radius: 0.3rem;
+  background: rgba(255,255,255,0.06);
+}

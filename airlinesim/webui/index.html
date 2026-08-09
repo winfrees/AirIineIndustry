@@ -89,6 +89,35 @@
     <div id="players"></div>
   </section>
 
+  <section class="card wide" id="plannerCard">
+    <h2>Route Planner
+      <button id="btnPlanAbout" class="btn small" type="button"
+              title="what these numbers are, and what they are not">About</button>
+    </h2>
+    <form id="formPlan" class="form">
+      <input name="origin" id="planOrigin" list="airportsDL" placeholder="from (IATA)"
+             size="6" maxlength="4" autocomplete="off" required>
+      <span class="arrow">&rarr;</span>
+      <input name="dest" id="planDest" list="airportsDL" placeholder="to (IATA)"
+             size="6" maxlength="4" autocomplete="off" required>
+      <label>service
+        <select name="service_tier" id="planTier">
+          <option value="1">1 — basic</option>
+          <option value="2" selected>2 — standard</option>
+          <option value="3">3 — premium</option>
+        </select>
+      </label>
+      <label>fare
+        <input name="fare_vs_reference" id="planFare" type="number" step="0.05"
+               min="0.1" max="5" value="1.0" size="4"
+               title="multiple of the market's reference fare">
+        &times; ref
+      </label>
+      <button class="btn" type="submit">Plan</button>
+    </form>
+    <div id="plan"></div>
+  </section>
+
   <section class="card" id="routesCard">
     <h2>Routes &amp; Pricing</h2>
     <div id="routes"></div>
@@ -250,6 +279,47 @@
      derived rather than tracked is the one thing a viewer could otherwise
      reasonably get wrong, so it stays one click away and `scenario_map`
      asserts both the button and the note are still here. -->
+<dialog id="planAboutDlg">
+  <form method="dialog">
+    <h2>About the route planner</h2>
+    <div id="planNoteForecast" class="metric">These are FORECASTS of routes
+      that do not exist. Nothing here is booked, priced or committed — use the
+      Routes and Fleet panels to actually do it.</div>
+    <div class="metric"><b>Two margin lines, and they differ.</b>
+      <i>Contribution</i> is revenue less what the engine charges a flight:
+      fuel, maintenance, crew and airport fees. It is the same measure the
+      Routes panel reports per route. <i>Absorbed</i> also subtracts the lease
+      or loan this plan would ADD — charged only where the aeroplane has to be
+      acquired, since a tail you already own is paid for either way. Rows are
+      ranked on absorbed, because ranking on contribution puts the biggest
+      aeroplane first on every route it can fill and that aeroplane often
+      loses money once its lease is paid.</div>
+    <div class="metric"><b>Still not deducted, on either line:</b> payroll for
+      crews that did not fly, and hub overhead. The crew figure is a flat
+      per-block-hour estimate rather than a headcount.</div>
+    <div class="metric"><b>Frequency is four limits, not one.</b> Airframe
+      hours, market demand, gate capacity and the crew pool each cap the
+      schedule; the panel names whichever one binds. A limit marked advisory
+      is reported but does not bind — a type you do not operate yet has no
+      rated crew, and hiring them is part of acquiring it.</div>
+    <div class="metric"><b>Demand provenance is on every plan.</b>
+      <span class="tierBadge tier-exact">exact</span> is a BTS measurement.
+      <span class="tierBadge tier-comparable">comparable</span> is a fitted
+      gravity estimate where no measurement exists — around a third of those
+      are out by more than 2&times;, so treat the ranking as a shortlist, not
+      a verdict. Demand is also CENSORED: the corpus counts passengers flown,
+      so the busiest pairs are understated.</div>
+    <div class="metric"><b>No competitive response is modelled.</b> Share is
+      diluted by the operators already in the market and nothing else — a
+      rival matching your fare or adding frequency against you is not
+      forecast. The AI plans under the identical limitation, off the identical
+      arithmetic.</div>
+    <div class="form">
+      <button class="btn" value="close">Close</button>
+    </div>
+  </form>
+</dialog>
+
 <dialog id="mapAboutDlg">
   <form method="dialog">
     <h2>About the network map</h2>

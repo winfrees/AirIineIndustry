@@ -763,11 +763,15 @@ def check_forecast(world, engine):
           f"ORD-LGA A320 x3: {ok.pax:.0f} pax, ${ok.contribution:,.0f}/day "
           f"contribution, tier '{ok.data_tier}'")
     check("cost lines add up to the contribution the AI reads",
-          abs((ok.revenue - ok.costs.total) - ok.contribution) < 1e-9,
-          f"revenue ${ok.revenue:,.0f} - costs ${ok.costs.total:,.0f}")
-    check("the itemised lines sum to the cost total",
+          abs((ok.revenue - ok.costs.direct) - ok.contribution) < 1e-9,
+          f"revenue ${ok.revenue:,.0f} - direct ${ok.costs.direct:,.0f}")
+    check("the itemised lines sum to the direct cost",
           abs((ok.costs.fuel + ok.costs.maintenance + ok.costs.crew
-               + ok.costs.fees) - ok.costs.total) < 1e-9)
+               + ok.costs.fees) - ok.costs.direct) < 1e-9)
+    check("with no ownership charged, absorbed equals contribution",
+          not ok.has_ownership and abs(ok.absorbed - ok.contribution) < 1e-9,
+          "the AI's path never charges ownership, which is why the goldens "
+          "survived adding the line")
     check("break-even fare covers costs at the forecast load",
           abs(ok.break_even_fare * ok.pax - ok.costs.total) < 0.01,
           f"break-even ${ok.break_even_fare:,.2f} vs fare ${ok.fare:,.2f}")
@@ -937,6 +941,224 @@ def check_frequency(world, engine):
           "is ai._crew_target solved for N")
 
 
+# ============================================================
+# PHASE 2 — Q1, pair mode, end to end
+# ============================================================
+
+def check_pair_plan():
+    """
+    One city pair, every type, ranked — and the two things most likely to be
+    got wrong: where the aeroplane comes from, and which margin decides.
+    """
+    from airlinesim import planner
+    print("\n=== PAIR PLAN ===")
+    world, engine = golden_world()
+    players = list(engine.players)
+    me = players[0]
+    ord_ = actions.airport(world, "ORD")
+
+    plan = planner.plan_pair(world, players, me, ord_,
+                             actions.airport(world, "DEN"))
+    n_types = len(world.repo.all(AircraftSpec))
+    check("every type in the catalog is judged, none filtered out",
+          len(plan.options) == n_types,
+          f"{len(plan.options)} rows for {n_types} types — a type that cannot "
+          f"fly the pair is returned WITH its reasons")
+    check("options are ranked by absorbed margin, best first",
+          _sorted_by_absorbed(plan),
+          f"top: {plan.options[0].spec_id} at "
+          f"${plan.options[0].forecast.absorbed:,.0f}/day absorbed")
+    check("every row states its provenance", bool(plan.data_tier)
+          and all(o.forecast.data_tier for o in plan.options),
+          f"{plan.data_tier} — {tier_line(plan)}")
+
+    # WHERE THE AEROPLANE COMES FROM. The starting carrier has A321s at ORD,
+    # all committed to routes, plus tails at LGA and LAX it cannot use from
+    # ORD — the engine has no ferry flights.
+    by_id = {o.spec_id: o for o in plan.options}
+    a321 = by_id["A321"]
+    sources = {t.source for t in a321.tails}
+    check("owned tails are found and classified by availability",
+          a321.tails and sources <= {planner.SOURCE_IDLE,
+                                     planner.SOURCE_COMMITTED,
+                                     planner.SOURCE_ELSEWHERE},
+          "; ".join(f"{t.tail_number} {t.source}" for t in a321.tails))
+    check("a tail based elsewhere is not offered as available here",
+          all(t.source == planner.SOURCE_ELSEWHERE
+              for t in a321.tails if t.location_iata != "ORD"),
+          "location_iata is set at acquisition and no subsystem updates it — "
+          "there are no ferry flights, so a tail cannot start from ORD")
+    check("a committed tail states what freeing it gives up",
+          all(t.note and "contribution" in t.note
+              for t in a321.tails if t.source == planner.SOURCE_COMMITTED)
+          or not any(t.source == planner.SOURCE_COMMITTED for t in a321.tails))
+    unowned = next(o for o in plan.options if not o.tails)
+    check("a type the carrier does not own is marked for acquisition",
+          unowned.source == planner.SOURCE_ACQUIRE and len(unowned.quotes) == 3,
+          f"{unowned.spec_id}: three quotes, "
+          f"{sum(1 for q in unowned.quotes if q.approved)} approved")
+
+    # THE RANKING TRAP. Charging ownership is what stops the screen
+    # recommending the aeroplane that bankrupts you.
+    acq = [o for o in plan.options if o.source == planner.SOURCE_ACQUIRE]
+    check("an acquisition is charged ownership; owned metal is not",
+          all(o.forecast.costs.ownership > 0 for o in acq)
+          and all(o.forecast.costs.ownership == 0 for o in plan.options
+                  if o.source != planner.SOURCE_ACQUIRE),
+          "a tail you already own is paid for either way, so flying it costs "
+          "nothing extra")
+    by_contrib = max(acq, key=lambda o: o.forecast.contribution)
+    by_absorbed = max(acq, key=lambda o: o.forecast.absorbed)
+    check("ranking on contribution would pick a different, worse aeroplane",
+          by_contrib.spec_id != by_absorbed.spec_id,
+          f"contribution picks {by_contrib.spec_id} "
+          f"(${by_contrib.forecast.absorbed:,.0f}/day absorbed); absorbed "
+          f"picks {by_absorbed.spec_id} "
+          f"(${by_absorbed.forecast.absorbed:,.0f}/day)")
+    check("ownership is charged at the lease rate, not the cheapest payment",
+          _ownership_is_lease_rate(acq),
+          "buying outright has no daily payment but converts capital — "
+          "pricing it at $0/day ranked a $290M widebody as free")
+
+    # ORD-LGA is the pair where the ENGINE is looser than the aeroplane.
+    lga = planner.plan_pair(world, players, me, ord_,
+                            actions.airport(world, "LGA"))
+    loose = [o for o in lga.options if o.engine_would_allow]
+    check("where the engine is looser than physics, the plan says so",
+          bool(loose) and any("takeoff length" in n for n in lga.notes),
+          f"{', '.join(o.spec_id for o in loose)} clear LGA's banded ROUTE "
+          f"requirement but not their own takeoff length — route_can_fly "
+          f"never checks the airframe figure, and databuilder flies an A321 "
+          f"into LGA on every data world because of it")
+    check("the planner takes the stricter line rather than endorsing the gap",
+          all(not o.operable for o in loose))
+    blocked = [o for o in lga.options if o.suitability and not o.forecast.reasons]
+    check("the seat window blocks small types on a big market, with the number",
+          bool(blocked) and all("min viable" in "; ".join(o.suitability)
+                                for o in blocked),
+          "; ".join(f"{o.spec_id}: {o.suitability[0]}" for o in blocked[:2]))
+
+
+def tier_line(plan) -> str:
+    from airlinesim import planner
+    return planner.tier_note(plan.data_tier)
+
+
+def _sorted_by_absorbed(plan) -> bool:
+    """Operable rows first, then descending absorbed margin."""
+    keys = [(not o.operable, -o.forecast.absorbed) for o in plan.options]
+    return keys == sorted(keys)
+
+
+def _ownership_is_lease_rate(options) -> bool:
+    from airlinesim.actions import METHOD_BY_NAME
+    for o in options:
+        lease = next((q for q in o.quotes
+                      if q.method is METHOD_BY_NAME["LEASE"]), None)
+        if lease is None or abs(o.forecast.costs.ownership - lease.daily) > 0.01:
+            return False
+    return True
+
+
+def check_delivery():
+    """
+    THE PLANNER IS ONLY DELIVERED IF A PLAYER CAN REACH IT.
+
+    `attach_alliances()` shipped once with every action written and nothing
+    reachable from the game. A read-only feature fails the same way, more
+    quietly: a `planner.py` with no endpoint. So the whole chain is asserted
+    — session method, HTTP route, panel, and the caveat the panel must carry.
+
+    The parameter round-trip is the specific hazard. `server.COMMANDS` is a
+    hand-written argument mapping and it is where `seats` went missing from
+    acquisition and `service_tier` from route opening; a GET handler that
+    parses its own query string has exactly the same failure mode, and a
+    parameter nobody reads just takes its default in silence.
+    """
+    import json as _json
+    import threading
+    import time
+    import urllib.request
+    from pathlib import Path
+
+    from airlinesim.game import GameSession
+    from airlinesim.server import WEBUI_DIR, run_server
+    print("\n=== DELIVERY ===")
+
+    src = (Path(__file__).parent.parent / "server.py").read_text()
+    check("GET /api/plan is a route on the server", '"/api/plan"' in src)
+    check("GameSession exposes the planner", hasattr(GameSession, "plan_pair"))
+
+    html = (WEBUI_DIR / "index.html").read_text()
+    # Collapsed, because the prose in the dialog is hard-wrapped and a check
+    # that depends on where the line breaks fall is a check about formatting.
+    flat = " ".join(html.split())
+    js = (WEBUI_DIR / "app.js").read_text()
+    check("the GUI has a planner panel and a form",
+          'id="plannerCard"' in html and 'id="formPlan"' in html)
+    check("the panel is wired to the endpoint",
+          "/api/plan?" in js and 'getElementById("formPlan")' in js)
+    check("every planner parameter has an input in the form",
+          all(f'name="{p}"' in html for p in
+              ("origin", "dest", "service_tier", "fare_vs_reference")))
+    check("the About dialog exists and the button opens it",
+          'id="planAboutDlg"' in html and 'id="btnPlanAbout"' in html
+          and "planAboutDlg" in js)
+    # The one thing a viewer could reasonably get wrong, pinned the way
+    # scenario_map pins the map's derived-position note.
+    check("the panel says these are FORECASTS of routes that do not exist",
+          "FORECASTS of routes that do not exist" in flat)
+    check("the panel distinguishes the two margin lines in words",
+          "Absorbed" in flat and "Contribution" in flat
+          and "not deducted" in flat)
+    check("the panel states the estimate's error rate",
+          "out by more than 2" in flat)
+
+    httpd, hub = run_server(host="127.0.0.1", port=8907, world="data",
+                            hub_iata="ORD")
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    hub.session.pause()
+    time.sleep(0.3)
+    try:
+        def get(q):
+            with urllib.request.urlopen(
+                    "http://127.0.0.1:8907/api/plan?" + q, timeout=90) as r:
+                return _json.loads(r.read())
+
+        base = get("origin=ORD&dest=DEN")
+        check("the endpoint answers with a ranked plan",
+              "error" not in base and len(base.get("options", [])) > 1,
+              f"{len(base.get('options', []))} options, top "
+              f"{base['options'][0]['spec_id']}")
+        check("the response is JSON-safe end to end",
+              isinstance(_json.dumps(base), str))
+
+        # Each parameter must CHANGE the answer, or it is being dropped.
+        tier3 = get("origin=ORD&dest=DEN&service_tier=3")
+        check("service_tier round-trips through the endpoint",
+              tier3.get("service_tier") == 3
+              and tier3["options"][0]["forecast"]["costs"]["amenities"]
+              != base["options"][0]["forecast"]["costs"]["amenities"],
+              "tier 3 buys better gates and lounges, and is charged for them")
+        pricey = get("origin=ORD&dest=DEN&fare_vs_reference=1.5")
+        check("fare_vs_reference round-trips through the endpoint",
+              abs(pricey["options"][0]["forecast"]["fare"]
+                  - base["options"][0]["forecast"]["fare"] * 1.5) < 0.01,
+              f"${base['options'][0]['forecast']['fare']:.0f} -> "
+              f"${pricey['options'][0]['forecast']['fare']:.0f}")
+        check("origin and dest round-trip, case-insensitively",
+              get("origin=ord&dest=lga").get("dest") == "LGA")
+        for bad, why in (("origin=ORD&dest=ZZZ", "unknown airport"),
+                         ("origin=ORD", "missing dest"),
+                         ("origin=ORD&dest=ORD", "same endpoints")):
+            r = get(bad)
+            check(f"a bad request is refused with a reason ({why})",
+                  "error" in r and bool(r["error"]), r.get("error", ""))
+    finally:
+        httpd.shutdown()
+        hub.session.stop()
+
+
 def check_quote():
     """
     `Bank.quote()` must answer what `try_acquire()` would DO.
@@ -1043,6 +1265,8 @@ def main():
     check_forecast(world, engine)
     check_frequency(world, engine)
     check_quote()
+    check_pair_plan()
+    check_delivery()
     passed = sum(1 for _, ok in CHECKS if ok)
     print("\n" + "=" * 70)
     print(f"{passed}/{len(CHECKS)} checks passed — "

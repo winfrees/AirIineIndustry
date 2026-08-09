@@ -1033,6 +1033,133 @@ els.hubs.addEventListener("click", (e) => {
   }
 });
 
+// -- route planner ---------------------------------------------------------
+// Behind GET /api/plan, read-only like /api/mergers and /api/cabin. Every
+// type in the catalog is judged and the ones that CANNOT fly the pair come
+// back WITH their reasons rather than filtered out — "why is the 787 not on
+// this list?" is the question the panel exists to answer, so a row that
+// cannot be flown is dimmed, never dropped.
+let planData = null;
+
+function tierBadge(tier) {
+  const t = String(tier || "").toLowerCase() || "unknown";
+  return `<span class="tierBadge tier-${esc(t)}">${esc(t)}</span>`;
+}
+
+function signed(n) {
+  return `<span class="${n < 0 ? "neg" : "pos"}">${money(n)}</span>`;
+}
+
+// A limit marked advisory is reported but does not bind: a type the carrier
+// does not operate has no rated crew, and hiring is part of acquiring it.
+function bindsLabel(freq) {
+  const b = (freq.limits || []).find((l) => l.name === freq.binding);
+  const others = (freq.limits || [])
+    .filter((l) => l.name !== freq.binding)
+    .map((l) => `${l.name} ${l.value == null ? "—" : Math.floor(l.value)}` +
+                (l.advisory ? " (advisory)" : ""))
+    .join(", ");
+  return `<div class="binds"><b>${esc(freq.binding)}</b>-limited` +
+         `${b ? ` — ${esc(b.detail)}` : ""}<br>${esc(others)}</div>`;
+}
+
+function sourceCell(o) {
+  const tag = `<span class="srcTag">${esc(o.source)}</span>`;
+  if (o.source === "acquire") {
+    // Every way in that the bank would actually approve, with BOTH halves of
+    // the cost. Showing only the cheapest by daily payment made a cash
+    // purchase look free — it has no daily payment and a nine-figure cheque.
+    const ok = (o.quotes || []).filter((q) => q.approved);
+    if (!ok.length) {
+      const why = (o.quotes || []).map((q) => q.reason)[0] || "no funding";
+      return `${tag}<div class="why">${esc(why)}</div>`;
+    }
+    const lines = ok.map((q) => `${esc(q.method)} ${money(q.upfront)} up front` +
+      (q.daily ? ` + ${money(q.daily)}/day` : " (no daily payment)"));
+    const refused = (o.quotes || []).filter((q) => !q.approved)
+      .map((q) => esc(q.reason));
+    return `${tag}<div class="binds">${lines.join("<br>")}</div>` +
+           (refused.length ? `<div class="why">${refused.join("; ")}</div>` : "");
+  }
+  const t = (o.tails || [])[0];
+  return `${tag}${t ? `<div class="binds">${esc(t.tail_number)} — ` +
+                      `${esc(t.note)}</div>` : ""}`;
+}
+
+function planHtml(d) {
+  if (!d) {
+    return `<div class="planNote">Pick an origin and a destination to see
+      every aircraft that could serve the pair, what it would earn, and where
+      the aeroplane would come from.</div>`;
+  }
+  if (d.error) return `<div class="planNote warn">${esc(d.error)}</div>`;
+
+  const head = `<div class="metric"><b>${esc(d.origin)} &rarr; ${esc(d.dest)}</b>
+      &middot; ${d.distance_km.toLocaleString()} km
+      &middot; ${Math.round(d.demand_per_day).toLocaleString()} pax/day
+      &middot; ref fare ${money(d.reference_fare)}
+      &middot; ${d.incumbents} operator(s) already in this market, so about
+        ${(d.share * 100).toFixed(0)}% share
+      &middot; ${tierBadge(d.data_tier)} ${esc(d.data_vintage || "")}</div>`;
+
+  const notes = (d.notes || []).map((n) =>
+    `<div class="planNote${/NOT MEASURED|ESTIMATED|cannot fly|would let you/.test(n)
+      ? " warn" : ""}">${esc(n)}</div>`).join("");
+
+  const rows = (d.options || []).map((o) => {
+    const f = o.forecast;
+    // Both rejection paths, and they mean different things: `suitability` is
+    // what open_route would refuse, `reasons` is what is physically true.
+    const why = [...(o.suitability || []), ...(f.reasons || [])];
+    const warn = o.engine_would_allow
+      ? `<div class="why">the game would allow this; the aeroplane cannot
+         make the runway</div>` : "";
+    return `<tr class="${o.operable ? "" : "notOperable"}">
+      <td><b>${esc(o.spec_id)}</b><br><span class="binds">${esc(o.display_name)}</span></td>
+      <td>${o.max_seats}st<br><span class="binds">${(o.max_range_km / 1000).toFixed(1)}kkm
+          &middot; rwy ${o.takeoff_runway_m.toFixed(0)}m</span></td>
+      <td>${sourceCell(o)}</td>
+      <td>${o.frequency.rotations}/day${bindsLabel(o.frequency)}</td>
+      <td>${Math.round(f.pax)}<br><span class="binds">${(f.load_factor * 100).toFixed(0)}% LF</span></td>
+      <td>${signed(f.contribution)}</td>
+      <td>${f.costs.ownership ? money(f.costs.ownership) : "—"}</td>
+      <td><b>${signed(f.absorbed)}</b></td>
+      <td>${why.length ? `<div class="why">${esc(why.join("; "))}</div>` : ""}${warn}</td>
+    </tr>`;
+  }).join("");
+
+  return head + notes + `<table>
+    <thead><tr>
+      <th>type</th><th>size</th><th>aircraft from</th><th>frequency</th>
+      <th>pax/day</th><th>contribution</th><th>ownership</th>
+      <th>absorbed &#9660;</th><th>why not</th>
+    </tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+async function runPlan(origin, dest, tier, fare) {
+  const q = new URLSearchParams({
+    origin, dest, service_tier: tier, fare_vs_reference: fare,
+  });
+  planData = await fetch(`/api/plan?${q}`).then((r) => r.json())
+    .catch((e) => ({ error: String(e) }));
+  document.getElementById("plan").innerHTML = planHtml(planData);
+}
+
+document.getElementById("formPlan").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const f = new FormData(e.target);
+  runPlan(String(f.get("origin") || "").trim().toUpperCase(),
+          String(f.get("dest") || "").trim().toUpperCase(),
+          f.get("service_tier") || "2",
+          f.get("fare_vs_reference") || "1.0");
+});
+
+{
+  const btn = document.getElementById("btnPlanAbout");
+  const dlg = document.getElementById("planAboutDlg");
+  if (btn && dlg) btn.addEventListener("click", () => dlg.showModal());
+}
+
 els.formOpenRoute.addEventListener("submit", (e) => {
   e.preventDefault();
   const f = new FormData(e.target);
@@ -1097,6 +1224,7 @@ if ("serviceWorker" in navigator) {
   // the aircraft list only exists after the catalog loads, so the cabin
   // planner can't be primed until now
   acquirePlanner.setSpec(els.specSelect.value);
+  document.getElementById("plan").innerHTML = planHtml(null);
   const state = await fetch("/api/state").then((r) => r.json());
   render(state);
   // Valuations move as the sim runs, but not fast enough to justify a fetch

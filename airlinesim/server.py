@@ -299,6 +299,8 @@ def make_handler(hub: Hub):
                 self._send_json(hub.session.merger_candidates())
             elif path == "/api/cabin":
                 self._send_json(self._cabin_fit(urlparse(self.path).query))
+            elif path == "/api/plan":
+                self._send_json(self._route_plan(urlparse(self.path).query))
             elif path == "/api/events":
                 self._serve_sse()
             elif path == "/api/explore/tree":
@@ -339,6 +341,39 @@ def make_handler(hub: Hub):
             seats = {k: v[0] for k, v in qs.items()
                      if k not in ("spec_id",) and v and v[0] != ""}
             return hub.session.cabin_fit(spec_id, seats)
+
+        # Every parameter the planner form sends has to be READ here. This is
+        # the GET-side twin of the `COMMANDS` table's hand-written argument
+        # mapping — the one that silently dropped `seats` from acquisition and
+        # `service_tier` from route opening, because a parameter nobody reads
+        # just takes its default and nothing complains. `scenario_planner`
+        # asserts each of these round-trips.
+        PLAN_PARAMS = ("origin", "dest", "service_tier", "fare_vs_reference")
+
+        def _route_plan(self, query: str) -> dict:
+            """
+            GET /api/plan?origin=ORD&dest=LGA — every type that could fly the
+            pair, what it would earn, and where the aeroplane comes from.
+
+            Read-only, like /api/cabin and /api/mergers. Nothing here commits;
+            the player executes a plan through the ordinary actions.
+            """
+            qs = parse_qs(query)
+
+            def one(name, default=""):
+                vals = qs.get(name) or []
+                return vals[0] if vals and vals[0] != "" else default
+
+            origin, dest = one("origin"), one("dest")
+            if not origin or not dest:
+                return {"error": "origin and dest are required"}
+            try:
+                return hub.session.plan_pair(
+                    origin, dest,
+                    service_tier=int(one("service_tier", 2)),
+                    fare_vs_reference=float(one("fare_vs_reference", 1.0)))
+            except (TypeError, ValueError) as e:
+                return {"error": str(e)}
 
         def _serve_sse(self):
             self.send_response(200)

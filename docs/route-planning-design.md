@@ -458,12 +458,28 @@ carrier has ten cabin crew and ten A320-family pilots at ORD, so a 787 has
 **zero** available cockpit crew there and the planner reports the route
 grounded rather than assuming pilots appear.
 
-**Phase 2 — Q1, pair mode, end to end.** `plan_pair`,
-`GameSession.plan_pair`, `GET /api/plan`, a first panel with the ranked
-equipment table. *Asserted:* owned/acquire split is correct against a known
-fleet; the credit verdict from `Bank.quote` matches what `try_acquire` would
-actually do; every parameter round-trips through the endpoint; data tier is
-present on every row.
+**Phase 2 — Q1, pair mode, end to end.** ✅ *Landed.* `plan_pair`,
+`GameSession.plan_pair`, `GET /api/plan`, and a full-width panel with the
+ranked equipment table and an About dialog. All the planned assertions hold,
+plus the delivery chain end to end. Two things the plan did not anticipate:
+
+- **Ownership had to come forward from phase 4.** Ranking on contribution
+  margin alone put an A350 at the top of ORD-DEN earning $53k/day — and
+  losing **$42k/day** once its lease was paid. The plan deferred the absorbed
+  line, but shipping a screen whose top recommendation bankrupts you is worse
+  than shipping it a phase late. `Bank.quote()` was already in hand from
+  phase 1, so `CostLines` gained an `ownership` line and rows are ranked on
+  `absorbed`. The scenario asserts the two rankings genuinely disagree.
+- **Ownership is charged at the LEASE rate however the aeroplane is paid
+  for.** Taking the cheapest quote by daily payment priced a cash purchase at
+  $0/day and ranked a $290M 787 as free. Buying outright converts capital, it
+  does not avoid the cost — which is how `ai._rank_aircraft` has always
+  expensed it, at the same 11%/year `actions.LEASE_TERMS` charges. All three
+  quotes are still shown per row, with both halves of each.
+
+Phase 4's remaining work is therefore narrower than planned: crew payroll as
+a headcount rather than a flat per-block-hour rate, hub overhead, and the
+maintenance/basing outputs.
 
 **Phase 3 — Q3, destination ranking.** `plan_from` for an airport and for a
 tail; memoize `route_spec`; move the scan out of the lock. *Asserted:* a full

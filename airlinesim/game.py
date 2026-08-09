@@ -799,6 +799,44 @@ class GameSession:
         except ValueError as e:
             return {"error": str(e)}
 
+    def plan_pair(self, origin: str, dest: str, service_tier: int = 2,
+                  fare_vs_reference: float = 1.0) -> dict:
+        """
+        "I want to fly ORD-LGA. What can do it, and where does the aeroplane
+        come from?"
+
+        Read-only — the same shape as `merger_candidates()`: an itemised
+        "should I?" screen that states its own reasoning and commits nothing.
+        Execution goes through the existing actions (`acquire_aircraft`,
+        `open_route`, `hire_crew`, `set_hub`), which is why the planner needs
+        no command of its own.
+
+        The lock is held only long enough to resolve the two airports and the
+        player list. `plan_pair` itself reads immutable spec data and does not
+        mutate, and a scan under the lock would stall the tick loop, the
+        command API and the SSE stream together — the same failure mode
+        CLAUDE.md documents for unbounded clock catch-up.
+        """
+        from airlinesim import planner
+        with self.lock:
+            o = actions.airport(self.world, (origin or "").strip().upper())
+            d = actions.airport(self.world, (dest or "").strip().upper())
+            if o is None:
+                return {"error": f"unknown airport {origin}"}
+            if d is None:
+                return {"error": f"unknown airport {dest}"}
+            if o.iata == d.iata:
+                return {"error": "origin and destination must differ"}
+            world, players, me = self.world, list(self.engine.players), self._human()
+        try:
+            tier = max(1, min(3, int(service_tier)))
+            ratio = max(0.1, min(5.0, float(fare_vs_reference)))
+        except (TypeError, ValueError):
+            return {"error": "service_tier and fare_vs_reference must be numbers"}
+        return planner.plan_pair(world, players, me, o, d,
+                                 service_tier=tier,
+                                 fare_vs_reference=ratio).to_json()
+
     # -- snapshot projection (JSON-safe read model) ----------------------
     def snapshot(self) -> dict:
         with self.lock:
