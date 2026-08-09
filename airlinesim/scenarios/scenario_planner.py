@@ -58,12 +58,13 @@ Run:  airlinesim run planner
 """
 from __future__ import annotations
 
+import json
 import sys
 
 from airlinesim import actions
 from airlinesim.ai import AICarrierSubsystem, archetype
 from airlinesim.databuilder import build_world_from_data
-from airlinesim.engine import AircraftSpec
+from airlinesim.engine import AircraftSpec, AirportSpec
 
 CHECKS = []
 
@@ -736,17 +737,312 @@ def regenerate():
     print("}")
 
 
+# ============================================================
+# PHASE 1 — the extracted forecast
+# ============================================================
+
+def check_forecast(world, engine):
+    """
+    The forecast explains itself, and its parts add up.
+
+    `_evaluate` returned a bare `None` for everything it could not price, so
+    "why is the 787 not on this list?" was unanswerable. The extracted
+    forecast returns the case WITH its reasons; the AI wrapper collapses that
+    back to None, which is why the goldens still hold.
+    """
+    from airlinesim import planner
+    print("\n=== FORECAST ===")
+    players = list(engine.players)
+    player = players[0]
+    a320 = world.repo.get(AircraftSpec, "A320")
+    b77w = world.repo.get(AircraftSpec, "B77W")
+    ord_, lga = actions.airport(world, "ORD"), actions.airport(world, "LGA")
+
+    ok = planner.evaluate_route(world, players, ord_, lga, a320, 3)
+    check("a priceable case comes back viable", ok.viable,
+          f"ORD-LGA A320 x3: {ok.pax:.0f} pax, ${ok.contribution:,.0f}/day "
+          f"contribution, tier '{ok.data_tier}'")
+    check("cost lines add up to the contribution the AI reads",
+          abs((ok.revenue - ok.costs.total) - ok.contribution) < 1e-9,
+          f"revenue ${ok.revenue:,.0f} - costs ${ok.costs.total:,.0f}")
+    check("the itemised lines sum to the cost total",
+          abs((ok.costs.fuel + ok.costs.maintenance + ok.costs.crew
+               + ok.costs.fees) - ok.costs.total) < 1e-9)
+    check("break-even fare covers costs at the forecast load",
+          abs(ok.break_even_fare * ok.pax - ok.costs.total) < 0.01,
+          f"break-even ${ok.break_even_fare:,.2f} vs fare ${ok.fare:,.2f}")
+    check("break-even load and fare agree with each other",
+          abs(ok.break_even_load * ok.seats_offered * ok.fare
+              - ok.costs.total) < 0.01,
+          f"break-even load {ok.break_even_load:.1%} at "
+          f"{ok.load_factor:.1%} forecast")
+
+    # LGA is 2,134 m; the 777-300ER needs 3,100 m to get airborne.
+    bad = planner.evaluate_route(world, players, ord_, lga, b77w, 1)
+    check("an infeasible pairing explains itself instead of vanishing",
+          not bad.feasible and bool(bad.reasons),
+          "; ".join(bad.reasons) or "NO REASONS GIVEN")
+    check("the runway rejection names the field and both numbers",
+          any("LGA" in r and "runway" in r for r in bad.reasons))
+
+    # Suitability is the OTHER rejection path — what open_route would refuse.
+    sr = planner.suitability_reasons(world, ord_, lga, b77w)
+    from airlinesim.route import route_can_fly
+    spec = planner.route_spec_for(world, ord_, lga)
+    _ok2, verbatim = route_can_fly(spec, b77w, ord_, lga)
+    check("suitability reasons are route_can_fly's, verbatim",
+          list(sr) == list(verbatim),
+          "; ".join(sr) if sr else "route_can_fly raised nothing")
+    check("suitability and physics are DIFFERENT checks",
+          set(sr) != set(bad.reasons),
+          "route_can_fly reads the route's banded requirement and the seat "
+          "window; the forecast reads the aircraft's own takeoff length")
+
+    # Provenance must survive to the caller, or a fitted estimate reads as a
+    # measurement.
+    thin = planner.evaluate_route(world, players, actions.airport(world, "FAT"),
+                                  actions.airport(world, "BTV"), a320, 1)
+    check("every forecast carries its corpus tier",
+          bool(ok.data_tier) and bool(thin.data_tier),
+          f"ORD-LGA '{ok.data_tier}', FAT-BTV '{thin.data_tier}'")
+    check("a measured pair and a fitted one are distinguishable",
+          ok.data_tier != thin.data_tier)
+    check("the forecast is JSON-safe", isinstance(ok.to_json(), dict)
+          and isinstance(json.dumps(ok.to_json()), str))
+    _ = player  # the forecast does not read the carrier; frequency does
+
+
+def check_frequency(world, engine):
+    """
+    All four limits, and each one reachable as the binding one.
+
+    A limit that can never bind is decoration. Two of these were nearly
+    that, and finding out is what the check is for — see the notes on each
+    case below.
+    """
+    from airlinesim import planner
+    from airlinesim.crew import DEFAULT_DUTY_LIMITS, DutyLimits
+    print("\n=== FREQUENCY ===")
+    players = list(engine.players)
+    player = players[0]
+    a320 = world.repo.get(AircraftSpec, "A320")
+    a321 = world.repo.get(AircraftSpec, "A321")
+    b789 = world.repo.get(AircraftSpec, "B789")
+
+    def plan(o, d, spec, demand, share, **kw):
+        return planner.frequency_plan(
+            world, players, actions.airport(world, o), actions.airport(world, d),
+            spec, demand_per_day=demand, share=share, **kw)
+
+    names = [l.name for l in plan("ORD", "LGA", a320, 3000, 0.4).limits]
+    check("all four limits are reported, in a fixed order",
+          names == ["airframe", "demand", "gates", "crew"], str(names))
+
+    # A TYPE RATING IS PART OF THE ANSWER. The carrier's pilots are rated
+    # A319/A320/A321; its cabin crew carry no certs and so are universal. A
+    # 787 therefore has ten cabin crew and NO cockpit crew available at its
+    # own hub, and the planner says the route would be grounded rather than
+    # quietly assuming pilots appear. Every case below uses a rated type
+    # except the one testing exactly this.
+    cockpit, cabin = planner.available_crews(player, "ORD", b789)
+    check("an unrated type has no crew, however deep the pool",
+          cockpit == 0 and cabin > 0,
+          f"B789 at ORD: {cockpit} cockpit, {cabin} cabin — the pilots are "
+          f"rated {a320.type_rating or 'A320-family'}, not 787")
+
+    binding = {}
+
+    # AIRFRAME: a ~5.6h leg is an 11h rotation, so one aeroplane manages one a
+    # day whatever the market or the crew room could support.
+    p_af = plan("ORD", "ANC", a320, 9_000, 0.9, player=player)
+    binding["airframe"] = p_af.binding.name
+
+    # DEMAND: a big narrowbody against a thin market. Plenty of aeroplane and
+    # plenty of crew; nobody to carry.
+    p_dm = plan("ORD", "LGA", a321, 1_200, 0.25, player=player)
+    binding["demand"] = p_dm.binding.name
+
+    # GATES: the corpus has 2-gate fields. Squeeze one and the schedule is
+    # capped by the airport, not by anything the carrier owns.
+    small = min((a for a in world.repo.all(AirportSpec) if a.total_gates > 0),
+                key=lambda a: (a.total_gates, a.iata))
+    saved = world.gates[small.iata].total_gates
+    world.gates[small.iata].total_gates = 1
+    p_gt = plan("ORD", small.iata, a320, 5_000, 0.9, player=player)
+    binding["gates"] = p_gt.binding.name
+    world.gates[small.iata].total_gates = saved
+
+    # CREW: no crew based at a field the carrier does not serve, so the route
+    # is GROUNDED — the one case this limit reads zero rather than "thin".
+    p_cw = plan("BTV", "ORD", a320, 5_000, 0.9, player=player)
+    binding["crew"] = p_cw.binding.name
+
+    for want in ("airframe", "demand", "gates", "crew"):
+        got = binding[want]
+        detail = {"airframe": p_af, "demand": p_dm,
+                  "gates": p_gt, "crew": p_cw}[want]
+        check(f"the {want} limit is reachable as the binding one", got == want,
+              f"binds on '{got}' at {detail.rotations}/day — "
+              f"{detail.binding.detail}")
+
+    check("no plan exceeds any of its own limits",
+          all(p.rotations <= min(l.value for l in p.limits) + 1e-9
+              for p in (p_af, p_dm, p_gt, p_cw)))
+    check("a grounded plan is zero rotations, not a small number",
+          p_cw.rotations == 0, p_cw.binding.detail)
+
+    # The airframe limit must charge the RETURN leg. databuilder's own
+    # frequency divides by one leg and so permits about twice what a tail
+    # flying the out-and-back can manage; the planner must not repeat it.
+    one_way = planner.airframe_frequency(2000, 850, rotation=False)
+    both = planner.airframe_frequency(2000, 850, rotation=True)
+    check("the airframe limit charges the return leg to the same tail",
+          abs(one_way - 2 * both) < 1e-9,
+          f"{both:.2f}/day as a rotation vs {one_way:.2f} as a bare leg")
+
+    # HOW SLACK THE CREW LIMIT IS, quantified. Crew binds against the airframe
+    # exactly when N x max_daily_flight_hours < DAILY_UTILIZATION_H / 2 x
+    # CREW_DEPTH, and the leg length cancels out of both sides — so with the
+    # shipped constants it is 17.5, and a single rated crew pair at the 9-hour
+    # cap (9 < 17.5) binds while two (18) do not. That is a narrow window, and
+    # worth knowing before reading much into this limit on a well-staffed
+    # station. DutyLimits is authorable reference data, so a stricter regime
+    # widens it.
+    threshold = planner.DAILY_UTILIZATION_H / 2 * planner.CREW_DEPTH
+    thin, _d1 = planner.crew_frequency(1200, 850, 1, 1)
+    deep, _d2 = planner.crew_frequency(1200, 850, 2, 2)
+    af_same = planner.airframe_frequency(1200, 850)
+    check("one rated crew pair binds; two do not",
+          thin < af_same <= deep,
+          f"1 pair {thin:.2f}/day, airframe {af_same:.2f}/day, "
+          f"2 pairs {deep:.2f}/day — crew binds while "
+          f"N x {DEFAULT_DUTY_LIMITS.max_daily_flight_hours:.0f}h < "
+          f"{threshold:.1f}")
+
+    # And it binds inside a real plan, not only in the arithmetic: one hired
+    # crew pair at a station the carrier does not otherwise staff.
+    actions.hire_crew(world, player, "COCKPIT", "BUF", 2, 220.0,
+                      (a320.type_rating or "A320",))
+    actions.hire_crew(world, player, "CABIN", "BUF", 4, 60.0, ())
+    p_thin = plan("BUF", "ORD", a320, 5_000, 0.9, player=player)
+    check("a thin crew pool binds inside a real plan",
+          p_thin.binding.name == "crew" and p_thin.rotations > 0,
+          f"BUF-ORD on one hired crew pair: {p_thin.rotations}/day, "
+          f"binding '{p_thin.binding.name}' — {p_thin.binding.detail}")
+    _ = DutyLimits  # authorable reference data; see the note above
+
+    check("crew requirement and crew ceiling are exact inverses",
+          _crew_inverse_holds(),
+          "a pool of N sustains N x max_daily / CREW_DEPTH block hours, which "
+          "is ai._crew_target solved for N")
+
+
+def check_quote():
+    """
+    `Bank.quote()` must answer what `try_acquire()` would DO.
+
+    The planner has to tell a player "you can afford this aeroplane" before
+    they buy it, and the only other way to answer was to re-derive the
+    leverage cap and the payment schedule inside the planner. That second copy
+    would be the one saying "affordable" the moment the two drifted — so the
+    check that matters is not that the arithmetic is pretty, it is that the
+    verdict matches the real thing on every method and both outcomes.
+
+    Runs on its own world because it spends money.
+    """
+    from airlinesim.actions import METHOD_BY_NAME, TERMS_BY_METHOD, bank_for
+    print("\n=== ACQUISITION QUOTES ===")
+    world, engine = golden_world()
+    player = engine.players[0]
+    bank = bank_for(world)
+    spec = world.repo.get(AircraftSpec, "A320")
+
+    lease = bank.quote(player, spec, METHOD_BY_NAME["LEASE"],
+                       TERMS_BY_METHOD[METHOD_BY_NAME["LEASE"]])
+    check("a lease quotes no capital outlay and a monthly rent",
+          lease.approved and lease.upfront == 0.0 and lease.monthly > 0,
+          f"${lease.monthly:,.0f}/mo (${lease.daily:,.0f}/day) for "
+          f"{lease.term_months} months")
+
+    agree, tested = True, []
+    for name in ("CASH", "FINANCE", "LEASE"):
+        method = METHOD_BY_NAME[name]
+        terms = TERMS_BY_METHOD[method]
+        for cash in (spec.list_price * 4, 1.0):
+            player.ledger.cash = cash
+            q = bank.quote(player, spec, method, terms)
+            got = bank.try_acquire(player, spec, f"Q-{name}-{cash:.0f}",
+                                   method, terms, [])
+            tested.append(f"{name}@${cash:,.0f}:{q.approved}/{got}")
+            if q.approved != got:
+                agree = False
+    check("the quote's verdict matches try_acquire on every method, "
+          "flush and broke", agree, "  ".join(tested))
+
+    player.ledger.cash = spec.list_price * 4
+    q = bank.quote(player, spec, METHOD_BY_NAME["FINANCE"],
+                   TERMS_BY_METHOD[METHOD_BY_NAME["FINANCE"]])
+    check("a financed quote states the down payment and the debt separately",
+          abs(q.upfront + q.financed - spec.list_price) < 0.01 and q.monthly > 0,
+          f"${q.upfront:,.0f} down + ${q.financed:,.0f} financed, "
+          f"${q.monthly:,.0f}/mo over {q.term_months} months")
+    check("a refused quote says why, in words a player can act on",
+          _refusal_explains(bank, player, spec))
+
+
+def _refusal_explains(bank, player, spec) -> bool:
+    """A denial with no reason is the thing this replaced."""
+    from airlinesim.actions import METHOD_BY_NAME, TERMS_BY_METHOD
+    player.ledger.cash = 1.0
+    for name in ("CASH", "FINANCE"):
+        method = METHOD_BY_NAME[name]
+        q = bank.quote(player, spec, method, TERMS_BY_METHOD[method])
+        if q.approved or not q.reason or q.reason == "ok":
+            return False
+    return True
+
+
+def _crew_inverse_holds() -> bool:
+    """
+    `crew_frequency` must invert `ai._crew_target` exactly, or the planner
+    tells a player to hire a number that then cannot fly the schedule it was
+    hired for.
+    """
+    import math
+
+    from airlinesim import planner
+    from airlinesim.crew import DEFAULT_DUTY_LIMITS
+    from airlinesim.route import block_hours
+
+    per_crew = DEFAULT_DUTY_LIMITS.max_daily_flight_hours
+    for dist, cruise, crews in ((1200, 850, 3), (400, 780, 2), (3800, 900, 6)):
+        freq, _d = planner.crew_frequency(dist, cruise, crews, crews)
+        leg = block_hours(dist, cruise)
+        daily_bh = leg * freq
+        # ai._crew_target's arithmetic, run backwards
+        need = daily_bh / per_crew * planner.CREW_DEPTH
+        if abs(need - crews) > 1e-9:
+            return False
+        # and the rounding the AI applies must never ask for fewer
+        if math.ceil(need) < crews:
+            return False
+    return True
+
+
 def main():
     if "--regenerate" in sys.argv:
         regenerate()
         return
-    print("ROUTE PLANNER CHECK — phase 0: the goldens")
+    print("ROUTE PLANNER CHECK")
     print("=" * 70)
     world, engine = golden_world()
     live = evaluate_all(world, engine)
     check_fixture(world)
     check_coverage(live)
     check_goldens(live)
+    check_forecast(world, engine)
+    check_frequency(world, engine)
+    check_quote()
     passed = sum(1 for _, ok in CHECKS if ok)
     print("\n" + "=" * 70)
     print(f"{passed}/{len(CHECKS)} checks passed — "

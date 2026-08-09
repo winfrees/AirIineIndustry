@@ -250,6 +250,45 @@ class Lease:
         return self.months_elapsed >= self.term_months
 
 
+DAYS_PER_MONTH = 30.4375
+
+
+@dataclass(frozen=True)
+class AcquisitionQuote:
+    """
+    What an acquisition would cost and whether it would fund — priced WITHOUT
+    committing anything.
+
+    This exists because the route planner has to tell a player "you can
+    afford this aeroplane" before they buy it, and the only other way to
+    answer that was to re-derive the leverage cap and the payment schedule in
+    the planner. That second copy would be the one that said "affordable" the
+    moment the two drifted. `Bank.acquire()` prices through here too, so the
+    quote and the charge cannot disagree.
+    """
+    method: "AcquisitionMethod"
+    list_price: float
+    upfront: float           # cash needed now
+    monthly: float           # recurring payment or rent
+    term_months: int
+    financed: float          # debt taken on (0 for cash and lease)
+    approved: bool
+    reason: str
+
+    @property
+    def daily(self) -> float:
+        return self.monthly / DAYS_PER_MONTH
+
+    def to_json(self) -> dict:
+        return {"method": self.method.name, "list_price": self.list_price,
+                "upfront": round(self.upfront, 2),
+                "monthly": round(self.monthly, 2),
+                "daily": round(self.daily, 2),
+                "term_months": self.term_months,
+                "financed": round(self.financed, 2),
+                "approved": self.approved, "reason": self.reason}
+
+
 @dataclass
 class Bank:
     """
@@ -268,6 +307,58 @@ class Bank:
         projected = self._outstanding_debt(player) + amount
         cash = max(1.0, player.ledger.cash)
         return (projected / cash) <= self.max_debt_to_cash
+
+    def quote(self, player, spec, method: AcquisitionMethod,
+              terms: FinancingTerms) -> AcquisitionQuote:
+        """
+        Price an acquisition without executing it. Read-only.
+
+        `approved` answers the same question `try_acquire()` would: for cash,
+        is there enough of it; for finance, does the leverage cap allow it AND
+        is the down payment covered; for a lease, always — no capital changes
+        hands, which is the whole point of one.
+        """
+        price = spec.list_price
+        cash = player.ledger.cash
+
+        if method == AcquisitionMethod.BUY_CASH:
+            ok = price <= cash
+            return AcquisitionQuote(
+                method, price, upfront=price, monthly=0.0, term_months=0,
+                financed=0.0, approved=ok,
+                reason="ok" if ok else
+                       f"insufficient cash: ${cash:,.0f} available, "
+                       f"${price:,.0f} needed")
+
+        if method == AcquisitionMethod.FINANCE:
+            down = price * terms.down_payment_frac
+            financed = price - down
+            monthly = Loan(loan_id="", owner_id="", principal_initial=financed,
+                           remaining=financed, annual_rate=terms.annual_rate,
+                           term_months=terms.term_months).monthly_payment()
+            if not self.can_finance(player, financed):
+                reason = ("credit denied: financing this would exceed the "
+                          f"{self.max_debt_to_cash:.0f}x leverage cap")
+                approved = False
+            elif down > cash:
+                reason = (f"insufficient cash for the down payment: "
+                          f"${cash:,.0f} available, ${down:,.0f} needed")
+                approved = False
+            else:
+                reason, approved = "ok", True
+            return AcquisitionQuote(
+                method, price, upfront=down, monthly=monthly,
+                term_months=terms.term_months, financed=financed,
+                approved=approved, reason=reason)
+
+        if method == AcquisitionMethod.OPERATING_LEASE:
+            monthly = (price * terms.lease_rate_frac_per_year) / 12.0
+            return AcquisitionQuote(
+                method, price, upfront=0.0, monthly=monthly,
+                term_months=terms.lease_term_months, financed=0.0,
+                approved=True, reason="ok — no capital outlay")
+
+        raise ValueError(f"unknown acquisition method {method}")
 
     def try_acquire(self, player, spec, tail_number: str,
                     method: AcquisitionMethod, terms: FinancingTerms,
@@ -297,17 +388,24 @@ class Bank:
 
         CAUTION: None means "denied" for FINANCE/OPERATING_LEASE but "succeeded"
         for BUY_CASH. Use try_acquire() unless you need the returned object.
+
+        The AMOUNTS come from `quote()`, so what the planner shows a player
+        before they commit is arithmetically the same thing they are charged.
+        The control flow stays here: the two ways a financed purchase can fail
+        — the leverage cap and the down payment — log differently, and
+        collapsing them into the quote's single `approved` would lose the
+        CREDIT DENIED line.
         """
         price = spec.list_price
+        q = self.quote(player, spec, method, terms)
 
         if method == AcquisitionMethod.BUY_CASH:
-            if not player.ledger.debit(price, f"buy {tail_number} ({spec.display_name})", log):
+            if not player.ledger.debit(q.upfront, f"buy {tail_number} ({spec.display_name})", log):
                 return None
             return None
 
         if method == AcquisitionMethod.FINANCE:
-            down = price * terms.down_payment_frac
-            financed = price - down
+            down, financed = q.upfront, q.financed
             if not self.can_finance(player, financed):
                 log.append(f"  CREDIT DENIED: financing {tail_number} would exceed leverage cap")
                 return None

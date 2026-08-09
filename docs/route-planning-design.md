@@ -427,12 +427,36 @@ accidental change to AI behaviour.
 `scenarios/scenario_planner.py` with nothing but that assertion, wired into
 `cli.py` and `tools/smoke_windows_bundle.py`. Green before anything moves.
 
-**Phase 1 — the shared forecast.** `planner.py` with `RouteForecast`,
-`evaluate_route`, `frequency_plan`; `ai._evaluate` becomes a wrapper; extract
-`Bank.quote()` and `databuilder.daily_frequency`'s demand term. *Asserted:*
-goldens reproduce to the cent; the four frequency limits are each reachable
-and correctly named as binding; an infeasible pairing returns
-`route_can_fly`'s reasons verbatim.
+**Phase 1 — the shared forecast.** ✅ *Landed.* `planner.py` with
+`RouteForecast`, `evaluate_route`, `frequency_plan`; `ai._evaluate` is a
+wrapper; `Bank.quote()` and `databuilder.daily_frequency`'s demand term
+extracted. All 450 goldens reproduce to the cent. Two things the plan had
+wrong, corrected in the building:
+
+- **`route_can_fly` is NOT inside `evaluate_route`.** The two check different
+  things — `route_can_fly` reads the ROUTE's banded `min_runway_m` and the
+  corpus seat window, while the forecast reads the AIRCRAFT's own takeoff
+  length, range and the plan's stage band. Folding suitability into the
+  forecast would also have made the AI start rejecting pairs it has always
+  accepted (it has never consulted the seat window when scoring), which is a
+  balance change wearing a refactor's clothes. `planner.suitability_reasons`
+  is a separate function returning `route_can_fly`'s reasons verbatim, and
+  the pair screen reports both side by side: one is what will block the
+  button, the other is what is true.
+- **The crew limit is on the POOL, not on one crew, and it is slack.** It
+  binds against the airframe exactly when
+  `N x max_daily_flight_hours < DAILY_UTILIZATION_H / 2 x CREW_DEPTH` — leg
+  length cancels out of both sides — so with the shipped constants the
+  threshold is 17.5 and a single rated crew pair at the 9-hour cap binds
+  while two do not. Worth knowing before reading much into this limit at a
+  well-staffed station. It is sized as the exact inverse of `ai._crew_target`
+  so requirement and ceiling cannot drift, and the scenario asserts that
+  inversion directly.
+
+Also found and now asserted: a type rating is part of the answer. The starting
+carrier has ten cabin crew and ten A320-family pilots at ORD, so a 787 has
+**zero** available cockpit crew there and the planner reports the route
+grounded rather than assuming pilots appear.
 
 **Phase 2 — Q1, pair mode, end to end.** `plan_pair`,
 `GameSession.plan_pair`, `GET /api/plan`, a first panel with the ranked

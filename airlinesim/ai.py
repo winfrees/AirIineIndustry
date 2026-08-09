@@ -1066,86 +1066,63 @@ class AICarrierSubsystem(Subsystem):
         mem.scan_cursor += max(1, checked)
         return best
 
-    def _market_estimate(self, world, origin, dest, dist):
+    # How much of the aircraft's own seats a candidate is expected to fill.
+    # Kept as the AI's own figure rather than planner's default so the two can
+    # be tuned apart later without either moving by accident.
+    LOAD_CAP = 0.75
+
+    def _policy(self, arch, origin, dest) -> "planner.ForecastPolicy":
         """
-        (daily demand, reference fare) for a candidate pair, from the same
-        corpus the player's route-opening consults — measured where BTS has
-        the pair, a fitted estimate where it doesn't. The AI gets no private
-        oracle: if the data is a guess for the player, it's a guess here too.
+        This archetype's assumptions, in the form the shared forecast takes.
+
+        `fit` is the one term the player's planner does NOT set: it is how
+        well a city pair suits THIS business model, applied to the share
+        rather than as a hard filter, so a premium carrier can still be
+        tempted into a secondary field by a big enough market.
         """
-        spec = _spec_for(world, origin, dest)
-        if spec is not None:
-            fare = getattr(spec, "reference_price", 0.0) or 0.0
-            if not fare:
-                provider = getattr(world, "route_data", None)
-                if provider is not None:
-                    fare, _src = provider.suggested_price(origin.iata, dest.iata)
-            return float(spec.base_demand_per_day), float(fare or 200.0)
-        return 400.0, 200.0
+        from airlinesim import planner
+        return planner.ForecastPolicy(
+            service_tier=arch.service_tier,
+            fare_vs_reference=arch.fare_vs_reference,
+            fit=route_fit(arch, origin, dest),
+            load_cap=self.LOAD_CAP,
+            min_stage_km=arch.min_stage_km,
+            max_stage_km=arch.max_stage_km,
+            fuel_price_per_l=self.ASSUMED_FUEL_PRICE,
+            crew_cost_per_block_hour=planner.AI_CREW_COST_PER_BLOCK_HOUR,
+        )
+
+    # The frequency a candidate is scored at. Two below the archetype's
+    # per-plane maximum and never more than three: a candidate is judged on a
+    # schedule the carrier could actually staff on day one, not on the fleet's
+    # theoretical ceiling. `planner.frequency_plan` computes what is genuinely
+    # achievable; the AI has never used it and moving it onto that would be a
+    # balance change, not a refactor.
+    def _scoring_frequency(self, arch) -> int:
+        return max(1, min(3, arch.max_freq_per_plane - 2))
 
     def _evaluate(self, world, p, arch, plane, origin, dest):
         """
         Estimate a candidate's daily profit. Returns ``(profit, ref_fare)``,
-        or None if the aircraft physically can't serve the pair.
+        or None if the aircraft can't serve the pair or there is no market.
 
-        Deliberately a rough forecast, not a simulation: it prices the
-        aircraft's own seats against a share of the market and subtracts the
-        costs the engine will actually charge (fuel, crew, landing, gate,
-        amenities, baggage). It does NOT model how rivals will respond — an
-        AI that could perfectly predict the arbiter would be unbeatable, and
-        the resulting errors are what make it possible to out-plan.
+        A THIN WRAPPER over `planner.evaluate_route` — the forecast itself
+        lives there so the player's planning screens and this share one set of
+        numbers. See `planner`'s docstring for why that matters, and
+        `scenario_planner` for the 450 goldens asserting the extraction did
+        not move a single answer.
+
+        The profit returned is a CONTRIBUTION MARGIN: it excludes lease rent,
+        loan service, payroll and hub overhead, which is exactly why the AI
+        manages to operating cash flow (`_update_cash_flow`) and not to this.
         """
-        from airlinesim.route import haversine, block_hours, service_desirability
-
-        dist = haversine(origin.lat, origin.lon, dest.lat, dest.lon)
-        if dist < arch.min_stage_km or dist > arch.max_stage_km:
+        from airlinesim import planner
+        forecast = planner.evaluate_route(
+            world, self._players, origin, dest, plane.spec,
+            self._scoring_frequency(arch), self._policy(arch, origin, dest))
+        if not forecast.viable:
             return None
-        spec = plane.spec
-        if spec.max_range_km < dist:
-            return None
-        if (origin.runway_length_m < spec.takeoff_runway_m
-                or dest.runway_length_m < spec.takeoff_runway_m):
-            return None
-
-        # Demand and a starting fare come from the same corpus the player's
-        # route-opening uses — measured where BTS has the pair, a fitted
-        # estimate where it doesn't. No private AI oracle.
-        demand, ref_fare = self._market_estimate(world, origin, dest, dist)
-
-        freq = max(1, min(3, arch.max_freq_per_plane - 2))
-        seats = spec.max_seats * freq
-
-        # share of the market this offer can expect: every operator already
-        # in the metro-pair dilutes it, desirability lifts it
-        mkey = market_key_for(world, origin, dest)
-        incumbents = sum(1 for pl in self._players
-                         for o in pl.route_ops if market_key(o.spec) == mkey)
-        desir = service_desirability(arch.service_tier, origin.access_index,
-                                     dest.access_index)
-        share = desir / (1.0 + incumbents)
-        # How well this city pair suits the business model. Applied to the
-        # SHARE rather than as a hard filter: a premium carrier can still be
-        # tempted into a secondary field by a big enough market, it just needs
-        # the market to be worth the mismatch.
-        share *= route_fit(arch, origin, dest)
-        pax = min(seats * 0.75, demand * share)
-        if pax <= 0:
-            return None
-
-        fare = ref_fare * arch.fare_vs_reference
-        revenue = pax * fare
-
-        bh = block_hours(dist, spec.cruise_speed_kmh) * freq
-        fuel = spec.fuel_burn_lph * bh * 0.9
-        crew = (220 * 2 + 60 * 4) * bh
-        maint = spec.maint_cost_per_hour * bh
-        fees = 0.0
-        for ap, landings in ((dest, freq), (origin, 0)):
-            fees += ap.landing_fee * landings
-            fees += ap.fee_at_tier(ap.gate_fee_by_tier, arch.service_tier) * freq
-            fees += (ap.fee_at_tier(ap.amenities_fee_by_tier, arch.service_tier)
-                     + ap.fee_at_tier(ap.baggage_fee_by_tier, arch.service_tier)) * pax
-        return revenue - (fuel + crew + maint + fees), ref_fare
+        return forecast.contribution, forecast.reference_fare
 
     # ------------------------------------------------------------------
     # FLEET
@@ -1448,17 +1425,8 @@ class AICarrierSubsystem(Subsystem):
                 "cash_flow_per_day": round(mem.cash_flow_per_day, 2)}
 
 
-def market_key_for(world, origin, dest) -> str:
-    """The demand pool an airport pair would draw from."""
-    spec = _spec_for(world, origin, dest)
-    return market_key(spec) if spec is not None else f"{origin.iata}-{dest.iata}"
-
-
-def _spec_for(world, origin, dest):
-    provider = getattr(world, "route_data", None)
-    if provider is None:
-        return None
-    try:
-        return provider.route_spec(origin.iata, dest.iata)
-    except Exception:
-        return None
+# `market_key_for` and `_spec_for` moved to `planner.py` along with the route
+# forecast that was their only caller. Re-exported here so the name still
+# resolves for anything reaching for the AI's copy.
+from airlinesim.planner import market_key_for            # noqa: E402,F401
+from airlinesim.planner import route_spec_for as _spec_for  # noqa: E402,F401

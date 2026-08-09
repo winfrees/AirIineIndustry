@@ -274,9 +274,13 @@ def choose_aircraft(route_spec, fleet: list):
 # works an airframe. Real ORD-LGA is served by several carriers at high
 # frequency; a single op at one flight a day would fly ~50% full against a
 # 3,400 px/day market and make the corpus look wrong when it isn't.
-CARRIER_MARKET_SHARE = 0.45      # two carriers, neither expecting the whole market
-DAILY_UTILIZATION_H = 14.0       # airframe hours available per day
-CREW_DEPTH = 2.5                 # crews per op based at a station (rest rotation)
+#
+# These now live in `planner.py` and are imported rather than redeclared, so
+# the frequency a world is BUILT with and the frequency the route planner
+# PREDICTS come off one set of figures. Re-exported under their original names
+# because `ai.py` and the scenarios import them from here.
+from airlinesim.planner import (CARRIER_MARKET_SHARE, CREW_DEPTH,  # noqa: E402
+                                DAILY_UTILIZATION_H, demand_frequency)
 
 
 def daily_frequency(route_spec, aircraft_spec) -> int:
@@ -288,10 +292,18 @@ def daily_frequency(route_spec, aircraft_spec) -> int:
     rotation, and every load factor reads as a capacity failure rather than a
     market outcome. Crew duty limits and gate contention still cut this down
     during the tick — that's the simulation doing its job, not a miscount.
+
+    NOTE the airframe cap here divides by ONE LEG, so it permits about twice
+    what a tail flying the out-and-back can actually manage. It is left as it
+    is because every data world is built on it and changing it would move all
+    of them; `planner.airframe_frequency` charges the return leg properly and
+    is what the planner recommends against. Where the two disagree, the
+    planner is the accurate one.
     """
     from airlinesim.route import block_hours
     seats = max(1, aircraft_spec.max_seats)
-    want = (route_spec.base_demand_per_day * CARRIER_MARKET_SHARE) / (seats * 0.85)
+    want = demand_frequency(route_spec.base_demand_per_day,
+                            CARRIER_MARKET_SHARE, seats)
     block = block_hours(route_spec.distance_km, aircraft_spec.cruise_speed_kmh)
     by_airframe = max(1, int(DAILY_UTILIZATION_H / max(0.5, block)))
     return max(1, min(int(round(want)) or 1, by_airframe))
