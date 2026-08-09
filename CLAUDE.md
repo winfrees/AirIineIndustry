@@ -20,6 +20,8 @@ constraint enforcement — not partial stubs.
                         #       SimulationEngine tick loop
       explorer.py       # outcome-space exploration: fork a state, branch it,
                         #   run N cycles, test a derivation, repeat
+      planner.py        # ROUTE PLANNING: the shared route forecast (ai.py calls
+                        #   it too), frequency limits, crew and maintenance needs
       gamelog.py        # rotating file log for a live session (debug aid)
       crew.py           # duty/rest limits, rostering, positioning, deadheading
       route.py          # market segments, stage economics, equipment/crew suitability
@@ -94,6 +96,7 @@ constraint enforcement — not partial stubs.
     airlinesim run databuilt         # engine running on real BTS routes
     airlinesim run refresh_cx        # corpus-refresh logic (offline)
     airlinesim run explorer          # outcome-explorer + engine-determinism check
+    airlinesim run planner           # route planner: forecast, goldens, map layer
     airlinesim run cabin             # cabin geometry, seat fitting, per-cabin fares
     airlinesim run weather           # clock resolution, weather, disruption chain
     airlinesim run alliance          # feed, alliances, valuation, mergers
@@ -557,6 +560,99 @@ still answers "what is a seat in this class worth?". Keep that split.
   seats displace far more than 26 economy seats) — those aircraft flew with
   capacity that didn't exist. It goes through the fitter now; `airlinesim run
   cabin` pins the old arithmetic as over-capacity so it can't come back.
+
+## Route planning (`planner.py`)
+
+A read-only planning surface: what a route would earn, what could fly it,
+where the aeroplane comes from, and what crewing and maintaining it takes.
+Design and the phase-by-phase record: `docs/route-planning-design.md`.
+`airlinesim run planner` pins all of it (112 checks).
+
+- **ONE FORECAST, NOT TWO.** `ai._evaluate()` was the engine's route forecast
+  and the arithmetic three AI carriers plan with. A second one written for the
+  player would have drifted, and the drift would land on the player — a
+  planner promising $41k/day where the engine charges costs producing $12k/day
+  means being out-planned for invisible reasons. So it was EXTRACTED to
+  `planner.evaluate_route()` and `ai._evaluate` is a thin wrapper. Same rule
+  as `cabin.fit_layout` behind three entry points and `gravity_features`
+  shared with `btsdata`.
+- **450 GOLDENS PIN THE AI'S ANSWERS AND MUST STAY.** `scenario_planner`
+  records `_evaluate`'s output over a fixed world (3 archetypes x 5 types x 30
+  pairs) and asserts it to the cent. They are not scaffolding: every
+  improvement to the PLAYER's forecast must not silently re-tune three AI
+  carriers. Improvements arrive as new `ForecastPolicy` values, never as edits
+  to the AI's path. A corpus refresh invalidates them legitimately —
+  `--regenerate`, after confirming the code is unchanged on the old corpus.
+- **TWO MARGIN LINES, and ranking on the wrong one recommends bankruptcy.**
+  `contribution` is what the engine charges a flight (what `last_profit`
+  reports, what the AI reads). `absorbed` also charges the ownership a plan
+  would ADD. Ranked on contribution alone an A350 topped ORD-DEN at $53k/day
+  and lost **$42k/day** once its lease was paid. Ownership is charged at the
+  LEASE rate however the aeroplane would be paid for — pricing a cash purchase
+  at $0/day ranked a $290M 787 as free — and only where metal must be
+  ACQUIRED, since a tail already owned is paid for either way.
+- **FLIGHT CREW IS A PURELY VARIABLE COST.** `OperationsSubsystem` bills
+  cockpit + cabin only for hours FLOWN, on CRUISE hours, and
+  `FinanceSubsystem`'s standing payroll covers ground/baggage/met/maintenance
+  staff — NOT flight crew. A crew that does not fly costs nothing. The
+  player's forecast charges the carrier's own rated crews at that base (market
+  rate where it has none) on cruise hours; the AI keeps its flat
+  $680/block-hour because its goldens pin it and over-stating a cost is the
+  safe direction for a rival. **Hub overhead is deliberately NOT amortised**
+  into a per-route margin — it is charged per hub per day whatever flies, so
+  any split across routes is arbitrary.
+- **FREQUENCY IS FOUR LIMITS AND THE BINDING ONE IS THE ANSWER.** Airframe,
+  demand, gates, crew — "6/day" is not actionable, "6/day, demand-limited, the
+  airframe could do 9" is. All four are asserted reachable as the binding
+  limit. An ADVISORY limit is reported but does not bind: a type the carrier
+  does not operate has no rated crew, and hiring is part of acquiring it.
+  The crew limit is structurally slack — it binds only when
+  `N x max_daily_flight_hours < DAILY_UTILIZATION_H / 2 x CREW_DEPTH` (17.5),
+  i.e. at most one rated crew pair at the default 9-hour cap.
+- **`route_can_fly` NEVER CHECKS THE AIRCRAFT'S OWN TAKEOFF LENGTH**, only the
+  ROUTE's banded `min_runway_m`. So the engine flies an A321 (2,300 m) into
+  LGA (2,134 m) and `databuilder` does exactly that on every data world. The
+  AI's evaluation has always checked the airframe figure. The planner reports
+  BOTH verdicts and takes the stricter line; `suitability_reasons` is a
+  separate function precisely so folding it into the forecast could not change
+  AI behaviour.
+- **AN AIRCRAFT IS PERMANENTLY WHERE IT WAS BASED.** `location_iata` is set at
+  acquisition and no subsystem updates it — no ferry flights, no
+  repositioning. A tail at LGA is not "available from ORD", and the planner
+  never ranks a plan that cannot start.
+- **THE SCAN MUST NOT RUN UNDER `GameSession.lock`.** A 300-destination x
+  16-type sweep is ~0.27 s; held across the lock that freezes the tick loop,
+  the command API and the SSE stream together. Both `plan_pair` and
+  `plan_from` take the lock only to resolve airports and copy the player list.
+  The scenario proves it from the other side — run the scan on a thread and
+  hammer the lock from another (212 ms of work, worst wait 0.0 ms).
+- **`RouteDataProvider.observation` and `route_spec` ARE MEMOIZED**, and
+  `observation` was the one that mattered: `_comparable` -> `_neighbour_season`
+  scans the whole route table, and it was 3.9 of the first scan's 4.9 seconds.
+  Safe because both are pure functions of committed immutable data returning
+  frozen dataclasses. Route opening and the AI's candidate search benefit too.
+- **CANDIDATES ON THE MAP ARE NOT ROUTES.** The `MAP.plan` layer draws
+  forecasts of routes that do not exist, so they are dashed, thinner and
+  rank-tinted where operated routes are solid, and the About dialog says so.
+  Same standard as the derived-aircraft-position note.
+- **MAP SELECTION WAS BROKEN AND IS NOW FIXED.** `pointerdown` calls
+  `setPointerCapture` so a drag that leaves the element still pans, and
+  pointer capture RETARGETS the compatibility `click` to the `<svg>`. So
+  `e.target.closest(".mapPlane")` always found nothing and clicking an
+  aircraft or route did nothing at all — the map was a poster, not a control
+  surface, from the moment zoom/pan landed. The handler now reads
+  `PAN.downTarget`. Related: `pointerup` no longer rebuilds the live layer on
+  a plain click (it removed the element the pointer went down on), and an
+  airport's hit target spans its dot AND its label. `scenario_map` could not
+  catch this — it asserts the handler exists in source, which it did.
+- **The corpus is DOUBLE-ENCODED.** `airports.csv.gz` holds
+  `c3 a2 c2 80 c2 93` where an en dash should be — UTF-8 of the Latin-1
+  misreading of `e2 80 93`, so MSP reads "Minneapolisâ€"Saint Paul". The
+  ingest reads everything as `latin-1` (`btsdata/download.py`,
+  `btsdata/ingest.py`), correct for BTS exports and wrong for OurAirports.
+  NOT fixed: the correct fix is per-source and needs the real downloads to
+  verify. The snapshot READER now specifies UTF-8 explicitly so it at least
+  decodes the same on every machine.
 
 ## The network map (third front end)
 
